@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1 - 2026-08-27
+
+- Accept JSON request bodies already decoded by a Phoenix or Plug parser while
+  retaining message-size, nesting, JSON-RPC validation, and recoverable-ID
+  checks.
+- Add Phoenix-style parser-pipeline and pass-through parser regressions using a
+  current legacy-initialize client request.
+
 ## 0.10.0 - 2026-08-27
 
 - Add an optional, idempotent Igniter installer for Phoenix hosts.

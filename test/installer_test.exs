@@ -20,7 +20,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert diff =~ "defmodule MetadataPlug do"
     assert diff =~ "AttestoMCP.Server.Phoenix.attesto_config(:sample)"
     assert diff =~ "Keyword.put_new_lazy(:server_version, &application_version/0)"
-    refute diff =~ "server_version: \"0.10.0\""
+    refute diff =~ "server_version: \"0.10.1\""
     assert diff =~ "Sample.MCP"
     assert diff =~ "server_status"
 

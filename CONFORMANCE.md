@@ -12,9 +12,11 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - commit archive SHA-256:
   `28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293`
-- candidate release: `0.10.0`
-- candidate source fingerprint:
+- evidence release: `0.10.0`
+- evidence source fingerprint:
   `35b985a6d0ffdc7ab7a0dd75983c69ae89d35000620a6f70079a711a586c6e32`
+- `0.10.1` patch-candidate source fingerprint:
+  `442e5e16946eb90149bef41acc0461f18f7d4fdd682dd40b226c3a9814d29543`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
@@ -24,10 +26,12 @@ The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
 does not embed a workstation path.
 
-The fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
+Each fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
 `scripts`, `test`, and reusable installer `fixtures` files in lexical order.
-The table below was rerun against that exact candidate after the Phoenix
-installer work; it is not inherited from the `0.9.0` run.
+The table below was rerun against the exact `0.10.0` release candidate after
+the Phoenix installer work; it is not inherited from the `0.9.0` run. The
+`0.10.1` patch candidate adds a local regression for request bodies decoded by
+a host parser; its official runner is repeated by the hosted release gate.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |

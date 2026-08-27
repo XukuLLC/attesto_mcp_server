@@ -28,7 +28,7 @@ defmodule AttestoMCP.Server.JSONRPC do
           optional(:extensions) => extensions()
         }
 
-  @spec decode(binary(), keyword()) ::
+  @spec decode(binary() | json_value(), keyword()) ::
           {:ok, request() | notification() | response()} | {:error, Error.t()}
   def decode(payload, opts \\ [])
 
@@ -56,10 +56,25 @@ defmodule AttestoMCP.Server.JSONRPC do
     end
   end
 
+  def decode(payload, opts) when is_map(payload) or is_list(payload) do
+    max = Keyword.get(opts, :max_bytes, 1_000_000)
+    max_depth = Keyword.get(opts, :max_depth, 64)
+
+    if within_depth?(payload, 0, max_depth) do
+      case Jason.encode(payload) do
+        {:ok, encoded} when byte_size(encoded) <= max -> validate(payload)
+        {:ok, _encoded} -> {:error, Error.parse(%{"reason" => "message_too_large"})}
+        {:error, _reason} -> {:error, Error.parse()}
+      end
+    else
+      {:error, Error.parse(%{"reason" => "message_too_deep"})}
+    end
+  end
+
   def decode(_, _), do: {:error, Error.parse()}
 
   @doc "Recovers a valid JSON-RPC ID from an otherwise invalid JSON object."
-  @spec recover_id(binary(), keyword()) :: id() | nil
+  @spec recover_id(binary() | json_value(), keyword()) :: id() | nil
   def recover_id(payload, opts \\ [])
 
   def recover_id(payload, opts) when is_binary(payload) do
@@ -68,6 +83,20 @@ defmodule AttestoMCP.Server.JSONRPC do
     with true <- byte_size(payload) <= max_bytes,
          true <- String.valid?(payload),
          {:ok, %{"id" => id}} <- Jason.decode(payload),
+         true <- valid_recoverable_id?(id) do
+      id
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def recover_id(%{"id" => id} = payload, opts) do
+    max_bytes = Keyword.get(opts, :max_bytes, 1_000_000)
+
+    with {:ok, encoded} <- Jason.encode(payload),
+         true <- byte_size(encoded) <= max_bytes,
          true <- valid_recoverable_id?(id) do
       id
     else

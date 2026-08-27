@@ -3,8 +3,10 @@ defmodule AttestoMCP.Server.Plug do
   Plug-compatible Streamable HTTP boundary for modern and legacy MCP.
 
   Every protected MCP leg authenticates through `AttestoMCP.Plug.Authenticate`
-  before request decoding or registry dispatch. Metadata discovery is the one
-  intentionally public route defined by RFC 9728. Hosts may select
+  before package-owned request decoding or registry dispatch. A host parser
+  placed earlier in the endpoint runs before this Plug and must apply its own
+  input limit. Metadata discovery is the one intentionally public route
+  defined by RFC 9728. Hosts may select
   request-scoped tool streams with `stream_tools` or `stream_all_tools`; both
   options are validated during `init/1`.
   """
@@ -2379,6 +2381,32 @@ defmodule AttestoMCP.Server.Plug do
   defp maybe_set_session_version(_server, _session_id, _request, _response, _era), do: :ok
 
   defp read_body_bounded(conn, max) do
+    case conn.body_params do
+      %Plug.Conn.Unfetched{} -> read_unparsed_body_bounded(conn, max)
+      %{} = body when map_size(body) == 0 -> read_empty_parsed_body_bounded(conn, body, max)
+      body when is_map(body) or is_list(body) -> read_parsed_body_bounded(conn, body, max)
+      _other -> read_unparsed_body_bounded(conn, max)
+    end
+  end
+
+  defp read_empty_parsed_body_bounded(conn, body, max) do
+    case read_body(conn, length: max) do
+      {:ok, "", conn} -> read_parsed_body_bounded(conn, body, max)
+      {:ok, raw_body, conn} -> {:ok, raw_body, conn}
+      {:more, _body, _conn} -> {:error, Error.parse(%{"reason" => "body_too_large"})}
+      {:error, _reason} -> {:error, Error.parse(%{"reason" => "body_read_failed"})}
+    end
+  end
+
+  defp read_parsed_body_bounded(conn, body, max) do
+    case Jason.encode(body) do
+      {:ok, encoded} when byte_size(encoded) <= max -> {:ok, body, conn}
+      {:ok, _encoded} -> {:error, Error.parse(%{"reason" => "body_too_large"})}
+      {:error, _reason} -> {:error, Error.parse(%{"reason" => "body_read_failed"})}
+    end
+  end
+
+  defp read_unparsed_body_bounded(conn, max) do
     case read_body(conn, length: max) do
       {:ok, body, conn} -> {:ok, body, conn}
       {:more, _body, _conn} -> {:error, Error.parse(%{"reason" => "body_too_large"})}

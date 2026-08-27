@@ -70,7 +70,10 @@ forward "/mcp", AttestoMCP.Server.Plug,
 
 Keep both forwards outside browser-session and CSRF pipelines. The metadata
 route is intentionally public; the MCP route authenticates every protected
-leg. Run the task again safely after an interrupted install: generated modules,
+leg. If the endpoint parses JSON before the router, configure that parser's
+body-length limit at least as strictly as the MCP Plug's `:max_body_bytes`;
+host parsing necessarily occurs before MCP authentication. Run the task again
+safely after an interrupted install: generated modules,
 configuration, supervision, routes, and tests are idempotent. Use Igniter's
 global `--dry-run` option to inspect the edits first. If the router cannot be
 selected uniquely, pass `--router MyAppWeb.Router`; the task refuses ambiguous

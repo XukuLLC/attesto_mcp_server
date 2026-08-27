@@ -473,6 +473,82 @@ defmodule AttestoMCP.Server.P12TransportTest do
     end
   end
 
+  test "POST accepts JSON already decoded by a Phoenix-style parser pipeline" do
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    {:ok, server} = Server.start_link([])
+
+    plug =
+      Server.Plug.init(server: server, path: "/mcp", auth: [config: config, resource: @resource])
+
+    payload = %{
+      "jsonrpc" => "2.0",
+      "id" => 1,
+      "method" => "initialize",
+      "params" => %{
+        "protocolVersion" => @legacy,
+        "capabilities" => %{},
+        "clientInfo" => %{"name" => "parsed-body-client", "version" => "1"}
+      }
+    }
+
+    parser = Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
+
+    parsed_conn =
+      conn(:post, "/mcp", Jason.encode!(payload))
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> Plug.Parsers.call(parser)
+
+    assert parsed_conn.body_params == payload
+
+    response = Server.Plug.call(parsed_conn, plug)
+
+    assert response.status == 200
+    assert Jason.decode!(response.resp_body)["result"]["protocolVersion"] == @legacy
+  end
+
+  test "POST reads raw JSON left behind by a pass-through parser" do
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    {:ok, server} = Server.start_link([])
+
+    plug =
+      Server.Plug.init(server: server, path: "/mcp", auth: [config: config, resource: @resource])
+
+    payload = %{
+      "jsonrpc" => "2.0",
+      "id" => 1,
+      "method" => "initialize",
+      "params" => %{
+        "protocolVersion" => @legacy,
+        "capabilities" => %{},
+        "clientInfo" => %{"name" => "pass-through-client", "version" => "1"}
+      }
+    }
+
+    parser = Plug.Parsers.init(parsers: [:urlencoded], pass: ["application/json"])
+
+    parsed_conn =
+      conn(:post, "/mcp", Jason.encode!(payload))
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> Plug.Parsers.call(parser)
+
+    assert %Plug.Conn.Unfetched{} = parsed_conn.body_params
+
+    # Some host pipelines mark a passed-through body as fetched without
+    # consuming it. Preserve raw-body compatibility for that connection state.
+    parsed_conn = %{parsed_conn | body_params: %{}}
+
+    response = Server.Plug.call(parsed_conn, plug)
+
+    assert response.status == 200
+    assert Jason.decode!(response.resp_body)["result"]["protocolVersion"] == @legacy
+  end
+
   test "many nil-ID notifications do not collide or leak ownership" do
     {:ok, server} = Server.start_link(max_concurrency: 64, per_principal_concurrency: 64)
     gate = make_ref()
