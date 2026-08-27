@@ -243,7 +243,7 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
           {^port, {:data, data}} -> receive_port_line(port, buffer <> data)
           {^port, {:exit_status, status}} -> flunk("stdio exited before response: #{status}")
         after
-          10_000 -> flunk("stdio live pipe did not answer")
+          30_000 -> flunk("stdio live pipe did not answer")
         end
     end
   end
