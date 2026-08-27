@@ -12,7 +12,7 @@ listed and is not treated as complete interoperability.
 
 | ID | Baseline requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.10.0 hosted verification is pending |
+| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.10.0 candidate verification passed and release is pending |
 | R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | released `attesto_mcp ~> 1.2.1`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
 | R03 | Complete server surface: public registration/handler contracts for tools, resources, templates, prompts, completion, notifications, MRTR and optional per-era tasks, with stdio and Streamable HTTP adapters and deterministic duplicate rejection | PARTIAL | API, registry, MRTR, subscription, stdio, and adapter tests; Tasks are deliberately unadvertised |
 | R04 | Decode UTF-8 JSON-RPC 2.0 only; accept string or integer non-null IDs; reject batches; distinguish requests, notifications, responses, and malformed objects; validate selected dated schemas while preserving allowed extensions; default to JSON Schema 2020-12; never fetch network refs | PARTIAL | `lib/attesto_mcp_server/json_rpc.ex`, `lib/attesto_mcp_server/schema.ex`, schema tests, and the pinned fixture's scored schema scenarios; broad message corpus remains partial |
@@ -141,8 +141,11 @@ TypeScript 2.0.0 and Python 2.1.1 clients passed authenticated list/call gates
 in both eras. The current source also passed formatting, documentation, package,
 version-floor, optional-installer, disk-backed host, and source-neutral scans.
 The floor evidence above is current. An independent read-only 0.10.0 release
-review returned GO at `2026-08-27T10:23:42Z`; hosted CI is pending. For
-historical comparison, the 0.9.0 review returned GO at
+review returned GO at `2026-08-27T10:23:42Z`. Hosted
+[run 33062882020](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33062882020)
+passed all four jobs at `2026-08-27T10:29:43Z` against implementation commit
+`1944311232d82d776e958b8eae2a914e27e6e078`. For historical comparison, the
+0.9.0 review returned GO at
 `2026-08-27T07:36:25Z`, and hosted CI
 [run 33050469173](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33050469173)
 passed all three jobs at `2026-08-27T07:41:23Z` against implementation commit
