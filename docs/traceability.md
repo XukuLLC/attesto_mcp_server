@@ -41,7 +41,7 @@ listed and is not treated as complete interoperability.
 | R27 | Deterministic lists/pagination: stable auth-visible order, opaque integrity/auth-bound cursors, fixed limits, and invalid/expired/cross-context rejection | PARTIAL | cache/cursor tests; cluster and full mutation matrix remain partial |
 | R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests; broad cross-connection matrix remains partial |
 | R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry and P5 tests; broad fuzz/stress remains partial |
-| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 local and hosted release gates pass; 0.10.2 local gates pass and its hosted gate is pending; 9 not-scored Tasks failures and broad fuzz remain open |
+| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 and 0.10.2 local and hosted release gates pass; 9 not-scored Tasks failures and broad fuzz remain open |
 
 ## Release additions beyond the baseline
 
@@ -129,7 +129,7 @@ Full-suite order-randomized runs for the 0.10.0 candidate passed at seeds 1,
 424242, and 99991. The Elixir 1.18.3/OTP 27.3 floor passed the same 244-check
 gate with 79.84% coverage, zero-error/zero-skip
 Dialyzer, package unpack, and Hex advisory audit. Hosted verification is
-recorded below for 0.10.0 and 0.10.1; the 0.10.2 hosted gate is pending.
+recorded below for 0.10.0, 0.10.1, and 0.10.2.
 
 The pinned runner `0.2.0-alpha.11` at commit
 `74edef34d674f563537be8c6587cebaa58e830ca` selected
@@ -150,7 +150,10 @@ passed all four jobs at `2026-08-27T15:45:09Z` against implementation commit
 primitive callback inputs and derives its default server version from OTP
 application metadata. Its local release gate passes, and an independent
 read-only rereview returned GO at `2026-08-27T17:53:41Z`; hosted verification is
-pending. An independent read-only 0.10.0
+recorded by
+[run 33100777065](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33100777065),
+which passed all four jobs at `2026-08-27T17:59:31Z` against implementation
+commit `81a1f7cfa5c6fbf291c8c6cf155faabdf4048545`. An independent read-only 0.10.0
 release review returned GO at
 `2026-08-27T10:23:42Z`. Hosted
 [run 33062882020](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33062882020)

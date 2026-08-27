@@ -25,7 +25,8 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - Python SDK smoke gates completed at: `2026-08-27T10:04:36Z`
 - `0.10.1` hosted official-interop job completed at: `2026-08-27T15:40:48Z`
   in [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
-- `0.10.2` hosted official-interop job: pending
+- `0.10.2` hosted official-interop job completed at: `2026-08-27T17:55:41Z`
+  in [run 33100777065](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33100777065)
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
@@ -39,7 +40,9 @@ the Phoenix installer work; it is not inherited from the `0.9.0` run. The
 through by a host parser; its official runner and exact SDK client smokes were
 repeated successfully by the hosted release gate linked above.
 The `0.10.2` patch candidate clarifies primitive callback inputs and removes a
-hard-coded default server version. Its hosted release gate is pending.
+hard-coded default server version. Its hosted release gate passed all four jobs
+at `2026-08-27T17:59:31Z` against implementation commit
+`81a1f7cfa5c6fbf291c8c6cf155faabdf4048545`.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |
