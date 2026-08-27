@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0 - 2026-08-27
+
+- Add an optional, idempotent Igniter installer for Phoenix hosts.
+- Scaffold a supervised MCP module, protected `/mcp` and RFC 9728 metadata
+  routes, runtime configuration, and starter tests without inventing secrets or
+  application authorization policy.
+- Detect `attesto_phoenix` hosts and reuse their validated Attesto configuration
+  while keeping authorization-server concerns out of this package.
+- Use a generated application-owned metadata wrapper so Phoenix 1.7 can mount
+  metadata and protocol routes as distinct forwarded plug modules.
+- Refuse unsafe origins, ambiguous router/module collisions, and partial edits;
+  compare existing routes across nested scopes and aliases, refuse dynamic
+  forwards and Phoenix 1.7 plug reuse, and preserve a zero-diff second run
+  across the supported Igniter range.
+
 ## 0.9.0 - 2026-08-26
 
 - Accept and exactly echo MCP `2025-06-18` during legacy initialization while

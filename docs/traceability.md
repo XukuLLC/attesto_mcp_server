@@ -12,7 +12,7 @@ listed and is not treated as complete interoperability.
 
 | ID | Baseline requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0 release, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.9.0 hosted verification is tracked separately below |
+| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.10.0 hosted verification is pending |
 | R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | released `attesto_mcp ~> 1.2.1`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
 | R03 | Complete server surface: public registration/handler contracts for tools, resources, templates, prompts, completion, notifications, MRTR and optional per-era tasks, with stdio and Streamable HTTP adapters and deterministic duplicate rejection | PARTIAL | API, registry, MRTR, subscription, stdio, and adapter tests; Tasks are deliberately unadvertised |
 | R04 | Decode UTF-8 JSON-RPC 2.0 only; accept string or integer non-null IDs; reject batches; distinguish requests, notifications, responses, and malformed objects; validate selected dated schemas while preserving allowed extensions; default to JSON Schema 2020-12; never fetch network refs | PARTIAL | `lib/attesto_mcp_server/json_rpc.ex`, `lib/attesto_mcp_server/schema.ex`, schema tests, and the pinned fixture's scored schema scenarios; broad message corpus remains partial |
@@ -48,6 +48,10 @@ listed and is not treated as complete interoperability.
 | ID | Additional compatibility requirement | Status | Evidence |
 | --- | --- | --- | --- |
 | C01 | Add negotiated `2025-06-18` compatibility without weakening preferred `2026-07-28` or baseline `2025-11-25` behavior | PASS | exact initialize echo; immutable HTTP/stdio session binding; revision-specific field filtering; positive `2025-11-25` controls; authenticated HTTP POST/GET/DELETE and stdio regressions |
+| I01 | Provide an optional installer without adding Phoenix, an authorization server, or a web server to the runtime dependency graph | PASS | conditional Igniter task, dynamic `AttestoMCP.Server.Phoenix` helper, package metadata, optional-dependency-absent compile, and dependency inventory |
+| I02 | Generate a supervised application-owned server, conservative config, and a starter registration test | PASS | in-memory host fixture assertions plus `scripts/check_installer_compat.sh` disk-backed host compile/test |
+| I03 | Mount public RFC 9728 metadata before protected MCP at a pinned HTTPS origin and outside browser-session/CSRF pipelines | PASS | route-order assertions, nested/aliased/dynamic/plug-reuse collision refusal tests, Phoenix 1.7 generated-router compilation, and usage documentation |
+| I04 | Be safe to rerun and support both an existing `attesto_phoenix` host and an explicit Attesto callback | PASS | zero-diff in-memory and disk-backed second runs, automatic/callback fixture cases, real `attesto_phoenix` config derivation, and the exact Igniter 0.6.0 compatibility gate in `scripts/check_installer_compat.sh` |
 
 ## Local black-box matrix
 
@@ -118,12 +122,12 @@ listed and is not treated as complete interoperability.
 
 The current direct dependency constraint and observed resolution use released
 `attesto_mcp` 1.2.1.
-The current-runtime Elixir 1.20.3/OTP 29.0.5 `mix test.all` gate passed 218
-total checks (one doctest plus 217 tests), at least 79.5% coverage,
+The current-runtime Elixir 1.20.3/OTP 29.0.5 `mix test.all` gate passed 241
+total checks (one doctest plus 240 tests), at least 79.9% coverage,
 zero-error/zero-skip Dialyzer, package unpack, and Hex advisory audit.
-Full-suite order-randomized runs for the 0.9.0 candidate passed at seeds 1,
-424242, and 99991. The Elixir 1.18.3/OTP 27.3 floor passed the same 218-check
-gate with at least 79.4% coverage, zero-error/zero-skip
+Full-suite order-randomized runs for the 0.10.0 candidate passed at seeds 1,
+424242, and 99991. The Elixir 1.18.3/OTP 27.3 floor passed the same 241-check
+gate with at least 79.8% coverage, zero-error/zero-skip
 Dialyzer, package unpack, and Hex advisory audit. Hosted verification is
 recorded below against the candidate implementation commit.
 
@@ -135,10 +139,12 @@ The pinned runner `0.2.0-alpha.11` at commit
 No expected-failure baseline was used. Exact
 TypeScript 2.0.0 and Python 2.1.1 clients passed authenticated list/call gates
 in both eras. The current source also passed formatting, documentation, package,
-version-floor, and source-neutral scans. The floor evidence above is current.
-An independent read-only release review returned GO at
-`2026-08-27T07:36:25Z`. Hosted CI
+version-floor, optional-installer, disk-backed host, and source-neutral scans.
+The floor evidence above is current. An independent read-only 0.10.0 release
+review returned GO at `2026-08-27T10:23:42Z`; hosted CI is pending. For
+historical comparison, the 0.9.0 review returned GO at
+`2026-08-27T07:36:25Z`, and hosted CI
 [run 33050469173](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33050469173)
 passed all three jobs at `2026-08-27T07:41:23Z` against implementation commit
-`18bd7af2c1cca325b4011a8b8f13ad8fcf8452ab`; neither result is inherited from
-`0.8.0`.
+`18bd7af2c1cca325b4011a8b8f13ad8fcf8452ab`; neither historical result is
+claimed for 0.10.0.

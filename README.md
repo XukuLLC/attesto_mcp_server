@@ -40,6 +40,33 @@ plug AttestoMCP.Server.Plug,
 registration, dispatch, session, subscription, and cancellation calls; the
 lower-level `AttestoMCP.Server` module remains available for transport hosts.
 
+### Phoenix installer
+
+Phoenix hosts can install the same boundary with the optional Igniter task:
+
+```sh
+mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
+```
+
+When the host already depends on `attesto_phoenix`, the generated application
+module derives its verifier configuration from that package's validated OTP
+configuration. Otherwise, provide an application-owned callback:
+
+```sh
+mix igniter.install attesto_mcp_server \
+  --base-url https://mcp.example.com \
+  --attesto-config MyApp.Attesto.config/0
+```
+
+The idempotent installer adds a supervised MCP module, conservative runtime
+configuration, a starter registration test, and distinct top-level forwards
+for `/mcp` and its public RFC 9728 metadata URL. The metadata forward uses a
+generated application-owned wrapper, preserving compatibility with Phoenix
+1.7's one-forward-per-plug rule. It never creates an issuer, credentials,
+consent policy, or token storage. See
+[Phoenix installation](docs/usage.md#phoenix-installation) for options and the
+division of responsibilities between the packages.
+
 Bandit is the documented development/test adapter, while the production
 library depends only on Plug. For a local loopback example, see
 `examples/bandit.exs`; it uses a credential-free verifier configuration and

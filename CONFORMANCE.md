@@ -12,25 +12,25 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - commit archive SHA-256:
   `28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293`
-- candidate release: `0.9.0`
+- candidate release: `0.10.0`
 - candidate source fingerprint:
-  `b9fd5722ab40d48ec0d43abcdbce6e5e50be8773fdbc5362fa85df6dafd8cab4`
-- 2026 runner completed at: `2026-08-27T07:11:43Z`
-- 2025 runner completed at: `2026-08-27T07:11:51Z`
-- TypeScript SDK smoke gates completed at: `2026-08-27T07:12:26Z`
-- Python SDK smoke gates completed at: `2026-08-27T07:12:41Z`
+  `35b985a6d0ffdc7ab7a0dd75983c69ae89d35000620a6f70079a711a586c6e32`
+- 2026 runner completed at: `2026-08-27T10:04:29Z`
+- 2025 runner completed at: `2026-08-27T10:04:31Z`
+- TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
+- Python SDK smoke gates completed at: `2026-08-27T10:04:36Z`
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
 does not embed a workstation path.
 
 The fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
-`scripts`, and `test` files in lexical order. The table below was rerun against
-that exact candidate after the `2025-06-18` compatibility work; it is not
-inherited from the `0.8.0` run.
+`scripts`, `test`, and reusable installer `fixtures` files in lexical order.
+The table below was rerun against that exact candidate after the Phoenix
+installer work; it is not inherited from the `0.9.0` run.
 
 ```sh
-git ls-files -z mix.exs config lib examples scripts test |
+git ls-files -z mix.exs config lib examples scripts test fixtures |
   xargs -0 shasum -a 256 |
   shasum -a 256
 ```
@@ -44,8 +44,8 @@ printf '%s  %s\n' \
   "$ARCHIVE" | sha256sum -c -
 mkdir -p "$RUNNER_DIR"
 tar -xzf "$ARCHIVE" -C "$RUNNER_DIR" --strip-components=1
-npm ci --prefix "$RUNNER_DIR"
-npm run build --prefix "$RUNNER_DIR"
+npx --yes npm@11.6.1 ci --prefix "$RUNNER_DIR"
+npx --yes npm@11.6.1 run build --prefix "$RUNNER_DIR"
 scripts/run_conformance_fixture.sh "$RUNNER_DIR" 2026-07-28
 scripts/run_conformance_fixture.sh "$RUNNER_DIR" 2025-11-25
 ```
@@ -79,7 +79,7 @@ converted to an expected failure.
 The package-owned authenticated fixture was also exercised with exact released
 official clients. Each gate negotiated the named era, listed tools, called
 `test_simple_text`, validated its text response, and closed the connection.
-These four gates were rerun against the fingerprinted `0.9.0` candidate at the
+These four gates were rerun against the fingerprinted `0.10.0` candidate at the
 recorded completion time.
 
 | Client artifact | `2025-11-25` | `2026-07-28` |

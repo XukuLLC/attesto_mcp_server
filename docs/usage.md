@@ -1,5 +1,86 @@
 # Usage and deployment
 
+## Phoenix installation
+
+`attesto_mcp_server` owns the protected-resource protocol boundary. In a host
+that also uses `attesto_phoenix`, the latter remains the authorization server:
+it owns issuer, consent, token, refresh, revocation, and sender-constrained
+credential behavior. The installer only reuses its validated core
+`Attesto.Config`; it does not duplicate or reconfigure those responsibilities.
+There is no hard dependency from this package to `attesto_phoenix`.
+
+With `attesto_phoenix` already declared directly by the host, run:
+
+```sh
+mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
+```
+
+For an Attesto host without `attesto_phoenix`, name a zero-arity callback that
+returns the verifier configuration:
+
+```sh
+mix igniter.install attesto_mcp_server \
+  --base-url https://mcp.example.com \
+  --attesto-config MyApp.Attesto.config/0
+```
+
+If the dependency is already present, the package task can be called directly:
+
+```sh
+mix attesto_mcp_server.install \
+  --base-url https://mcp.example.com \
+  --attesto-config MyApp.Attesto.config/0
+```
+
+The task requires a canonical public origin rather than inferring one from a
+request. HTTPS is mandatory except for an explicitly enabled loopback origin:
+
+```sh
+mix attesto_mcp_server.install \
+  --base-url http://127.0.0.1:4000 \
+  --allow-http-loopback \
+  --attesto-config MyApp.Attesto.config/0
+```
+
+It creates an application-owned `<App>.MCP` process, adds it to the application
+supervisor, adds conservative `server_options` in `config/config.exs`, creates
+a starter registration test, and mounts these top-level router forwards in
+order. The generated metadata wrapper keeps the two forwarded plug modules
+distinct for Phoenix 1.7 compatibility:
+
+```elixir
+forward "/.well-known/oauth-protected-resource/mcp", MyApp.MCP.MetadataPlug,
+  server: MyApp.MCP,
+  path: "/mcp",
+  auth: [
+    config: &MyApp.MCP.attesto_config/0,
+    resource: "/mcp",
+    base_url: "https://mcp.example.com"
+  ]
+
+forward "/mcp", AttestoMCP.Server.Plug,
+  server: MyApp.MCP,
+  path: "/mcp",
+  auth: [
+    config: &MyApp.MCP.attesto_config/0,
+    resource: "/mcp",
+    base_url: "https://mcp.example.com"
+  ]
+```
+
+Keep both forwards outside browser-session and CSRF pipelines. The metadata
+route is intentionally public; the MCP route authenticates every protected
+leg. Run the task again safely after an interrupted install: generated modules,
+configuration, supervision, routes, and tests are idempotent. Use Igniter's
+global `--dry-run` option to inspect the edits first. If the router cannot be
+selected uniquely, pass `--router MyAppWeb.Router`; the task refuses ambiguous
+router selection and prints an exact manual snippet if no router exists.
+
+Additional options are `--mcp-path`, `--server-module`, `--router`, and
+`--attesto-config`. Run the task inside the Phoenix child application rather
+than at an umbrella root. The generated `server_status` tool is deliberately a
+small starter; replace it with application-specific registrations and scopes.
+
 ## Bandit development server
 
 The HTTP boundary is a normal Plug. A documented local launcher is:

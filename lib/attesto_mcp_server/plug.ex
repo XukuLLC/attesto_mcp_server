@@ -2142,9 +2142,8 @@ defmodule AttestoMCP.Server.Plug do
   defp hex_digit?(_), do: false
 
   defp metadata_path?(conn, path) do
-    suffix = path |> String.trim_leading("/")
     expected = "/.well-known/oauth-protected-resource" <> path
-    conn.request_path == expected or suffix == ".well-known/oauth-protected-resource" <> path
+    conn.request_path == expected
   end
 
   defp invalid_origin?(conn, state) do

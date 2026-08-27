@@ -8,6 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  installer-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18.3"
+          otp-version: "27.3"
+          version-type: strict
+      - run: scripts/check_installer_compat.sh
+
   verify:
     strategy:
       fail-fast: false
@@ -98,8 +109,8 @@ jobs:
           mkdir -p "$CONFORMANCE_DIR"
           tar -xzf "$CONFORMANCE_ARCHIVE" -C "$CONFORMANCE_DIR" --strip-components=1
           test "$(node -p "require('$CONFORMANCE_DIR/package.json').version")" = "0.2.0-alpha.11"
-          npm ci --prefix "$CONFORMANCE_DIR"
-          npm run build --prefix "$CONFORMANCE_DIR"
+          npx --yes npm@11.6.1 ci --prefix "$CONFORMANCE_DIR"
+          npx --yes npm@11.6.1 run build --prefix "$CONFORMANCE_DIR"
           scripts/run_conformance_fixture.sh "$CONFORMANCE_DIR" 2026-07-28
           scripts/run_conformance_fixture.sh "$CONFORMANCE_DIR" 2025-11-25
       - name: exact official TypeScript client smoke

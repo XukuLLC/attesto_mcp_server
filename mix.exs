@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "0.9.0"
+  @version "0.10.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -18,6 +18,7 @@ defmodule AttestoMCP.Server.MixProject do
       package: package(),
       docs: docs(),
       aliases: aliases(),
+      dialyzer: [plt_add_apps: [:mix]],
       test_coverage: [
         output: System.get_env("MIX_COVERAGE_OUTPUT", "cover"),
         summary: [threshold: 75]
@@ -35,7 +36,9 @@ defmodule AttestoMCP.Server.MixProject do
       {:plug, "~> 1.16"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.2"},
+      {:igniter, "~> 0.6", optional: true, runtime: false},
       {:bandit, "~> 1.6", only: [:dev, :test], runtime: false},
+      {:phoenix, "~> 1.7.0", only: :test, runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false}
     ]
@@ -53,7 +56,7 @@ defmodule AttestoMCP.Server.MixProject do
       # Keep generated consumer dependencies/build output and local coverage
       # artifacts out of the archive while retaining the runnable example.
       files:
-        ~w(lib config test examples/bandit.exs examples/stdio.exs examples/conformance_server.exs scripts examples/consumer/mix.exs examples/consumer/lib examples/consumer/README.md docs .github LICENSE README.md CONFORMANCE.md CHANGELOG.md SECURITY.md .formatter.exs mix.exs)
+        ~w(lib config test fixtures examples/bandit.exs examples/stdio.exs examples/conformance_server.exs scripts examples/consumer/mix.exs examples/consumer/lib examples/consumer/README.md docs .github LICENSE README.md CONFORMANCE.md CHANGELOG.md SECURITY.md .formatter.exs mix.exs)
     ]
   end
 
