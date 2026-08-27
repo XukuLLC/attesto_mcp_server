@@ -50,7 +50,6 @@ defmodule AttestoMCP.ConformanceFixture do
     {:ok, server} =
       Server.start_link(
         server_name: "attesto-conformance",
-        server_version: "0.10.1",
         capabilities: %{"logging" => %{}}
       )
 

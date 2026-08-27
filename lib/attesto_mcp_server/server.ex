@@ -5017,8 +5017,17 @@ defmodule AttestoMCP.Server do
   defp server_info(opts),
     do: %{
       "name" => opts[:server_name] || "attesto_mcp_server",
-      "version" => opts[:server_version] || "0.10.1"
+      "version" => opts[:server_version] || application_version()
     }
+
+  defp application_version do
+    _ = Application.load(:attesto_mcp_server)
+
+    case Application.spec(:attesto_mcp_server, :vsn) do
+      nil -> "0.0.0"
+      version -> to_string(version)
+    end
+  end
 
   defp cache_ttl(opts), do: max(opts[:cache_ttl_ms] || 30_000, 0)
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.2 - 2026-08-27
+
+- Document the distinct tool, prompt, resource, and completion callback inputs,
+  including prompt and resource envelopes, their declared atom-keyed fields,
+  and resource MRTR retry entries.
+- Add copyable prompt callback guidance after a live-client interoperability
+  exercise exposed the ambiguity in the earlier generic callback wording.
+- Derive the default advertised server version from package application
+  metadata so patch releases cannot retain a stale hard-coded version.
+
 ## 0.10.1 - 2026-08-27
 
 - Accept JSON request bodies already decoded by a Phoenix or Plug parser while

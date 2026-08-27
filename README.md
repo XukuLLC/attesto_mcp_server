@@ -40,6 +40,15 @@ plug AttestoMCP.Server.Plug,
 registration, dispatch, session, subscription, and cancellation calls; the
 lower-level `AttestoMCP.Server` module remains available for transport hosts.
 
+Handler inputs are primitive-specific. Tools receive their JSON arguments map;
+prompts receive `%{name: name, arguments: arguments}`; resources receive
+`%{uri: uri, params: template_params}`; and completions receive
+`%{ref: ref, argument: argument, value: value, context: completion_context}`.
+Declared envelope fields use atom keys while nested MCP values keep their JSON
+string keys; resource MRTR retries additionally carry string-keyed response
+entries at the top level. An arity-2 handler's second argument is the
+authenticated request context; arity-1 and MFA forms are also supported.
+
 ### Phoenix installer
 
 Phoenix hosts can install the same boundary with the optional Igniter task:

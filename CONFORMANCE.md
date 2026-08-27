@@ -17,12 +17,15 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
   `35b985a6d0ffdc7ab7a0dd75983c69ae89d35000620a6f70079a711a586c6e32`
 - `0.10.1` patch-candidate source fingerprint:
   `442e5e16946eb90149bef41acc0461f18f7d4fdd682dd40b226c3a9814d29543`
+- `0.10.2` patch-candidate source fingerprint:
+  `791e7308119c10261a579896efdb5a2b43c1c8dea944d5426cb3ab681c7a46a5`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
 - Python SDK smoke gates completed at: `2026-08-27T10:04:36Z`
 - `0.10.1` hosted official-interop job completed at: `2026-08-27T15:40:48Z`
   in [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
+- `0.10.2` hosted official-interop job: pending
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
@@ -35,6 +38,8 @@ the Phoenix installer work; it is not inherited from the `0.9.0` run. The
 `0.10.1` patch candidate adds regressions for request bodies decoded or passed
 through by a host parser; its official runner and exact SDK client smokes were
 repeated successfully by the hosted release gate linked above.
+The `0.10.2` patch candidate clarifies primitive callback inputs and removes a
+hard-coded default server version. Its hosted release gate is pending.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |

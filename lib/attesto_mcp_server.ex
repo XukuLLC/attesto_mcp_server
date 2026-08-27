@@ -3,21 +3,30 @@ defmodule AttestoMCP.Server.API do
   Stable host-facing facade for `AttestoMCP.Server`.
 
   Registration is performed before serving traffic. Definitions use JSON-style
-  string keys for schemas and wire values; handler callbacks receive arguments
-  plus an authorization context and return `{:ok, result}`, `{:error, reason}`,
-  or the modern `{:input_required, requests}` MRTR form.
+  string keys for schemas and wire values. Handler callbacks receive a
+  primitive-specific input plus an authorization context and return
+  `{:ok, result}`, `{:error, reason}`, or the modern
+  `{:input_required, requests}` MRTR form.
 
   The facade intentionally exposes no task profile in this release. Calls that
   would enable modern or legacy Tasks return the dated method-not-found result.
 
-  Handler callbacks use `handler.(arguments, context)`. The context contains
-  the authenticated principal, tenant, scopes, transport, negotiated version,
-  request ID, `trace_context`, progress callback, and the Attesto assigns
-  (`:attesto_mcp_claims`, `:attesto_mcp_scopes`, `:attesto_mcp_sender`,
-  `:attesto_mcp_principal`, and `:attesto_context`) when the Plug boundary is
-  used. A successful callback returns `{:ok, result}`, an application failure
-  returns `{:error, reason}`, and an interactive callback returns
-  `{:input_required, request_map}` with typed MRTR request entries.
+  Two-arity handler callbacks use `handler.(input, context)`; one-arity handlers
+  receive only `input`, and MFA handlers follow the same input/context order. A
+  tool's input is its arguments map. A prompt receives
+  `%{name: name, arguments: arguments}`. A resource receives
+  `%{uri: uri, params: template_params}`, and a completion receives
+  `%{ref: ref, argument: argument, value: value, context: context}`. These
+  envelopes use atom keys for their declared fields; a resource MRTR retry also
+  carries its string-keyed input-response entries at the top level. Nested MCP
+  values retain their JSON string keys. The callback context contains the
+  authenticated principal, tenant, scopes, transport, negotiated version,
+  request ID, `trace_context`, progress callback, and the Attesto assigns (`:attesto_mcp_claims`,
+  `:attesto_mcp_scopes`, `:attesto_mcp_sender`, `:attesto_mcp_principal`, and
+  `:attesto_context`) when the Plug boundary is used. A successful callback
+  returns `{:ok, result}`, an application failure returns `{:error, reason}`,
+  and an interactive callback returns `{:input_required, request_map}` with
+  typed MRTR request entries.
   """
 
   @typedoc "A supervised server pid or a registered server name."
@@ -122,7 +131,19 @@ defmodule AttestoMCP.Server.API do
           :ok | {:error, term()}
   defdelegate register_resource_template(server, template, definition), to: AttestoMCP.Server
 
-  @doc "Registers a prompt definition, including required and optional arguments."
+  @doc """
+  Registers a prompt definition, including required and optional arguments.
+
+  The handler input is `%{name: name, arguments: arguments}`. A definition may
+  match an argument directly when it declares that argument as required, for
+  example:
+
+      handler: fn %{arguments: %{"topic" => topic}}, _context ->
+        {:ok, [%{"role" => "user", "content" => %{"type" => "text", "text" => topic}}]}
+      end
+
+  Use `Map.get(arguments, "topic")` instead when the argument is optional.
+  """
   @spec register_prompt(server(), String.t(), definition()) :: :ok | {:error, term()}
   defdelegate register_prompt(server, name, definition), to: AttestoMCP.Server
 

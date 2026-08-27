@@ -12,7 +12,7 @@ listed and is not treated as complete interoperability.
 
 | ID | Baseline requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0/0.10.0 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.10.1 patch-candidate verification is recorded separately below |
+| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0/0.10.0/0.10.1 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.10.2 patch-candidate verification is recorded separately below |
 | R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | released `attesto_mcp ~> 1.2.1`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
 | R03 | Complete server surface: public registration/handler contracts for tools, resources, templates, prompts, completion, notifications, MRTR and optional per-era tasks, with stdio and Streamable HTTP adapters and deterministic duplicate rejection | PARTIAL | API, registry, MRTR, subscription, stdio, and adapter tests; Tasks are deliberately unadvertised |
 | R04 | Decode UTF-8 JSON-RPC 2.0 only; accept string or integer non-null IDs; reject batches; distinguish requests, notifications, responses, and malformed objects; validate selected dated schemas while preserving allowed extensions; default to JSON Schema 2020-12; never fetch network refs | PARTIAL | `lib/attesto_mcp_server/json_rpc.ex`, `lib/attesto_mcp_server/schema.ex`, parsed-body bounds and recoverable-ID regressions, schema tests, and the pinned fixture's scored schema scenarios; broad message corpus remains partial |
@@ -41,7 +41,7 @@ listed and is not treated as complete interoperability.
 | R27 | Deterministic lists/pagination: stable auth-visible order, opaque integrity/auth-bound cursors, fixed limits, and invalid/expired/cross-context rejection | PARTIAL | cache/cursor tests; cluster and full mutation matrix remain partial |
 | R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests; broad cross-connection matrix remains partial |
 | R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry and P5 tests; broad fuzz/stress remains partial |
-| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 local and hosted release gates and final package scans pass; 9 not-scored Tasks failures and broad fuzz remain open |
+| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 local and hosted release gates pass; 0.10.2 local gates pass and its hosted gate is pending; 9 not-scored Tasks failures and broad fuzz remain open |
 
 ## Release additions beyond the baseline
 
@@ -127,9 +127,9 @@ total checks (one doctest plus 243 tests), 79.92% coverage,
 zero-error/zero-skip Dialyzer, package unpack, and Hex advisory audit.
 Full-suite order-randomized runs for the 0.10.0 candidate passed at seeds 1,
 424242, and 99991. The Elixir 1.18.3/OTP 27.3 floor passed the same 244-check
-gate with 79.83% coverage, zero-error/zero-skip
+gate with 79.84% coverage, zero-error/zero-skip
 Dialyzer, package unpack, and Hex advisory audit. Hosted verification is
-recorded below for 0.10.0; the 0.10.1 hosted gate is pending.
+recorded below for 0.10.0 and 0.10.1; the 0.10.2 hosted gate is pending.
 
 The pinned runner `0.2.0-alpha.11` at commit
 `74edef34d674f563537be8c6587cebaa58e830ca` selected
@@ -146,7 +146,11 @@ message-size and nesting bounds. Its independent read-only review returned GO
 at `2026-08-27T15:38:47Z`. Hosted
 [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
 passed all four jobs at `2026-08-27T15:45:09Z` against implementation commit
-`33eb0e86ed9ca39ec90c73e70b5794d6d0659500`. An independent read-only 0.10.0
+`33eb0e86ed9ca39ec90c73e70b5794d6d0659500`. The 0.10.2 patch clarifies
+primitive callback inputs and derives its default server version from OTP
+application metadata. Its local release gate passes, and an independent
+read-only rereview returned GO at `2026-08-27T17:53:41Z`; hosted verification is
+pending. An independent read-only 0.10.0
 release review returned GO at
 `2026-08-27T10:23:42Z`. Hosted
 [run 33062882020](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33062882020)

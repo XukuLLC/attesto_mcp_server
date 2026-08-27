@@ -190,11 +190,45 @@ supported. Query values are strictly percent-decoded, bounded, and reject
 ambiguous duplicates or decoded traversal. Unsupported multi-expression or
 operator layouts are rejected at registration rather than accepted with
 nonfunctional matching. A matching `resources/read` handler receives both the
-requested `uri` and a `params` map of captured variables. Completion handlers should register an
-explicit `ref` matching the prompt or resource-template reference; only that
-handler is invoked, and returned string values preserve the handler's
-relevance order, are de-duplicated, and are capped at 100 with truthful
-`total`/`hasMore` metadata.
+requested `uri` and a `params` map of captured variables. Completion handlers
+should register an explicit `ref` matching the prompt or resource-template
+reference; only that handler is invoked, and returned string values preserve
+the handler's relevance order, are de-duplicated, and are capped at 100 with
+truthful `total`/`hasMore` metadata.
+
+Callback inputs are deliberately explicit and primitive-specific:
+
+```elixir
+# Tool
+handler: fn %{"left" => left, "right" => right}, _context ->
+  {:ok, %{"total" => left + right}}
+end
+
+# Prompt whose definition declares "topic" as required
+handler: fn %{name: "review", arguments: %{"topic" => topic}}, _context ->
+  {:ok,
+   [%{"role" => "user", "content" => %{"type" => "text", "text" => topic}}]}
+end
+
+# Resource or resource template
+handler: fn %{uri: uri, params: template_params}, _context ->
+  {:ok, [%{"uri" => uri, "text" => inspect(template_params)}]}
+end
+
+# Completion
+handler: fn %{value: value}, _context ->
+  {:ok, [value]}
+end
+```
+
+Declared outer envelope fields use atom keys. A resource MRTR retry also
+places its string-keyed input-response entries at the envelope's top level.
+Nested MCP arguments, references, and completion context retain their JSON
+string keys. For optional prompt arguments, read the nested map with `Map.get/2`
+instead of requiring the key in the callback head. An arity-2 callback's second
+argument is the authenticated request context; a completion input's `:context`
+is the separate client-supplied completion context. Arity-1 and MFA handler
+forms are also accepted.
 
 Tool output content, prompt messages, and resource contents are checked before
 they reach the wire. Supported content includes text, Base64 image/audio,
