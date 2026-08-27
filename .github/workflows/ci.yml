@@ -65,14 +65,18 @@ jobs:
     env:
       CONFORMANCE_COMMIT: 74edef34d674f563537be8c6587cebaa58e830ca
       CONFORMANCE_SHA256: 28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293
-      CONFORMANCE_DIR: ${{ runner.temp }}/mcp-conformance
-      CONFORMANCE_ARCHIVE: ${{ runner.temp }}/mcp-conformance.tar.gz
-      TS_CLIENT_DIR: ${{ runner.temp }}/mcp-ts-client
-      PY_CLIENT_DIR: ${{ runner.temp }}/mcp-py-client
-      npm_config_cache: ${{ runner.temp }}/npm-cache
-      PIP_CACHE_DIR: ${{ runner.temp }}/pip-cache
     steps:
       - uses: actions/checkout@v4
+      - name: configure temporary paths
+        run: |
+          {
+            echo "CONFORMANCE_DIR=$RUNNER_TEMP/mcp-conformance"
+            echo "CONFORMANCE_ARCHIVE=$RUNNER_TEMP/mcp-conformance.tar.gz"
+            echo "TS_CLIENT_DIR=$RUNNER_TEMP/mcp-ts-client"
+            echo "PY_CLIENT_DIR=$RUNNER_TEMP/mcp-py-client"
+            echo "npm_config_cache=$RUNNER_TEMP/npm-cache"
+            echo "PIP_CACHE_DIR=$RUNNER_TEMP/pip-cache"
+          } >> "$GITHUB_ENV"
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: "1.20.3"
