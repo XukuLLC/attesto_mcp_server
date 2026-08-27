@@ -130,4 +130,6 @@ production dependency/license review,
 outdated/unused checks, stdio cold install, consumer compile/run, and
 source-neutral/secret/path scans passed. Independent Fable review returned
 `GO`; its follow-up documentation and regression recommendations were fixed
-and verified. Hosted CI remains `NOT RUN` locally.
+and verified. Hosted CI passed the Elixir 1.18.3/OTP 27.3 and Elixir
+1.20.3/OTP 29.0.5 verification matrix plus official interoperability before
+release.
