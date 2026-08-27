@@ -1,0 +1,9 @@
+_build/
+_build_*/
+cover/
+doc/
+deps/
+*.tar
+attesto_mcp_server-*/
+examples/consumer/mix.lock
+mix.lock

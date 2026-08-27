@@ -1,0 +1,133 @@
+# Acceptance traceability
+
+This ledger uses the exact requirement and test identifiers from the clean-room
+baseline. `PASS` means the named observable evidence was run locally and is
+complete for that row. `PARTIAL` means only a subset was observed. `NOT RUN`
+means no evidence is claimed. Full official conformance remains external
+evidence; independent SDK smoke evidence is recorded only where explicitly
+listed and is not treated as complete interoperability.
+
+## Requirements
+
+| ID | Baseline requirement | Status | Evidence |
+| --- | --- | --- | --- |
+| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PARTIAL | `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; metadata names the intended public source URL, while repository creation and hosted verification remain pending |
+| R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | released `attesto_mcp ~> 1.2`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
+| R03 | Complete server surface: public registration/handler contracts for tools, resources, templates, prompts, completion, notifications, MRTR and optional per-era tasks, with stdio and Streamable HTTP adapters and deterministic duplicate rejection | PARTIAL | API, registry, MRTR, subscription, stdio, and adapter tests; Tasks are deliberately unadvertised |
+| R04 | Decode UTF-8 JSON-RPC 2.0 only; accept string or integer non-null IDs; reject batches; distinguish requests, notifications, responses, and malformed objects; validate selected dated schemas while preserving allowed extensions; default to JSON Schema 2020-12; never fetch network refs | PARTIAL | `lib/attesto_mcp_server/json_rpc.ex`, `lib/attesto_mcp_server/schema.ex`, schema tests, and the pinned fixture's scored schema scenarios; broad message corpus remains partial |
+| R05 | Support exactly 2026-07-28 and 2025-11-25 by default, selecting modern per request metadata and legacy from initialize without sharing negotiated state | PASS | core/legacy tests plus pinned authenticated runner: scored server scenarios pass in both eras |
+| R06 | Require modern protocolVersion/clientCapabilities metadata; implement discover; return exact unsupported-version/capability errors; include resultType and server identity metadata on modern successes | PASS | P0/P4/P10-P13 regressions plus pinned 2026 scored runner |
+| R07 | Legacy lifecycle: initialize is first non-ping interaction, negotiate 2025-11-25, return server info/capabilities/instructions, wait for initialized before server traffic, and restrict negotiated capabilities | PARTIAL | legacy core/Plug, detached-owner cancellation, newest-live same-session stream routing, stale teardown, and `test/p10_p13_regression_test.exs`; full stream matrix remains partial |
+| R08 | Modern Streamable HTTP: one request/notification per POST, JSON/SSE Accept coverage, request-scoped SSE and empty 202 for notifications; modern GET/DELETE 405 and no sessions/resumption | PASS | modern Plug/Bandit tests, stream fixture, and pinned 2026 scored runner |
+| R09 | Legacy Streamable HTTP: dated POST/GET, optional secure session IDs, 400/404 lifecycle, DELETE, multiple streams without duplicate delivery, and only advertised resumption | PARTIAL | legacy Plug/Bandit tests plus deterministic same-session isolation and stale-teardown regressions; resumption is not advertised |
+| R10 | HTTP mirror headers: case-insensitive protocol/method/name/parameter declarations, exact Base64 sentinel, body/header equality, and official `x-mcp-header` constraints | PASS | `plug_auth_test.exs`, `p4_regression_test.exs`, and frozen HTTP scenarios |
+| R11 | Stdio: one compact UTF-8 JSON-RPC message per stdout line, logs on stderr, interleaved IDs, modern cancellation, prompt EOF, and legacy server requests only after capability negotiation | PARTIAL | `stdio_test.exs`, cold-start/live-pipe tests; broad client scripts remain partial |
+| R12 | Fixed auth pipeline: every protected HTTP leg enters the approved Attesto boundary before dispatch/body work, with canonical assigns; stdio uses launcher/environment credentials | PASS | released `attesto_mcp` 1.2.0; direct public `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` calls; boundary ordering, real-token audience binding, and stdio tests; no older fallback |
+| R13 | Resource metadata and audience: RFC 9728 metadata, authorization server, bearer header, resource_metadata challenges, and one pinned canonical resource/audience | PARTIAL | metadata and auth tests; deployment proxy matrix remains partial |
+| R14 | Token and sender constraints: Authorization on every leg, no query/body tokens by default, issuer/audience/time/purpose/principal/scopes and DPoP/mTLS binding through Attesto | PARTIAL | `p3_auth_acceptance_test.exs`; full deployment matrix remains partial |
+| R15 | Authorization policy: documented method scopes, operation plus configured subscription/task scopes, 401/403 challenges, and reauthorization for every handle/delivery | PARTIAL | subscription and auth tests; full sender/deployment matrix remains partial |
+| R16 | Isolation and supervision: separately cancellable supervised work, correlated IDs, configurable global/principal limits, and handler crash isolation | PARTIAL | core, runtime, P5, atomic admission/ownership, nil-ID concurrency, detached-owner, same-session isolation, and exact-once terminal telemetry tests; broad stress remains partial |
+| R17 | State boundaries: independently routable modern handles and principal/session-bound bounded legacy state | PARTIAL | cursor/request-state tests; clustered two-replica evidence not run |
+| R18 | Cancellation and timeout: per-method soft/absolute limits, owner-only stream close/cancel, no post-cancel output, and prompt cleanup | PARTIAL | core, stdio, real Bandit disconnect, detached legacy cancellation, owner detachment, and exact-once counter/telemetry cleanup tests; full disconnect matrix remains partial |
+| R19 | Error taxonomy: dated JSON-RPC/HTTP separation, reserved 2026 codes, modern 400/404/405 rules, and legacy dated resource errors | PARTIAL | P0/P7 tests and pinned scored runner; broad malformed/error corpus remains partial |
+| R20 | Tool execution errors: protocol errors for unknown/malformed calls, `isError` business results, and declared output-schema validation | PARTIAL | primitive matrix and core tests; full handler corpus remains partial |
+| R21 | Server primitives: all tools/resources/templates/prompts/completion methods, dated content variants, pagination, completion cap, validation, and auth filtering | PARTIAL | P2A primitive tests and pinned diagnostic fixture/scenarios; full local matrix remains partial |
+| R22 | Streaming/progress: JSON or SSE by need, valid final response, no-buffering header, keepalive, bounded queues, monotonic active-token progress, and cancellation stop | PARTIAL | Bandit and subscription tests; broad queue/flood matrix remains partial |
+| R23 | MRTR: allowed methods, capability-filtered input requests, unique keys, new retry IDs, typed response validation, bound integrity state, expiry and single use | PARTIAL | `p1a_mrtr_test.exs`, core tests, and `test/p10_p13_regression_test.exs` |
+| R24 | Subscriptions: explicit filters, first acknowledgment, owner request IDs/meta, concurrent isolation, close/cancel targeting, authorization recheck, and suppression | PARTIAL | state/HTTP subscription tests and `test/p10_p13_regression_test.exs` |
+| R25 | Legacy Tasks: disabled unless durable store/limits are configured; when enabled, advertise only negotiated dated task capabilities and implement full lifecycle | NOT ADVERTISED | Legacy Tasks are hard-disabled and unadvertised |
+| R26 | Modern Tasks: disabled unless durable store/limits are configured; when enabled, only tools/call task results, auth-checked lifecycle, headers, notifications, TTL and MRTR separation | NOT ADVERTISED | Modern Tasks are hard-disabled and unadvertised |
+| R27 | Deterministic lists/pagination: stable auth-visible order, opaque integrity/auth-bound cursors, fixed limits, and invalid/expired/cross-context rejection | PARTIAL | cache/cursor tests; cluster and full mutation matrix remain partial |
+| R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests; broad cross-connection matrix remains partial |
+| R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry and P5 tests; broad fuzz/stress remains partial |
+| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; local release and final package scans pass; 9 not-scored Tasks failures, hosted CI, and broad fuzz remain open |
+
+## Local black-box matrix
+
+| ID | Status | Evidence |
+| --- | --- | --- |
+| T01 | PASS | API tests and `examples/consumer` compile/run |
+| T02 | PARTIAL | `test/conformance_fixture_test.exs`, `examples/conformance_server.exs`, and `scripts/run_conformance_fixture.sh`; CI lane not run |
+| T03 | PARTIAL | primitive matrix |
+| T04 | PARTIAL | JSON-RPC and P4 tests |
+| T05 | PASS | core discovery test and pinned 2026 fixture |
+| T06 | PASS | P0 version test |
+| T07 | PASS | P0/P4 metadata and capability tests |
+| T08 | PASS | Plug auth/header tests |
+| T09 | PARTIAL | Plug and stdio tests |
+| T10 | PARTIAL | Bandit streaming test plus official progress/stream fixture scenarios; complete local matrix remains partial |
+| T11 | PASS | modern method/session-header tests |
+| T12 | PARTIAL | legacy lifecycle tests |
+| T13 | PARTIAL | legacy session matrix |
+| T14 | NOT ADVERTISED | Legacy resumption is not advertised |
+| T15 | PARTIAL | stdio and cold-start tests |
+| T16 | PASS | metadata/auth tests |
+| T17 | PASS | Attesto context test |
+| T18 | PARTIAL | token failure matrix |
+| T19 | PASS | scope and subscription tests |
+| T20 | PASS | DPoP test |
+| T21 | PASS | mTLS test |
+| T22 | PARTIAL | runtime/core concurrency tests |
+| T23 | PARTIAL | cancellation tests |
+| T24 | PARTIAL | error taxonomy tests |
+| T25 | PARTIAL | tool/content tests and official fixture diagnostics; full local matrix remains partial |
+| T26 | PARTIAL | resource tests, `test/p15_uri_template_test.exs`, and official fixture resource diagnostics; static/template edge matrix remains partial |
+| T27 | PARTIAL | prompt/completion tests and `test/p10_p13_regression_test.exs` |
+| T28 | PARTIAL | bounded schema tests and pinned 2026 JSON-Schema scenarios; broad hostile matrix remains partial |
+| T29 | PARTIAL | progress/telemetry tests |
+| T30 | PASS | MRTR protocol tests and `test/p10_p13_regression_test.exs` |
+| T31 | PARTIAL | MRTR binding tests |
+| T32 | PASS | subscription acknowledgment/filter tests and `test/p10_p13_regression_test.exs` |
+| T33 | PARTIAL | subscription auth/close tests |
+| T34 | NOT ADVERTISED | Legacy Tasks disabled |
+| T35 | NOT ADVERTISED | Legacy Tasks disabled |
+| T36 | NOT ADVERTISED | Modern Tasks disabled |
+| T37 | NOT ADVERTISED | Modern Tasks disabled |
+| T38 | NOT ADVERTISED | Modern Tasks disabled |
+| T39 | PARTIAL | cache/cursor tests |
+| T40 | PARTIAL | local telemetry/hostile cases, pinned scored suites, and exact TS 2.0.0/Python 2.1.1 authenticated smoke gates in both eras; broad fuzz and the not-scored optional Tasks extension remain outside the passing surface |
+
+## Compatibility and robustness ledger
+
+| ID | Baseline definition | Status | Evidence |
+| --- | --- | --- | --- |
+| G01 | Progress has a live caller route and truthful delivery outcome | PARTIAL | core progress test; delivery acknowledgement remains limited |
+| G02 | Every identified request, including unknown methods, terminates correlated | PARTIAL | core/Plug/stdio tests and real Bandit disconnect coverage; every-transport unknown-method matrix remains incomplete |
+| G03 | Legacy later legs obey negotiated version headers | PASS | legacy Plug tests |
+| G04 | Selected initialization revision governs later behavior | PARTIAL | legacy lifecycle tests |
+| G05 | SSE survives split points and legal line endings | PARTIAL | SSE parser tests |
+| G06 | Supervised sibling restart is ownership-safe under active work | PARTIAL | runtime restart tests; full stress not run |
+| G07 | Replicated legacy sessions have one authoritative route | NOT RUN | Replication is not advertised |
+| G08 | Standing streams deliver incrementally | PASS | legacy and modern Bandit tests |
+| G09 | Server-originated traffic is owner isolated | PASS | subscription/legacy stream tests |
+| G10 | Decode categories and recoverable IDs remain private | PARTIAL | JSON-RPC/P4 tests; full secret-marker fuzz not run |
+| G11 | Every applicable legacy HTTP leg reauthenticates | PASS | legacy Plug/Bandit tests |
+| G12 | Initialization/recovery rejection is correlated and encodable | PASS | legacy rejection tests |
+| G13 | Initialized/request race does not cause avoidable failure | PASS | 100-schedule legacy race |
+| G14 | Invalid session identifiers remain bounded | PARTIAL | bounded lookup tests; full flood not run |
+| G15 | Every POST negotiates JSON and event-stream media | PASS | strict parser regressions plus modern request/notification and legacy initialize/request/notification HTTP tests |
+
+## Observed gate
+
+The current direct dependency resolution uses released `attesto_mcp` 1.2.0.
+The current-runtime `mix test.all` gate passed 205 total (one doctest plus 204
+tests), 79.39% coverage, zero-error/zero-skip Dialyzer, package unpack, and Hex
+advisory audit. Thirty randomized focused lifecycle/transport runs passed after
+atomic admission and terminal telemetry were corrected. The installed Elixir
+1.18.3/OTP 27.3 floor ran the same `mix test.all` gate with 205/205 checks,
+79.30% coverage, zero-error/zero-skip Dialyzer, package unpack, and Hex advisory
+audit. Both Elixir 1.18 and 1.20 formatters accept the final source.
+
+The pinned runner `0.2.0-alpha.11` at commit
+`74edef34d674f563537be8c6587cebaa58e830ca` selected
+50 scenarios for 2026-07-28 (37 scored passed; raw 161 passed/30 failed, with
+9 failing Tasks and both pending header scenarios passing) and 33 scenarios for
+2025-11-25 (30 scored passed; raw 80 passed/0 failed across ten consecutive
+complete post-fix runs). No expected-failure baseline was used. Exact
+TypeScript 2.0.0 and Python 2.1.1 clients passed authenticated list/call gates
+in both eras. Docs, a clean unpacked-package compile and 205-check run,
+production dependency/license review,
+outdated/unused checks, stdio cold install, consumer compile/run, and
+source-neutral/secret/path scans passed. Independent Fable review returned
+`GO`; its follow-up documentation and regression recommendations were fixed
+and verified. Hosted CI remains `NOT RUN` locally.

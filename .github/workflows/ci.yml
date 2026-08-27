@@ -1,0 +1,113 @@
+name: attesto-mcp-server
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: "1.18.3"
+            otp: "27.3"
+          - elixir: "1.20.3"
+            otp: "29.0.5"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+          version-type: strict
+      - run: mix deps.get
+      - run: mix test.all
+      - run: mix test test/legacy_bandit_test.exs test/p3_auth_acceptance_test.exs
+      - run: MCP_REQUIREMENTS=2026-07-28 mix test test/conformance_fixture_test.exs --seed 0
+      - run: MCP_REQUIREMENTS=2025-11-25 mix test test/conformance_fixture_test.exs --seed 0
+      - run: mix docs
+      - run: |
+          prod_tree_file="$RUNNER_TEMP/attesto-mcp-prod-tree.txt"
+          mix deps.tree --only prod | tee "$prod_tree_file"
+          if grep -Eiq 'bandit|cowboy|ranch|thousand_island|websock' "$prod_tree_file"; then
+            echo "a production web server dependency was resolved" >&2
+            exit 1
+          fi
+      - run: mix hex.audit
+      - run: mix hex.build --unpack
+      - run: |
+          archive_dir="$(find . -maxdepth 1 -type d -name 'attesto_mcp_server-*' -print -quit)"
+          test -n "$archive_dir"
+          ! find "$archive_dir" -type f -name 'mix.lock' -print -quit | grep -q .
+          ! find "$archive_dir" -type d \( -name _build -o -name cover -o -name doc -o -name deps \) -print -quit | grep -q .
+      - name: optional orchestrator supplied source-neutral scan
+        run: |
+          archive_dir="$(find . -maxdepth 1 -type d -name 'attesto_mcp_server-*' -print -quit)"
+          if [ -n "${FORBIDDEN_TERMS_FILE:-}" ]; then
+            while IFS= read -r term; do
+              [ -z "$term" ] || ! grep -R -n -F -- "$term" "$archive_dir"
+            done < "$FORBIDDEN_TERMS_FILE"
+          else
+            echo "final forbidden-term scan is supplied by the orchestrator"
+          fi
+      - run: test -s CONFORMANCE.md && test -s docs/provenance.md && test -s docs/sbom.md && test -s docs/traceability.md
+      - run: elixir examples/stdio.exs </dev/null
+      - working-directory: examples/consumer
+        run: mix deps.get && mix compile --warnings-as-errors && mix run -e '{:ok, server} = AttestoMCP.ExternalConsumer.build_server(); _plug = AttestoMCP.ExternalConsumer.plug(server); AttestoMCP.ExternalConsumer.stdio(server)'
+
+  official-interop:
+    runs-on: ubuntu-latest
+    env:
+      CONFORMANCE_COMMIT: 74edef34d674f563537be8c6587cebaa58e830ca
+      CONFORMANCE_SHA256: 28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293
+      CONFORMANCE_DIR: ${{ runner.temp }}/mcp-conformance
+      CONFORMANCE_ARCHIVE: ${{ runner.temp }}/mcp-conformance.tar.gz
+      TS_CLIENT_DIR: ${{ runner.temp }}/mcp-ts-client
+      PY_CLIENT_DIR: ${{ runner.temp }}/mcp-py-client
+      npm_config_cache: ${{ runner.temp }}/npm-cache
+      PIP_CACHE_DIR: ${{ runner.temp }}/pip-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.3"
+          otp-version: "29.0.5"
+          version-type: strict
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.10.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: mix deps.get
+      - name: frozen official conformance runner
+        run: |
+          curl -fsSL \
+            "https://github.com/modelcontextprotocol/conformance/archive/${CONFORMANCE_COMMIT}.tar.gz" \
+            -o "$CONFORMANCE_ARCHIVE"
+          printf '%s  %s\n' "$CONFORMANCE_SHA256" "$CONFORMANCE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$CONFORMANCE_DIR"
+          tar -xzf "$CONFORMANCE_ARCHIVE" -C "$CONFORMANCE_DIR" --strip-components=1
+          test "$(node -p "require('$CONFORMANCE_DIR/package.json').version")" = "0.2.0-alpha.11"
+          npm ci --prefix "$CONFORMANCE_DIR"
+          npm run build --prefix "$CONFORMANCE_DIR"
+          scripts/run_conformance_fixture.sh "$CONFORMANCE_DIR" 2026-07-28
+          scripts/run_conformance_fixture.sh "$CONFORMANCE_DIR" 2025-11-25
+      - name: exact official TypeScript client smoke
+        run: |
+          npm install --prefix "$TS_CLIENT_DIR" --no-save --ignore-scripts \
+            @modelcontextprotocol/client@2.0.0
+          export MCP_TS_CLIENT_MODULE="$TS_CLIENT_DIR/node_modules/@modelcontextprotocol/client/dist/index.mjs"
+          scripts/run_client_smoke_fixture.sh 2026-07-28 node scripts/client_smoke_ts.mjs
+          scripts/run_client_smoke_fixture.sh 2025-11-25 node scripts/client_smoke_ts.mjs
+      - name: exact official Python client smoke
+        run: |
+          python3 -m pip install --disable-pip-version-check --target "$PY_CLIENT_DIR" mcp==2.1.1
+          export PYTHONPATH="$PY_CLIENT_DIR"
+          scripts/run_client_smoke_fixture.sh 2026-07-28 python3 scripts/client_smoke_python.py
+          scripts/run_client_smoke_fixture.sh 2025-11-25 python3 scripts/client_smoke_python.py

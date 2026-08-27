@@ -1,0 +1,679 @@
+defmodule AttestoMCP.Server.Stdio do
+  @moduledoc "Line-delimited stdio adapter over the shared protocol core."
+
+  alias AttestoMCP.Server.{Error, JSONRPC, Telemetry}
+
+  @doc "Run until stdin reaches EOF. Only compact JSON-RPC messages go to stdout."
+  @spec run(pid() | atom(), keyword()) :: term()
+  def run(server, opts \\ []) do
+    Telemetry.execute([:stdio, :start], %{system_time: System.system_time()}, %{transport: :stdio})
+
+    context = Keyword.get(opts, :context, stdio_context(opts))
+
+    {:ok, legacy_session} =
+      AttestoMCP.Server.new_session(
+        server,
+        context_principal(context),
+        Map.get(context, :tenant) || Map.get(context, "tenant")
+      )
+
+    context = Map.put(context, :legacy_session_id, legacy_session.id)
+    # The default stays conservative because the live-pipe fallback reads one
+    # byte at a time to guarantee prompt newline delivery without retaining an
+    # unterminated peer frame. Hosts handling larger bounded frames must opt in.
+    max = Keyword.get(opts, :max_message_bytes, 64_000)
+    parent = self()
+    input = Keyword.get(opts, :input, fn -> read_bounded_frame(max) end)
+
+    unless is_function(input, 0) do
+      raise ArgumentError, ":input must be a zero-arity function"
+    end
+
+    {reader, reader_monitor} = spawn_monitor(fn -> read_loop(parent, input) end)
+    Process.put(:attesto_mcp_stdio_pending, %{})
+
+    try do
+      loop(server, context, opts, max, reader, reader_monitor, %{})
+    after
+      stop_pending(Process.get(:attesto_mcp_stdio_pending, %{}))
+      Process.delete(:attesto_mcp_stdio_pending)
+      AttestoMCP.Server.delete_session(server, legacy_session.id)
+      if Process.alive?(reader), do: Process.exit(reader, :kill)
+      Process.demonitor(reader_monitor, [:flush])
+      Telemetry.execute([:stdio, :stop], %{count: 1}, %{transport: :stdio, outcome: :closed})
+    end
+  end
+
+  @doc "Starts a server and runs the stdio adapter until EOF."
+  @spec main(keyword()) :: term()
+  def main(opts \\ []) do
+    {:ok, server} = AttestoMCP.Server.start_link(opts)
+    run(server, opts)
+  end
+
+  defp read_loop(parent, input) do
+    try do
+      case input.() do
+        :eof ->
+          send(parent, :stdio_eof)
+
+        {:error, reason} ->
+          send(parent, {:stdio_error, reason})
+
+        {:oversized, reason} ->
+          send(parent, {:stdio_oversized, reason})
+          read_loop(parent, input)
+
+        line when is_binary(line) ->
+          send(parent, {:stdio_line, line})
+          read_loop(parent, input)
+
+        _other ->
+          send(parent, {:stdio_error, :invalid_reader_result})
+      end
+    rescue
+      _ -> send(parent, {:stdio_error, :reader_failure})
+    catch
+      :exit, _ -> send(parent, {:stdio_error, :reader_failure})
+      _, _ -> send(parent, {:stdio_error, :reader_failure})
+    end
+  end
+
+  defp read_bounded_frame(max) when is_integer(max) and max > 0 do
+    read_bounded_frame(max, [], 0, false)
+  end
+
+  # Keep the one-byte read contract for live pipes (a larger IO.read can wait
+  # for the requested size on OTP 27), but retain chunks as iodata.  Repeated
+  # binary concatenation here made a near-limit frame quadratic on the floor
+  # runtime and could make the peer close before the response was produced.
+  defp read_bounded_frame(max, chunks, size, discarding) do
+    case IO.read(:stdio, 1) do
+      :eof ->
+        cond do
+          discarding -> {:oversized, :message_too_large}
+          size == 0 -> :eof
+          true -> IO.iodata_to_binary(Enum.reverse(chunks))
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      "\n" ->
+        if discarding or size > max,
+          do: {:oversized, :message_too_large},
+          else: IO.iodata_to_binary(Enum.reverse(["\n" | chunks]))
+
+      chunk when is_binary(chunk) ->
+        if discarding do
+          read_bounded_frame(max, [], 0, true)
+        else
+          next_size = size + byte_size(chunk)
+
+          if next_size > max do
+            read_bounded_frame(max, [], 0, true)
+          else
+            read_bounded_frame(max, [chunk | chunks], next_size, false)
+          end
+        end
+    end
+  end
+
+  defp loop(server, context, opts, max, reader, reader_monitor, pending) do
+    Process.put(:attesto_mcp_stdio_pending, pending)
+
+    receive do
+      {:stdio_line, line} ->
+        pending = handle_line(server, context, opts, max, line, pending)
+        loop(server, context, opts, max, reader, reader_monitor, pending)
+
+      {:stdio_event, work_ref, event} ->
+        if pending_ref?(pending, work_ref), do: write(event)
+        loop(server, context, opts, max, reader, reader_monitor, pending)
+
+      {:stdio_subscription_event, work_ref, subscription_id, event} ->
+        case pending_entry(pending, work_ref) do
+          %{pid: worker} ->
+            write(event)
+            send(worker, {:stdio_subscription_ack, subscription_id, :ok})
+
+          _ ->
+            :ok
+        end
+
+        loop(server, context, opts, max, reader, reader_monitor, pending)
+
+      {:mcp_legacy_event, stream_ref, _event_id, event} ->
+        if is_function(opts[:on_server_request], 1) and
+             event["method"] in ["sampling/createMessage", "elicitation/create", "roots/list"] do
+          safe_server_request_callback(opts[:on_server_request], event)
+        end
+
+        write(event)
+        AttestoMCP.Server.ack_legacy_stream(server, stream_ref)
+        loop(server, context, opts, max, reader, reader_monitor, pending)
+
+      {:stdio_result, work_ref, result} ->
+        case take_ref(pending, work_ref) do
+          {:ok, id, pending} ->
+            if result != :notification, do: write(result_response(id, result))
+            loop(server, context, opts, max, reader, reader_monitor, pending)
+
+          :missing ->
+            loop(server, context, opts, max, reader, reader_monitor, pending)
+        end
+
+      {:DOWN, ^reader_monitor, :process, ^reader, reason} ->
+        if reason == :normal do
+          receive do
+            :stdio_eof ->
+              deadline =
+                System.monotonic_time(:millisecond) +
+                  (Keyword.get(opts, :eof_grace_ms) || 100)
+
+              drain_pending(pending, deadline)
+              :ok
+
+            {:stdio_error, _reason} ->
+              IO.puts(:stderr, "stdio input error")
+              stop_pending(pending)
+              :ok
+          after
+            0 ->
+              loop(server, context, opts, max, reader, reader_monitor, pending)
+          end
+        else
+          IO.puts(:stderr, "stdio reader stopped")
+          stop_pending(pending)
+          :ok
+        end
+
+      {:DOWN, monitor, :process, _pid, _reason} ->
+        case take_monitor(pending, monitor) do
+          {:ok, id, pending} ->
+            if not is_nil(id),
+              do:
+                write(JSONRPC.error_response(id, Error.internal(%{"reason" => "worker_failure"})))
+
+            loop(server, context, opts, max, reader, reader_monitor, pending)
+
+          :missing ->
+            loop(server, context, opts, max, reader, reader_monitor, pending)
+        end
+
+      :stdio_eof ->
+        deadline = System.monotonic_time(:millisecond) + (Keyword.get(opts, :eof_grace_ms) || 100)
+        drain_pending(pending, deadline)
+        :ok
+
+      {:stdio_error, _reason} ->
+        IO.puts(:stderr, "stdio input error")
+        stop_pending(pending)
+        :ok
+
+      {:stdio_oversized, reason} ->
+        write(JSONRPC.error_response(nil, Error.parse(%{"reason" => to_string(reason)})))
+        loop(server, context, opts, max, reader, reader_monitor, pending)
+    end
+  end
+
+  defp handle_line(server, context, opts, max, line, pending) do
+    line = String.trim_trailing(line, "\n") |> String.trim_trailing("\r")
+
+    case JSONRPC.decode(line, max_bytes: max) do
+      {:ok, %{kind: :notification, method: "notifications/cancelled", params: params}} ->
+        cancel_request(server, context, pending, params)
+
+      {:ok, %{kind: :notification, method: "notifications/initialized"} = request} ->
+        if version_for(request) == "2025-11-25" and mark_legacy_initialized(server, context) do
+          start_worker(server, context, opts, request, pending)
+        else
+          pending
+        end
+
+      {:ok, %{kind: :response} = response} ->
+        route_legacy_response(server, context, response)
+        pending
+
+      {:ok, request} ->
+        start_worker(server, context, opts, request, pending)
+
+      {:error, error} ->
+        write(JSONRPC.error_response(JSONRPC.recover_id(line, max_bytes: max), error))
+        pending
+    end
+  end
+
+  defp start_worker(server, context, opts, request, pending) do
+    parent = self()
+    work_ref = make_ref()
+    id = Map.get(request, :id)
+    key = if is_nil(id), do: {:notification, work_ref}, else: id
+
+    if legacy_not_ready?(server, context, request) do
+      if not is_nil(id),
+        do:
+          write(
+            JSONRPC.error_response(
+              id,
+              Error.invalid_request(%{"reason" => "initialized_notification_required"})
+            )
+          )
+
+      pending
+    else
+      case allow_rate(server, context, request) do
+        :ok ->
+          if not is_nil(id) and Map.has_key?(pending, key) do
+            write(
+              JSONRPC.error_response(id, Error.invalid_request(%{"reason" => "duplicate_id"}))
+            )
+
+            pending
+          else
+            start_worker_process(
+              server,
+              context,
+              opts,
+              request,
+              pending,
+              id,
+              key,
+              parent,
+              work_ref
+            )
+          end
+
+        {:error, :rate_limited} ->
+          if not is_nil(id),
+            do: write(JSONRPC.error_response(id, Error.rate_limited()))
+
+          pending
+      end
+    end
+  end
+
+  defp allow_rate(server, context, request) do
+    category =
+      case Map.get(request, :method) do
+        "completion/complete" ->
+          :completion
+
+        "subscriptions/listen" ->
+          :subscriptions
+
+        _ ->
+          :calls
+      end
+
+    key = {:principal, context_principal(context), :stdio}
+    AttestoMCP.Server.allow_rate(server, key, category)
+  rescue
+    _ -> {:error, :rate_limited}
+  end
+
+  defp start_worker_process(server, context, opts, request, pending, id, key, parent, work_ref) do
+    request_context = request_context(server, context, request)
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        on_event = fn event -> send(parent, {:stdio_event, work_ref, event}) end
+
+        result =
+          AttestoMCP.Server.dispatch(server, request, request_context,
+            transport: :stdio,
+            version: version_for(request),
+            owner: self(),
+            on_event: on_event,
+            request_ref: work_ref,
+            timeout: Keyword.get(opts, :request_timeout) || 30_000
+          )
+
+        case result do
+          {response_id, response} when request.method == "subscriptions/listen" ->
+            case get_in(response, ["result", "_meta", "io.modelcontextprotocol/subscriptionId"]) do
+              subscription_id when is_binary(subscription_id) or is_integer(subscription_id) ->
+                subscription_loop(
+                  server,
+                  parent,
+                  work_ref,
+                  response_id,
+                  response,
+                  subscription_id,
+                  Keyword.get(opts, :subscription_timeout) || 300_000
+                )
+
+              _ ->
+                send(parent, {:stdio_result, work_ref, result})
+            end
+
+          _ ->
+            send(parent, {:stdio_result, work_ref, result})
+        end
+      end)
+
+    Map.put(pending, key, %{id: id, pid: pid, monitor: monitor, ref: work_ref})
+  end
+
+  defp cancel_request(server, context, pending, params) do
+    request_id = params["requestId"] || params["request_id"]
+    owner = pending[request_id] && pending[request_id].pid
+
+    if Map.has_key?(pending, request_id),
+      do: AttestoMCP.Server.cancel_request(server, context_principal(context), request_id, owner)
+
+    AttestoMCP.Server.cancel_subscription(server, request_id, owner)
+
+    pending
+  end
+
+  defp subscription_loop(
+         server,
+         parent,
+         work_ref,
+         response_id,
+         response,
+         subscription_id,
+         timeout
+       ) do
+    receive do
+      {:mcp_subscription, ^work_ref, ^subscription_id, event} ->
+        send(parent, {:stdio_subscription_event, work_ref, subscription_id, event})
+
+        receive do
+          {:stdio_subscription_ack, ^subscription_id, :ok} ->
+            AttestoMCP.Server.ack_subscription(server, subscription_id, self())
+
+            subscription_loop(
+              server,
+              parent,
+              work_ref,
+              response_id,
+              response,
+              subscription_id,
+              timeout
+            )
+
+          {:stdio_subscription_ack, ^subscription_id, {:error, _reason}} ->
+            AttestoMCP.Server.close_subscription(server, subscription_id, self())
+            send(parent, {:stdio_result, work_ref, {response_id, response}})
+        after
+          timeout ->
+            AttestoMCP.Server.close_subscription(server, subscription_id, self())
+            send(parent, {:stdio_result, work_ref, {response_id, response}})
+        end
+
+      {:mcp_subscription_cancel, ^subscription_id} ->
+        send(parent, {:stdio_result, work_ref, {response_id, response}})
+
+      {:mcp_subscription_close, ^subscription_id} ->
+        send(parent, {:stdio_result, work_ref, {response_id, response}})
+
+      _other ->
+        subscription_loop(
+          server,
+          parent,
+          work_ref,
+          response_id,
+          response,
+          subscription_id,
+          timeout
+        )
+    after
+      timeout ->
+        AttestoMCP.Server.close_subscription(server, subscription_id, self())
+        send(parent, {:stdio_result, work_ref, {response_id, response}})
+    end
+  end
+
+  defp context_principal(context),
+    do: Map.get(context, :principal) || Map.get(context, "principal")
+
+  defp request_context(server, context, request) do
+    if version_for(request) == "2025-11-25" do
+      session_id = context[:legacy_session_id]
+
+      context = Map.put(context, :session_id, session_id)
+
+      Map.put(
+        context,
+        :logging_level,
+        AttestoMCP.Server.session_logging_level(
+          server,
+          session_id,
+          context_principal(context),
+          Map.get(context, :tenant) || Map.get(context, "tenant")
+        )
+      )
+    else
+      Map.delete(context, :session_id)
+    end
+  end
+
+  defp mark_legacy_initialized(server, context) do
+    mark_legacy_initialized(
+      server,
+      context,
+      System.monotonic_time(:millisecond) + 100
+    )
+  end
+
+  defp mark_legacy_initialized(server, context, deadline) do
+    session_id = context[:legacy_session_id]
+
+    case AttestoMCP.Server.get_session(
+           server,
+           session_id,
+           context_principal(context),
+           Map.get(context, :tenant) || Map.get(context, "tenant")
+         ) do
+      {:ok, %{version: "2025-11-25"}} ->
+        :ok = AttestoMCP.Server.mark_initialized(server, session_id)
+
+        _ =
+          AttestoMCP.Server.open_legacy_stream(
+            server,
+            session_id,
+            context_principal(context),
+            Map.get(context, :tenant) || Map.get(context, "tenant"),
+            self()
+          )
+
+        true
+
+      {:ok, %{version: nil}} ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          mark_legacy_initialized(server, context, deadline)
+        else
+          false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp route_legacy_response(server, context, response) do
+    result =
+      AttestoMCP.Server.deliver_client_response(
+        server,
+        context[:legacy_session_id],
+        context_principal(context),
+        Map.get(context, :tenant) || Map.get(context, "tenant"),
+        response
+      )
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, {:client_error, _error}} ->
+        :ok
+
+      {:error, :invalid_response} ->
+        write(
+          JSONRPC.error_response(
+            response.id,
+            Error.invalid_request(%{"reason" => "invalid_client_response"})
+          )
+        )
+
+      {:error, :not_found} ->
+        write(
+          JSONRPC.error_response(
+            response.id,
+            Error.invalid_request(%{"reason" => "unsolicited_response"})
+          )
+        )
+    end
+
+    :ok
+  end
+
+  defp legacy_not_ready?(server, context, request) do
+    version_for(request) == "2025-11-25" and
+      request.method not in ["initialize", "ping", "notifications/initialized"] and
+      case AttestoMCP.Server.get_session(
+             server,
+             context[:legacy_session_id],
+             context_principal(context),
+             Map.get(context, :tenant) || Map.get(context, "tenant")
+           ) do
+        {:ok, session} -> not session.initialized
+        _ -> true
+      end
+  end
+
+  defp take_ref(pending, ref) do
+    case Enum.find(pending, fn {_id, entry} -> entry.ref == ref end) do
+      {key, entry} ->
+        Process.demonitor(entry.monitor, [:flush])
+        {:ok, entry.id, Map.delete(pending, key)}
+
+      nil ->
+        :missing
+    end
+  end
+
+  defp take_monitor(pending, monitor) do
+    case Enum.find(pending, fn {_id, entry} -> entry.monitor == monitor end) do
+      {key, entry} -> {:ok, entry.id, Map.delete(pending, key)}
+      nil -> :missing
+    end
+  end
+
+  defp pending_ref?(pending, ref), do: Enum.any?(pending, fn {_id, entry} -> entry.ref == ref end)
+
+  defp pending_entry(pending, ref),
+    do: Enum.find_value(pending, fn {_id, entry} -> if entry.ref == ref, do: entry end)
+
+  defp result_response(_id, {response_id, response}),
+    do: response || JSONRPC.response(response_id, %{})
+
+  defp result_response(id, _),
+    do: JSONRPC.error_response(id, Error.internal(%{"reason" => "worker_failure"}))
+
+  defp stop_pending(pending) do
+    Enum.each(pending, fn {_id, entry} ->
+      Process.exit(entry.pid, :kill)
+      Process.demonitor(entry.monitor, [:flush])
+    end)
+  end
+
+  # EOF is a transport loss for active work, but already-completed responses
+  # must not be discarded merely because the reader delivered EOF first.  A
+  # short, explicit grace window drains ready results; anything still active
+  # is then cancelled and reclaimed by the server's owner monitor.
+  defp drain_pending(pending, _deadline) when map_size(pending) == 0, do: :ok
+
+  defp drain_pending(pending, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining == 0 do
+      stop_pending(pending)
+      :ok
+    else
+      receive do
+        {:stdio_event, work_ref, event} ->
+          if pending_ref?(pending, work_ref), do: write(event)
+          drain_pending(pending, deadline)
+
+        {:stdio_subscription_event, work_ref, subscription_id, event} ->
+          case pending_entry(pending, work_ref) do
+            %{pid: worker} ->
+              write(event)
+              send(worker, {:stdio_subscription_ack, subscription_id, :ok})
+
+            _ ->
+              :ok
+          end
+
+          drain_pending(pending, deadline)
+
+        {:stdio_result, work_ref, result} ->
+          case take_ref(pending, work_ref) do
+            {:ok, id, pending} ->
+              if result != :notification, do: write(result_response(id, result))
+              drain_pending(pending, deadline)
+
+            :missing ->
+              drain_pending(pending, deadline)
+          end
+
+        {:DOWN, monitor, :process, _pid, _reason} ->
+          case take_monitor(pending, monitor) do
+            {:ok, id, pending} ->
+              if not is_nil(id),
+                do:
+                  write(
+                    JSONRPC.error_response(id, Error.internal(%{"reason" => "worker_failure"}))
+                  )
+
+              drain_pending(pending, deadline)
+
+            :missing ->
+              drain_pending(pending, deadline)
+          end
+      after
+        remaining ->
+          stop_pending(pending)
+          :ok
+      end
+    end
+  end
+
+  defp write(message), do: IO.puts(JSONRPC.encode(message))
+
+  defp safe_server_request_callback(callback, event) when is_function(callback, 1) do
+    try do
+      callback.(event)
+    rescue
+      _ -> IO.puts(:stderr, "stdio server-request callback failed")
+    catch
+      _, _ -> IO.puts(:stderr, "stdio server-request callback failed")
+    end
+  end
+
+  defp safe_server_request_callback(_callback, _event), do: :ok
+
+  defp version_for(%{method: "initialize", params: params}) when is_map(params) do
+    get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]) || "2025-11-25"
+  end
+
+  defp version_for(%{method: "initialize"}), do: "2025-11-25"
+  defp version_for(%{method: "notifications/initialized"}), do: "2025-11-25"
+
+  defp version_for(%{params: params}) do
+    get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]) || "2025-11-25"
+  end
+
+  defp stdio_context(opts) do
+    %{
+      principal: Keyword.get(opts, :principal, System.get_env("ATTESTO_MCP_PRINCIPAL", "stdio")),
+      tenant: Keyword.get(opts, :tenant, System.get_env("ATTESTO_MCP_TENANT")),
+      scopes: Keyword.get(opts, :scopes, []),
+      credentials: :environment
+    }
+  end
+end

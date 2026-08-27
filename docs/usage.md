@@ -1,0 +1,291 @@
+# Usage and deployment
+
+## Bandit development server
+
+The HTTP boundary is a normal Plug. A documented local launcher is:
+
+```elixir
+Mix.install([{:attesto_mcp_server, path: "."}, {:bandit, "~> 1.6"}], verbose: false)
+{:ok, server} = AttestoMCP.Server.start_link(name: :bandit_example)
+plug = {AttestoMCP.Server.Plug, server: server, path: "/mcp", auth: [config: my_attesto_config, base_url: "http://127.0.0.1:4000"]}
+Bandit.start_link(plug: plug, scheme: :http, ip: {127, 0, 0, 1}, port: 4000)
+```
+
+For an executable credential-free launcher, use `elixir examples/bandit.exs`.
+It starts Bandit with an empty static keystore and therefore answers 401 until
+the host supplies a token; it contains no hidden application module or secret.
+
+### Frozen conformance fixture
+
+The package includes an authenticated, package-owned Bandit fixture under
+`test/conformance_fixture_test.exs`. It registers representative tools,
+resources, a URI template, prompts, and completion, then exercises real TCP
+HTTP with an Attesto test token. Run the fixture independently for each frozen
+requirements set:
+
+```sh
+MCP_REQUIREMENTS=2026-07-28 MIX_ENV=test mix test test/conformance_fixture_test.exs --seed 0
+MCP_REQUIREMENTS=2025-11-25 MIX_ENV=test mix test test/conformance_fixture_test.exs --seed 0
+```
+
+These are authenticated fixture preflights, not a substitute for the pinned
+official conformance runner. They do not count disabled Tasks scenarios and do
+not claim full conformance.
+
+Use TLS at the deployment edge, pin `base_url`/`origin` when a reverse proxy
+terminates TLS, and configure trusted proxy normalization before the Plug.
+
+## Attesto and resource metadata
+
+The `auth` options enter the approved `AttestoMCP.Plug.ProtectResource` boundary
+before body decoding on every protected POST/GET/DELETE leg. Its prepared
+dynamic authorization step receives the route/filter scope union after bounded
+POST decoding; Attesto owns token, DPoP, mTLS, RFC 9728 challenges, and scope
+algebra. Configure an
+issuer/resource verifier, `resource: "/mcp"` (or a canonical resource
+identifier), `resource_metadata_url` only when explicitly pinned, and DPoP
+replay/nonce plus mTLS DER callbacks when used by the deployment. The metadata
+endpoint is public; protected POST/GET/DELETE traffic is not.
+
+The package requires `attesto_mcp ~> 1.2` and calls the public
+`ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
+directly. There is no sibling-path or pre-1.2 authentication fallback.
+
+Per-delivery subscription reauthorization requires an executable `%Attesto.Config{}`
+through `auth: [config: ...]`. An `issuer:` without a verifier configuration is
+metadata-only: it may serve RFC 9728 metadata, but protected traffic fails
+closed until the host supplies an executable Attesto configuration.
+
+### Handler notifications and logging
+
+The handler context contains `notify/1` for bounded server-originated
+notifications. It returns `:ok` only when the request's response sink accepted
+the notification, or `{:error, reason}` when the sink is unavailable, the event
+is unsupported, the event is over the request queue limit, or policy filters it.
+The event must be a JSON-safe JSON-RPC notification with no `id`, `result`, or
+`error`; request methods such as `sampling/createMessage` are available only
+through the capability-gated `client_request/2` callback. `context.progress/3`
+is the corresponding progress helper and reports delivery failure rather than
+claiming success without a sink.
+
+An HTTP handler has a notification sink only when its request uses an SSE
+response. Configure `stream_tools` or `stream_all_tools`, or supply a progress
+token for a request that emits progress. A JSON response has no side channel,
+so `notify/1` returns `{:error, :unsupported}` there. For modern
+`notifications/message`, the server must also be started with
+`capabilities: %{"logging" => %{}}` and the request must include a recognized
+`_meta["io.modelcontextprotocol/logLevel"]`; otherwise logging is deliberately
+suppressed.
+
+Modern requests may include `_meta["io.modelcontextprotocol/logLevel"]` with a
+recognized syslog severity. `notifications/message` is suppressed when that
+metadata is absent and is delivered only at or above the requested threshold
+on the owning response stream. Legacy sessions start with a conservative
+no-log policy and `logging/setLevel` changes that threshold for that session
+only. Logging notifications contain a recognized level, optional bounded
+logger, and bounded JSON data; arbitrary protocol envelopes, secrets, and
+client requests are rejected.
+
+## Registration
+
+Register tools, resources, URI templates, prompts, and completions before
+serving traffic. Identity collisions return `{:error, {:duplicate, type,
+identity}}`. Registration rejects unsafe names/URIs/templates, malformed
+handlers, unsupported JSON Schema dialects/remote references, and schemas
+outside the bounded local 2020-12/draft-07 subset. Anchors, local dynamic
+references, tuple items, unevaluated items, and content annotations are
+validated without network fetches. Registry output is stable
+by identity and pagination cursors are opaque, signed, expiring, and bound to
+the principal, tenant, scopes, visible catalog revision, page size, and
+negotiated era.
+
+Resource templates use bounded reverse matching for one RFC 6570 expression:
+named path variables (`{id}`), reserved path variables (`{+path}`), prefix
+modifiers (`{id:3}`), and query variables (`{?q,limit}` or `{?keys*}`) are
+supported. Query values are strictly percent-decoded, bounded, and reject
+ambiguous duplicates or decoded traversal. Unsupported multi-expression or
+operator layouts are rejected at registration rather than accepted with
+nonfunctional matching. A matching `resources/read` handler receives both the
+requested `uri` and a `params` map of captured variables. Completion handlers should register an
+explicit `ref` matching the prompt or resource-template reference; only that
+handler is invoked, and returned string values preserve the handler's
+relevance order, are de-duplicated, and are capped at 100 with truthful
+`total`/`hasMore` metadata.
+
+Tool output content, prompt messages, and resource contents are checked before
+they reach the wire. Supported content includes text, Base64 image/audio,
+resource links, embedded resources, and structured tool output. Malformed
+handler output is converted to a safe protocol failure or `isError` tool
+result; business and upstream failures remain ordinary MCP error results.
+
+### Limits and scope policy
+
+`max_concurrency`, `per_principal_concurrency`, `request_timeout`,
+`max_request_timeout`, `max_queue`, `stream_keepalive_ms`, and
+`stream_queue_size` are the bounded server limits. `subscription_queue_size`
+may override `max_queue` for modern subscriptions; otherwise all stream and
+subscription queues use `max_queue`. A Plug option overrides the corresponding
+server option for that adapter. The server `scope_map` is the default policy;
+an explicit Plug `scope_map` replaces it for HTTP, and the effective map is
+used both by the prepared AttestoMCP authorization boundary and by protocol dispatch.
+There is no second implicit scope source.
+
+`rate_limits` is an optional map of bounded token buckets for `calls`,
+`completion`, `subscriptions`, and `auth_failures`; each entry is
+`%{burst: positive_integer, window_ms: positive_integer}`. Defaults are
+600/60s, 300/60s, 100/60s, and 120/60s respectively. A category can be set to
+`false` only when the host explicitly accepts unlimited traffic for that
+category; malformed settings fail closed. Rejections use HTTP 429 and
+JSON-RPC `-32029`, and are isolated by principal plus remote address.
+
+Plug-only streaming selection is explicit and validated at
+`AttestoMCP.Server.Plug.init/1`:
+`stream_tools: ["tool_name"]` enables request-scoped SSE for those tool calls,
+while `stream_all_tools: true` enables it for every tool call. Names must be
+unique strings and the all-tools flag must be boolean; malformed values fail
+at startup rather than during a request. These options are intended for hosts
+whose tools produce progress or server notifications. Subscriptions and calls
+with a caller progress token remain streaming regardless of this selection.
+
+### HTTP mirror declarations
+
+Modern tools/call mirror headers are declared by the registered tool's
+input_schema property, never by request metadata. A property can require a
+parameter header with the x-mcp-header annotation:
+
+~~~elixir
+input_schema: %{
+  "type" => "object",
+  "properties" => %{
+    "account" => %{
+      "type" => "string",
+      "x-mcp-header" => "account"
+    }
+  }
+}
+~~~
+
+The `x-mcp-header` value is a nonempty RFC 9110 `tchar` suffix; the server
+constructs `Mcp-Param-{suffix}`. It is valid only on statically reachable
+string, integer, or boolean properties. If the property is absent or null,
+the client omits its header; otherwise exactly one header is required and its
+decoded value must equal the nested `params.arguments` value. The normative
+Base64 sentinel is `=?base64?SGVsbG8=?=`: padding and alphabet are strict, and
+values missing either prefix or suffix are compared literally. Mixed-case
+header names and RFC 9110 optional whitespace are handled safely. `Mcp-Name`
+mirrors the tool name, while task methods mirror `params.taskId`.
+
+### Modern subscriptions and interactive requests
+
+`subscriptions/listen` accepts a non-empty `notifications` object containing
+the category flags `toolsListChanged`, `promptsListChanged`,
+`resourcesListChanged`, and/or a `resourceSubscriptions` URI list. The listen
+request ID is the subscription ID. The stream begins with
+`notifications/subscriptions/acknowledged`; each later notification keeps its
+actual MCP method and carries the ID under
+`params._meta["io.modelcontextprotocol/subscriptionId"]`. Delivery is bounded,
+filtered, and reauthorized for the subscription owner. Protected HTTP opens
+require the union of the configured subscription scope(s) and the category
+scopes: `tools_read`, `prompts_read`, and/or `resources_read`; the same union is
+checked again before each delivery.
+
+Modern tool, resource, and prompt handlers may return `{:input_required,
+requests}` where `requests` is a map of unique server keys to real
+`elicitation/create`, `sampling/createMessage`, or `roots/list` request
+objects. The server emits a map of server-assigned `input_N` keys and an integrity-protected requestState;
+retry with a new JSON-RPC ID and matching typed `inputResponses`: elicitation
+responses use `action` (and accepted `content`), sampling responses use
+`role`, `content`, `model`, and `stopReason`, and roots responses use a
+`roots` array.
+
+## Era separation
+
+The JSON-RPC decoder rejects batches, invalid UTF-8, fractional/null IDs,
+oversized or over-deep messages, and malformed response objects. Duplicate
+JSON member names are outside this package's accepted protocol contract; the
+decoder delegates their handling to Jason and does not promise an ordering
+policy. Producers must not send duplicates; hosts requiring rejection should
+reject those bytes before dispatch.
+
+Modern requests carry `_meta.io.modelcontextprotocol/protocolVersion` and
+`clientCapabilities` per request and use POST-only request-scoped responses.
+Legacy starts with `initialize`, then `notifications/initialized`, and may use
+an expiring principal-bound `Mcp-Session-Id`. Modern requests never use a
+legacy session.
+
+Legacy GET is a standing incremental SSE stream with bounded keepalive and
+session-owner delivery. DELETE closes the authenticated session and its
+streams. This release does not advertise cross-process replication or
+Last-Event-ID resumption; a Last-Event-ID GET is rejected rather than replayed.
+Legacy initialization advertises the server's `resources.subscribe` capability;
+clients do not need to self-declare that server capability. After
+`notifications/initialized`, negotiated `sampling`, `elicitation`, and `roots`
+client capabilities permit corresponding server-originated requests on the
+SSE/stdio route, with typed JSON-RPC responses correlated to the waiting
+handler. During HTTP connection startup, a server-originated request waits for
+the session's owned standing stream for at most one second or the configured
+client-request timeout, whichever is shorter; it then fails closed as not
+ready.
+
+Hosts may provide `initialize_callback: fn context, params -> :ok end` to
+reject legacy initialization before negotiated state is committed. Callback
+exceptions and arbitrary rejection terms are converted to a generic correlated
+JSON-RPC internal error; no callback reason is sent to clients, and the Plug
+endpoint remains available for later requests.
+
+### Task profiles
+
+The optional modern and legacy task profiles are disabled in this release. No
+task capability is advertised, modern `tasks/*` methods return
+method-not-found, legacy task opt-in is ignored, and the supervised task
+boundary fails closed. The `modern_tasks` and `legacy_tasks` options cannot
+enable the incomplete in-memory implementation; a future release must provide
+a durable store contract before advertising either profile.
+
+## Telemetry
+
+Events use the `[:attesto_mcp_server, ...]` prefix. Metadata is filtered to
+protocol version, method, transport, status, duration, outcome, and opaque
+correlation values. Request/auth/handler/stream/progress/subscription/task and
+protocol error events are safe to attach to an application reporter. The
+stable event contract is:
+
+* `http_request` and `stdio`: `start`, `stop`, and `exception`.
+* `request`, `handler`, and `stream`: `start`, `stop`, `exception`, with
+  `timeout`, `open`, `close`, and `backpressure` where applicable.
+* `auth/refusal`, `protocol/error`, `cancellation/request`,
+  `cancellation/stop`, and `progress/emit` or `progress/reject`.
+* `mrtr/round`, `subscription/open`, `subscription/close`,
+  `subscription/suppressed`, and `subscription/backpressure`.
+* `cache/choice`, `cache/invalidation`, `session/open`, `session/close`, and
+  `supervision/restart`.
+
+Credential, proof, request-state, baggage, private content, and arbitrary
+callback values are removed before Telemetry emission.
+
+### W3C trace context
+
+Request `_meta` may carry `traceparent`, `tracestate`, and `baggage`. The core
+syntax-validates `traceparent`; `tracestate` and `baggage` are bounded opaque
+forwarding values. Each field is limited to 4096 bytes and accepted values are
+passed to handlers as `context.trace_context`. Baggage is available to the
+handler only; it is never included in logs or Telemetry.
+
+## Stdio interop
+
+`elixir examples/stdio.exs` launches the line-delimited adapter with no
+credentials embedded. During cold installation it temporarily assigns Mix's
+group leader to standard error (and also uses `Mix.Shell.Quiet` with
+`verbose: false`), then restores the protocol stdout before starting the
+adapter. Compilation and dependency diagnostics therefore stay off stdout;
+stdout
+contains protocol frames only. The preferred modern 2026 flow uses discovery and
+per-request `_meta` protocol-version/capability metadata; it does not send an
+`initialize` request. The adapter also accepts the frozen legacy
+initialize/initialized flow on stdin, writes only compact JSON-RPC messages to
+stdout, and exits on EOF. Its default bounded frame limit is 64,000 bytes;
+larger limits must be explicit. A host may instead call
+`AttestoMCP.Server.Stdio.run/2` with its own supervised server and context.
+
+Only the two frozen versions are accepted: `2026-07-28` for modern discovery
+and per-request metadata, and `2025-11-25` for the negotiated legacy lifecycle.

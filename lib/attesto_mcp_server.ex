@@ -1,0 +1,185 @@
+defmodule AttestoMCP.Server.API do
+  @moduledoc """
+  Stable host-facing facade for `AttestoMCP.Server`.
+
+  Registration is performed before serving traffic. Definitions use JSON-style
+  string keys for schemas and wire values; handler callbacks receive arguments
+  plus an authorization context and return `{:ok, result}`, `{:error, reason}`,
+  or the modern `{:input_required, requests}` MRTR form.
+
+  The facade intentionally exposes no task profile in this release. Calls that
+  would enable modern or legacy Tasks return the dated method-not-found result.
+
+  Handler callbacks use `handler.(arguments, context)`. The context contains
+  the authenticated principal, tenant, scopes, transport, negotiated version,
+  request ID, `trace_context`, progress callback, and the Attesto assigns
+  (`:attesto_mcp_claims`, `:attesto_mcp_scopes`, `:attesto_mcp_sender`,
+  `:attesto_mcp_principal`, and `:attesto_context`) when the Plug boundary is
+  used. A successful callback returns `{:ok, result}`, an application failure
+  returns `{:error, reason}`, and an interactive callback returns
+  `{:input_required, request_map}` with typed MRTR request entries.
+  """
+
+  @typedoc "A supervised server pid or a registered server name."
+  @type server :: pid() | atom()
+
+  @typedoc "A supported server startup option and its value."
+  @type server_option ::
+          {:name, atom()}
+          | {:protocol_versions, [String.t()]}
+          | {:max_concurrency, pos_integer()}
+          | {:per_principal_concurrency, pos_integer()}
+          | {:request_timeout, non_neg_integer()}
+          | {:max_request_timeout, pos_integer()}
+          | {:client_request_timeout, pos_integer()}
+          | {:legacy_initialized_grace_ms, non_neg_integer()}
+          | {:session_idle_timeout, pos_integer()}
+          | {:session_absolute_timeout, pos_integer()}
+          | {:max_body_bytes, pos_integer()}
+          | {:max_message_bytes, pos_integer()}
+          | {:max_queue, pos_integer()}
+          | {:stream_keepalive_ms, pos_integer()}
+          | {:stream_queue_size, pos_integer()}
+          | {:subscription_queue_size, pos_integer()}
+          | {:rate_limits, map()}
+          | {:cursor_secret, binary()}
+          | {:cursor_ttl, pos_integer()}
+          | {:request_state_secret, binary()}
+          | {:request_state_instance, binary()}
+          | {:request_state_store, pid()}
+          | {:clustered, boolean()}
+          | {:request_state_ttl, pos_integer()}
+          | {:scope_map, map()}
+          | {:subscription_timeout, pos_integer()}
+          | {:initialize_callback, (map(), map() -> :ok | {:error, term()})}
+          | {:instructions, String.t()}
+          | {:server_name, String.t()}
+          | {:server_version, String.t()}
+          | {:capabilities, map()}
+          | {:modern_tasks, false}
+          | {:legacy_tasks, false}
+  @typedoc "Keyword options accepted by `start_link/1`; task flags are disabled in this release."
+  @type server_opts :: [server_option()]
+
+  @typedoc "A registered primitive definition with JSON-compatible fields."
+  @type definition :: map() | keyword()
+
+  @typedoc "Authorization and transport context passed to handlers."
+  @type handler_context :: map()
+
+  @typedoc "A text, image, audio, resource-link, or embedded-resource item."
+  @type content_item :: map()
+
+  @typedoc "A normalized tool result with content and optional structured output."
+  @type tool_result :: map()
+
+  @typedoc "A prompt message with a user or assistant role and content item."
+  @type prompt_message :: map()
+
+  @typedoc "A text or Base64 resource content entry."
+  @type resource_content :: map()
+
+  @typedoc "A modern result carrying resultType and protocol metadata."
+  @type modern_result :: map()
+
+  @typedoc "A normal, failed, or interactive handler return."
+  @type handler_return ::
+          {:ok, term()}
+          | {:error, term()}
+          | {:input_required, %{optional(String.t()) => map()}}
+
+  @typedoc "A decoded JSON-RPC request, notification, or response."
+  @type request :: map()
+
+  @typedoc "Modern subscription category/resource filters."
+  @type subscription_filter :: %{optional(String.t()) => boolean() | [String.t()]}
+
+  @typedoc "Interactive request-state and input-response payloads."
+  @type mrtr_payload :: %{optional(String.t()) => term()}
+
+  @doc """
+  Starts the supervised, transport-neutral MCP server.
+
+      iex> {:ok, server} = AttestoMCP.Server.API.start_link([])
+      iex> is_pid(server)
+      true
+      iex> GenServer.stop(server)
+      :ok
+  """
+  @spec start_link(server_opts()) :: GenServer.on_start()
+  defdelegate start_link(opts \\ []), to: AttestoMCP.Server
+
+  @doc "Registers a tool definition and publishes a modern catalog invalidation."
+  @spec register_tool(server(), String.t(), definition()) :: :ok | {:error, term()}
+  defdelegate register_tool(server, name, definition), to: AttestoMCP.Server
+
+  @doc "Registers a static resource definition."
+  @spec register_resource(server(), String.t(), definition()) :: :ok | {:error, term()}
+  defdelegate register_resource(server, uri, definition), to: AttestoMCP.Server
+
+  @doc "Registers a URI-template resource definition."
+  @spec register_resource_template(server(), String.t(), definition()) ::
+          :ok | {:error, term()}
+  defdelegate register_resource_template(server, template, definition), to: AttestoMCP.Server
+
+  @doc "Registers a prompt definition, including required and optional arguments."
+  @spec register_prompt(server(), String.t(), definition()) :: :ok | {:error, term()}
+  defdelegate register_prompt(server, name, definition), to: AttestoMCP.Server
+
+  @doc "Registers a completion handler tied to an explicit prompt/template reference."
+  @spec register_completion(server(), String.t(), definition()) :: :ok | {:error, term()}
+  defdelegate register_completion(server, name, definition), to: AttestoMCP.Server
+
+  @doc "Registers one primitive of a supported type."
+  @spec register(server(), atom(), String.t(), definition()) :: :ok | {:error, term()}
+  def register(server, type, identity, definition),
+    do: AttestoMCP.Server.register(server, type, identity, definition)
+
+  @doc "Dispatches one decoded request through the shared protocol core."
+  @spec dispatch(server(), request(), handler_context(), keyword()) :: term()
+  def dispatch(server, request, context \\ %{}, opts \\ []),
+    do: AttestoMCP.Server.dispatch(server, request, context, opts)
+
+  @doc "Returns the registered primitive snapshot."
+  @spec snapshot(server()) :: map()
+  def snapshot(server), do: AttestoMCP.Server.snapshot(server)
+
+  @doc "Returns bounded public counters for active work and transport state."
+  @spec stats(server()) :: map()
+  def stats(server), do: AttestoMCP.Server.stats(server)
+
+  @doc "Returns normalized startup options used by Plug and stdio adapters."
+  @spec options(server()) :: keyword()
+  def options(server), do: AttestoMCP.Server.options(server)
+
+  @doc "Creates a principal/tenant-bound legacy session."
+  @spec new_session(server(), term(), term(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def new_session(server, principal, tenant \\ nil, opts \\ []),
+    do: AttestoMCP.Server.new_session(server, principal, tenant, opts)
+
+  @doc "Looks up a session only for its bound principal and tenant."
+  @spec get_session(server(), String.t(), term(), term()) :: {:ok, struct()} | {:error, term()}
+  def get_session(server, id, principal, tenant \\ nil),
+    do: AttestoMCP.Server.get_session(server, id, principal, tenant)
+
+  @doc "Deletes a legacy session and its owned streams."
+  @spec delete_session(server(), String.t()) :: :ok | {:error, term()}
+  defdelegate delete_session(server, id), to: AttestoMCP.Server
+
+  @doc "Publishes a filtered modern notification and legacy event."
+  @spec publish(server(), map(), keyword()) :: :ok | {:error, term()}
+  def publish(server, notification, opts \\ []),
+    do: AttestoMCP.Server.publish(server, notification, opts)
+
+  @doc "Closes a modern subscription."
+  @spec close_subscription(server(), term()) :: :ok | {:error, term()}
+  defdelegate close_subscription(server, id), to: AttestoMCP.Server
+
+  @doc "Cancels a modern subscription."
+  @spec cancel_subscription(server(), term()) :: :ok | {:error, term()}
+  defdelegate cancel_subscription(server, id), to: AttestoMCP.Server
+
+  @doc "Cancels a request owned by a principal."
+  @spec cancel_request(server(), term(), term()) :: :ok | {:error, term()}
+  defdelegate cancel_request(server, principal, request_id), to: AttestoMCP.Server
+end
