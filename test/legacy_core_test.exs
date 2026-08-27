@@ -4,8 +4,9 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
   alias AttestoMCP.Server
 
   @legacy "2025-11-25"
+  @legacy_2025_06_18 "2025-06-18"
 
-  test "legacy ping, logging, and initialization negotiate only the frozen version" do
+  test "legacy ping, logging, and initialization negotiate supported frozen versions" do
     {:ok, server} = Server.start_link([])
 
     assert {1, %{"result" => %{}}} =
@@ -41,7 +42,6 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
                  method: "initialize",
                  params: %{
                    "protocolVersion" => @legacy,
-                   "protocolVersions" => [@legacy],
                    "capabilities" => %{},
                    "clientInfo" => %{"name" => "legacy-test", "version" => "1.0"}
                  }
@@ -52,6 +52,23 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
 
     assert capabilities["resources"]["subscribe"] == true
     assert capabilities["logging"] == %{}
+
+    assert {41, %{"result" => %{"protocolVersion" => @legacy_2025_06_18}}} =
+             Server.dispatch(
+               server,
+               %{
+                 kind: :request,
+                 id: 41,
+                 method: "initialize",
+                 params: %{
+                   "protocolVersion" => @legacy_2025_06_18,
+                   "capabilities" => %{},
+                   "clientInfo" => %{"name" => "compat-test", "version" => "1.0"}
+                 }
+               },
+               %{principal: "legacy"},
+               version: @legacy_2025_06_18
+             )
 
     assert {5, %{"error" => %{"code" => -32022, "data" => data}}} =
              Server.dispatch(
@@ -71,7 +88,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
              )
 
     assert data["requested"] == "2026-07-28"
-    assert data["supported"] == [@legacy]
+    assert data["supported"] == [@legacy, @legacy_2025_06_18]
   end
 
   test "legacy resource subscriptions filter one-route SSE delivery and close on delete" do
@@ -114,6 +131,300 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
 
     Server.delete_session(server, session.id)
     assert_receive {:mcp_legacy_close, ^stream, :session_deleted}, 1_000
+  end
+
+  test "2025-06-18 omits newer catalog icons and rejects newer client-request modes" do
+    {:ok, server} = Server.start_link([])
+
+    assert :ok =
+             Server.register_tool(server, "versioned", %{
+               icons: [%{src: "https://example.test/icon.png"}],
+               handler: fn _, _ -> {:ok, "ok"} end
+             })
+
+    icon = %{"src" => "https://example.test/icon.png"}
+
+    assert :ok =
+             Server.register_tool(server, "versioned_content", %{
+               handler: fn _, _ ->
+                 {:ok,
+                  %{
+                    "content" => [
+                      %{
+                        "type" => "resource_link",
+                        "uri" => "https://example.test/resource",
+                        "name" => "resource",
+                        "icons" => [icon]
+                      },
+                      %{
+                        "type" => "resource",
+                        "resource" => %{
+                          "uri" => "https://example.test/embedded",
+                          "text" => "embedded",
+                          "icons" => [icon]
+                        }
+                      }
+                    ]
+                  }}
+               end
+             })
+
+    assert :ok =
+             Server.register_resource(server, "https://example.test/resource", %{
+               icons: [%{src: "https://example.test/icon.png"}],
+               handler: fn _, _ ->
+                 {:ok,
+                  %{
+                    "contents" => [
+                      %{
+                        "uri" => "https://example.test/resource",
+                        "text" => "resource",
+                        "icons" => [icon]
+                      }
+                    ]
+                  }}
+               end
+             })
+
+    assert :ok =
+             Server.register_resource_template(server, "https://example.test/{id}", %{
+               icons: [%{src: "https://example.test/icon.png"}]
+             })
+
+    assert :ok =
+             Server.register_prompt(server, "versioned_prompt", %{
+               icons: [%{src: "https://example.test/icon.png"}],
+               handler: fn _, _ ->
+                 {:ok,
+                  %{
+                    "messages" => [
+                      %{
+                        "role" => "user",
+                        "content" => %{
+                          "type" => "resource_link",
+                          "uri" => "https://example.test/resource",
+                          "name" => "resource",
+                          "icons" => [icon]
+                        }
+                      }
+                    ]
+                  }}
+               end
+             })
+
+    list = %{kind: :request, id: 50, method: "tools/list", params: %{}}
+
+    assert {50, %{"result" => %{"tools" => older_tools}}} =
+             Server.dispatch(server, list, %{principal: "older"}, version: @legacy_2025_06_18)
+
+    older = Enum.find(older_tools, &(&1["name"] == "versioned"))
+    refute Map.has_key?(older, "icons")
+
+    assert {50, %{"result" => %{"tools" => newer_tools}}} =
+             Server.dispatch(server, list, %{principal: "newer"}, version: @legacy)
+
+    newer = Enum.find(newer_tools, &(&1["name"] == "versioned"))
+    assert is_list(newer["icons"])
+
+    catalogs = [
+      {"resources/list", "resources", "uri", "https://example.test/resource"},
+      {"resources/templates/list", "resourceTemplates", "uriTemplate",
+       "https://example.test/{id}"},
+      {"prompts/list", "prompts", "name", "versioned_prompt"}
+    ]
+
+    Enum.with_index(catalogs, 60)
+    |> Enum.each(fn {{method, result_key, identity_key, identity}, id} ->
+      request = %{kind: :request, id: id, method: method, params: %{}}
+
+      assert {^id, %{"result" => %{^result_key => older_items}}} =
+               Server.dispatch(server, request, %{principal: "older"},
+                 version: @legacy_2025_06_18
+               )
+
+      older_item = Enum.find(older_items, &(Map.get(&1, identity_key) == identity))
+      refute Map.has_key?(older_item, "icons")
+
+      assert {^id, %{"result" => %{^result_key => newer_items}}} =
+               Server.dispatch(server, request, %{principal: "newer"}, version: @legacy)
+
+      newer_item = Enum.find(newer_items, &(Map.get(&1, identity_key) == identity))
+      assert newer_item["icons"] == [icon]
+    end)
+
+    call = %{
+      kind: :request,
+      id: 51,
+      method: "tools/call",
+      params: %{"name" => "versioned_content", "arguments" => %{}}
+    }
+
+    assert {51, %{"result" => %{"content" => [older_link, older_embedded]}}} =
+             Server.dispatch(server, call, %{principal: "older"}, version: @legacy_2025_06_18)
+
+    refute Map.has_key?(older_link, "icons")
+    refute Map.has_key?(older_embedded["resource"], "icons")
+
+    assert {51, %{"result" => %{"content" => [newer_link, newer_embedded]}}} =
+             Server.dispatch(server, call, %{principal: "newer"}, version: @legacy)
+
+    assert newer_link["icons"] == [icon]
+    assert newer_embedded["resource"]["icons"] == [icon]
+
+    read = %{
+      kind: :request,
+      id: 52,
+      method: "resources/read",
+      params: %{"uri" => "https://example.test/resource"}
+    }
+
+    assert {52, %{"result" => %{"contents" => [older_resource]}}} =
+             Server.dispatch(server, read, %{principal: "older"}, version: @legacy_2025_06_18)
+
+    refute Map.has_key?(older_resource, "icons")
+
+    assert {52, %{"result" => %{"contents" => [newer_resource]}}} =
+             Server.dispatch(server, read, %{principal: "newer"}, version: @legacy)
+
+    assert newer_resource["icons"] == [icon]
+
+    get_prompt = %{
+      kind: :request,
+      id: 53,
+      method: "prompts/get",
+      params: %{"name" => "versioned_prompt", "arguments" => %{}}
+    }
+
+    assert {53, %{"result" => %{"messages" => [%{"content" => older_prompt_content}]}}} =
+             Server.dispatch(server, get_prompt, %{principal: "older"},
+               version: @legacy_2025_06_18
+             )
+
+    refute Map.has_key?(older_prompt_content, "icons")
+
+    assert {53, %{"result" => %{"messages" => [%{"content" => newer_prompt_content}]}}} =
+             Server.dispatch(server, get_prompt, %{principal: "newer"}, version: @legacy)
+
+    assert newer_prompt_content["icons"] == [icon]
+
+    {:ok, session} = Server.new_session(server, "older", "tenant")
+
+    assert :ok =
+             Server.negotiate_session(
+               server,
+               session.id,
+               "older",
+               "tenant",
+               @legacy_2025_06_18,
+               %{"sampling" => %{}, "elicitation" => %{}}
+             )
+
+    assert :ok = Server.mark_initialized(server, session.id)
+
+    assert {:ok, _stream} =
+             Server.open_legacy_stream(server, session.id, "older", "tenant", self())
+
+    assert {:error, :unsupported} =
+             Server.request_client(
+               server,
+               session.id,
+               "older",
+               "tenant",
+               "elicitation/create",
+               %{
+                 "mode" => "url",
+                 "url" => "https://example.test/continue",
+                 "message" => "Continue"
+               },
+               100
+             )
+
+    assert {:error, :unsupported} =
+             Server.request_client(
+               server,
+               session.id,
+               "older",
+               "tenant",
+               "sampling/createMessage",
+               %{"messages" => [], "toolChoice" => %{"mode" => "none"}},
+               100
+             )
+
+    assert {:error, :unsupported} =
+             Server.request_client(
+               server,
+               session.id,
+               "older",
+               "tenant",
+               "elicitation/create",
+               %{
+                 "mode" => "form",
+                 "message" => "Continue",
+                 "requestedSchema" => %{"type" => "object"}
+               },
+               100
+             )
+
+    assert {:error, :unsupported} =
+             Server.request_client(
+               server,
+               session.id,
+               "older",
+               "tenant",
+               "sampling/createMessage",
+               %{"messages" => [], "tools" => []},
+               100
+             )
+
+    refute_receive {:mcp_legacy_event, _, _, _}, 50
+  end
+
+  test "session version setter rejects unknown revisions and negotiated changes" do
+    {:ok, server} = Server.start_link([])
+    {:ok, session} = Server.new_session(server, "legacy", nil)
+
+    assert {:error, :invalid_version} = Server.set_session_version(server, session.id, "unknown")
+    assert :ok = Server.set_session_version(server, session.id, @legacy_2025_06_18)
+    assert {:error, :invalid_version} = Server.set_session_version(server, session.id, @legacy)
+  end
+
+  test "session negotiation is single-use and cannot replace revision or capabilities" do
+    {:ok, server} = Server.start_link([])
+    {:ok, session} = Server.new_session(server, "legacy", nil)
+    capabilities = %{"elicitation" => %{}}
+
+    assert :ok =
+             Server.negotiate_session(
+               server,
+               session.id,
+               "legacy",
+               nil,
+               @legacy_2025_06_18,
+               capabilities
+             )
+
+    assert {:error, :already_negotiated} =
+             Server.negotiate_session(server, session.id, "legacy", nil, @legacy, %{})
+
+    assert {:ok, retained} = Server.get_session(server, session.id, "legacy", nil)
+    assert retained.version == @legacy_2025_06_18
+    assert retained.client_capabilities == capabilities
+
+    request = %{kind: :request, id: 54, method: "tools/list", params: %{}}
+
+    assert {54, %{"error" => %{"code" => -32600, "data" => binding_error}}} =
+             Server.dispatch(
+               server,
+               request,
+               %{
+                 principal: "legacy",
+                 session_id: session.id,
+                 protocol_version: @legacy_2025_06_18
+               },
+               version: @legacy
+             )
+
+    assert binding_error["reason"] == "negotiated_version_mismatch"
   end
 
   test "legacy server-originated requests require initialized negotiated capability and route responses" do
@@ -292,8 +603,18 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     parent = self()
 
     methods = [
-      {"sample", "sampling/createMessage", %{"messages" => []}},
-      {"elicit", "elicitation/create", %{"message" => "confirm"}},
+      {"sample", "sampling/createMessage",
+       %{
+         "messages" => [],
+         "tools" => [%{"name" => "lookup", "inputSchema" => %{"type" => "object"}}],
+         "toolChoice" => %{"mode" => "auto"}
+       }},
+      {"elicit", "elicitation/create",
+       %{
+         "mode" => "form",
+         "message" => "confirm",
+         "requestedSchema" => %{"type" => "object"}
+       }},
       {"roots", "roots/list", %{}}
     ]
 
@@ -333,11 +654,19 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     requests =
       Enum.map(1..3, fn _ ->
         {_event_id, request} = receive_legacy_server_request(stream)
-        {request["id"], request["method"]}
+        {request["id"], request["method"], request["params"]}
       end)
 
+    assert {_id, "sampling/createMessage", %{"tools" => [_], "toolChoice" => %{"mode" => "auto"}}} =
+             Enum.find(requests, fn {_id, method, _params} ->
+               method == "sampling/createMessage"
+             end)
+
+    assert {_id, "elicitation/create", %{"mode" => "form", "requestedSchema" => %{}}} =
+             Enum.find(requests, fn {_id, method, _params} -> method == "elicitation/create" end)
+
     Enum.each(requests, fn
-      {id, "sampling/createMessage"} ->
+      {id, "sampling/createMessage", _params} ->
         assert :ok =
                  Server.deliver_client_response(server, session.id, "legacy", "tenant", %{
                    kind: :response,
@@ -356,7 +685,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     end)
 
     Enum.each(requests, fn
-      {id, "elicitation/create"} ->
+      {id, "elicitation/create", _params} ->
         assert :ok =
                  Server.deliver_client_response(server, session.id, "legacy", "tenant", %{
                    kind: :response,
@@ -365,7 +694,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
                    error: nil
                  })
 
-      {id, "roots/list"} ->
+      {id, "roots/list", _params} ->
         assert :ok =
                  Server.deliver_client_response(server, session.id, "legacy", "tenant", %{
                    kind: :response,

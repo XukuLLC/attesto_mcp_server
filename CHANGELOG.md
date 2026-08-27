@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.0 - 2026-08-26
+
+- Accept and exactly echo MCP `2025-06-18` during legacy initialization while
+  retaining `2025-11-25` and preferred `2026-07-28` behavior.
+- Preserve the negotiated legacy revision in HTTP session state and enforce it
+  on later protocol-version headers.
+- Add stdio initialize/list/call coverage and authenticated HTTP lifecycle
+  regression coverage for `2025-06-18`.
+- Isolate the live stdio regression's installation cache so stale build state
+  cannot contaminate protocol stdout startup.
+- Use the negotiated session revision when a legacy HTTP client omits the
+  protocol-version header, while rejecting invalid or changed header values.
+- Gate catalog/content icons, explicit elicitation modes, and sampling tool
+  selection to revisions that define those fields.
+- Reject an initialize protocol-version header when its revision was disabled
+  by the host's `protocol_versions` configuration.
+- Expose the exact negotiated legacy revision as `context.protocol_version` to
+  request handlers.
+
 ## 0.8.0
 
 Initial Apache-2.0 release of the Attesto-native dual-era MCP server.

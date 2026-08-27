@@ -12,11 +12,28 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - commit archive SHA-256:
   `28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293`
-- observation date: `2026-08-26`
+- candidate release: `0.9.0`
+- candidate source fingerprint:
+  `b9fd5722ab40d48ec0d43abcdbce6e5e50be8773fdbc5362fa85df6dafd8cab4`
+- 2026 runner completed at: `2026-08-27T07:11:43Z`
+- 2025 runner completed at: `2026-08-27T07:11:51Z`
+- TypeScript SDK smoke gates completed at: `2026-08-27T07:12:26Z`
+- Python SDK smoke gates completed at: `2026-08-27T07:12:41Z`
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
 does not embed a workstation path.
+
+The fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
+`scripts`, and `test` files in lexical order. The table below was rerun against
+that exact candidate after the `2025-06-18` compatibility work; it is not
+inherited from the `0.8.0` run.
+
+```sh
+git ls-files -z mix.exs config lib examples scripts test |
+  xargs -0 shasum -a 256 |
+  shasum -a 256
+```
 
 ```sh
 curl -fsSL \
@@ -45,21 +62,25 @@ scenarios. Tasks are hard-disabled and are not advertised by this release. The
 not-scored JSON Schema and HTTP header scenarios passed. The 2025 not-scored
 session lifecycle, JSON Schema, and SSE polling scenarios passed.
 
-Compatibility review found two intermittent legacy stream races. An early full
+The following is historical `0.8.0` development context, not evidence for the
+candidate rerun. Compatibility review found two intermittent legacy stream races. An early full
 run routed a server-originated sampling request to a stale same-session stream;
 that led to deterministic newest-live-stream routing. A later full rerun began
 sampling and elicitation before the new connection's owned standing stream was
 registered, producing 78 passed and 2 failed raw assertions even though both
 scenarios passed in isolation. That led to a bounded stream-readiness wait and
-a regression test. Ten consecutive complete 2025-11-25 runs then produced the
-passing 80/0 result above. Neither failed run was hidden or converted to an
-expected failure.
+a regression test. Ten consecutive complete 2025-11-25 runs in that historical
+campaign then produced 80 passed and 0 failed assertions. The candidate table
+is based on a separate rerun. Neither failed historical run was hidden or
+converted to an expected failure.
 
 ## Official client SDK smoke gates
 
 The package-owned authenticated fixture was also exercised with exact released
 official clients. Each gate negotiated the named era, listed tools, called
 `test_simple_text`, validated its text response, and closed the connection.
+These four gates were rerun against the fingerprinted `0.9.0` candidate at the
+recorded completion time.
 
 | Client artifact | `2025-11-25` | `2026-07-28` |
 | --- | --- | --- |
@@ -70,3 +91,12 @@ The reproducible entrypoints are `scripts/client_smoke_ts.mjs`,
 `scripts/client_smoke_python.py`, and `scripts/run_client_smoke_fixture.sh`.
 The SDK packages and their build/download caches are installed outside the
 package; they are not runtime dependencies or package contents.
+
+## 2025-06-18 compatibility evidence
+
+The frozen runner above does not score a `2025-06-18` requirement set, so this
+project does not attach those conformance totals to that revision. Package
+regressions instead exercise exact initialize version echo, initialized
+lifecycle enforcement, tool listing/calling over stdio, and authenticated HTTP
+session/header binding for `2025-06-18`. Product-client interoperability is
+reported separately from official conformance evidence.

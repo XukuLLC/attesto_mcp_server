@@ -88,13 +88,75 @@ defmodule AttestoMCP.Server.StdioTest do
     assert Enum.all?(messages, &(get_in(&1, ["error", "code"]) == -32602))
   end
 
-  test "stdio rejects the retired 2025-06-18 revision" do
+  test "stdio rejects an unsupported legacy revision" do
     {:ok, server} = Server.start_link([])
 
     input =
       Jason.encode!(%{
         "jsonrpc" => "2.0",
         "id" => 90,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-03-26",
+          "capabilities" => %{},
+          "clientInfo" => %{"name" => "unsupported-client", "version" => "1.0"}
+        }
+      }) <> "\n"
+
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-retired") end)
+    [message] = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert message["id"] == 90
+    assert message["error"]["code"] == -32022
+
+    assert message["error"]["data"]["supported"] == ["2025-11-25", "2025-06-18"]
+  end
+
+  test "stdio reports an unsupported version for a legacy-shaped modern offer" do
+    {:ok, server} = Server.start_link([])
+
+    input =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 91,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2026-07-28",
+          "capabilities" => %{},
+          "clientInfo" => %{"name" => "legacy-negotiator", "version" => "1.0"}
+        }
+      }) <> "\n"
+
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-negotiator") end)
+    [message] = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert message["error"]["code"] == -32022
+    assert message["error"]["data"]["requested"] == "2026-07-28"
+
+    assert message["error"]["data"]["supported"] == ["2025-11-25", "2025-06-18"]
+  end
+
+  test "stdio permits ping before legacy initialization" do
+    {:ok, server} = Server.start_link([])
+
+    input =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 93,
+        "method" => "ping",
+        "params" => %{}
+      }) <> "\n"
+
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-preinitialize") end)
+    [message] = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert message == %{"jsonrpc" => "2.0", "id" => 93, "result" => %{}}
+  end
+
+  test "stdio rejects 2025-06-18 in a modern metadata envelope" do
+    {:ok, server} = Server.start_link([])
+
+    input =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 92,
         "method" => "initialize",
         "params" => %{
           "_meta" => %{
@@ -104,10 +166,70 @@ defmodule AttestoMCP.Server.StdioTest do
         }
       }) <> "\n"
 
-    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-retired") end)
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-envelope") end)
     [message] = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
-    assert message["id"] == 90
     assert message["error"]["code"] == -32022
+
+    assert message["error"]["data"]["supported"] == [
+             "2026-07-28",
+             "2025-11-25",
+             "2025-06-18"
+           ]
+  end
+
+  test "stdio cannot renegotiate an initialized session" do
+    {:ok, server} = Server.start_link([])
+
+    lines = [
+      {0,
+       %{
+         "jsonrpc" => "2.0",
+         "id" => 1,
+         "method" => "initialize",
+         "params" => %{
+           "protocolVersion" => "2025-06-18",
+           "capabilities" => %{"elicitation" => %{}},
+           "clientInfo" => %{"name" => "stdio-renegotiation", "version" => "1.0"}
+         }
+       }},
+      {500, %{"jsonrpc" => "2.0", "method" => "notifications/initialized", "params" => %{}}},
+      {500,
+       %{
+         "jsonrpc" => "2.0",
+         "id" => 2,
+         "method" => "initialize",
+         "params" => %{
+           "protocolVersion" => "2025-11-25",
+           "capabilities" => %{},
+           "clientInfo" => %{"name" => "stdio-renegotiation", "version" => "1.0"}
+         }
+       }}
+    ]
+
+    {:ok, source} = Agent.start_link(fn -> lines end)
+
+    input = fn ->
+      Agent.get_and_update(source, fn
+        [{delay, line} | rest] ->
+          Process.sleep(delay)
+          {Jason.encode!(line) <> "\n", rest}
+
+        [] ->
+          {:eof, []}
+      end)
+    end
+
+    output =
+      capture_io(fn -> Stdio.run(server, principal: "stdio-renegotiation", input: input) end)
+
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.find(messages, &(&1["id"] == 1))["result"]["protocolVersion"] ==
+             "2025-06-18"
+
+    renegotiation = Enum.find(messages, &(&1["id"] == 2))
+    assert renegotiation["error"]["code"] == -32600
+    assert renegotiation["error"]["data"]["reason"] == "initialize_session_rejected"
   end
 
   test "modern stdio subscription cancels explicitly without affecting an interleaved request" do
@@ -308,6 +430,63 @@ defmodule AttestoMCP.Server.StdioTest do
 
     assert Enum.map(messages, & &1["id"]) |> Enum.filter(&(&1 != nil)) |> Enum.sort() == [1, 2, 3]
     assert Enum.find(messages, &(&1["id"] == 1))["result"]["protocolVersion"] == "2025-11-25"
+  end
+
+  test "stdio completes a 2025-06-18 initialize, list, and call sequence" do
+    {:ok, server} = Server.start_link(max_concurrency: 4)
+
+    assert :ok =
+             Server.register_tool(server, "compat_add", %{
+               icons: [%{src: "https://example.test/icon.png"}],
+               input_schema: %{
+                 "type" => "object",
+                 "properties" => %{
+                   "left" => %{"type" => "integer"},
+                   "right" => %{"type" => "integer"}
+                 },
+                 "required" => ["left", "right"]
+               },
+               handler: fn %{"left" => left, "right" => right}, _ ->
+                 {:ok, Integer.to_string(left + right)}
+               end
+             })
+
+    input =
+      [
+        %{
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: %{
+            "protocolVersion" => "2025-06-18",
+            "capabilities" => %{},
+            "clientInfo" => %{"name" => "stdio-compat", "version" => "1.0"}
+          }
+        },
+        %{jsonrpc: "2.0", method: "notifications/initialized", params: %{}},
+        %{jsonrpc: "2.0", id: 2, method: "tools/list", params: %{}},
+        %{
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: %{"name" => "compat_add", "arguments" => %{"left" => 34, "right" => -11}}
+        }
+      ]
+      |> Enum.map_join("\n", &Jason.encode!/1)
+      |> Kernel.<>("\n")
+
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-compat") end)
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.find(messages, &(&1["id"] == 1))["result"]["protocolVersion"] == "2025-06-18"
+
+    assert [%{"name" => "compat_add"} = tool] =
+             Enum.find(messages, &(&1["id"] == 2))["result"]["tools"]
+
+    refute Map.has_key?(tool, "icons")
+
+    assert [%{"type" => "text", "text" => "23"}] =
+             Enum.find(messages, &(&1["id"] == 3))["result"]["content"]
   end
 
   test "legacy stdio routes a typed server-originated sampling response" do

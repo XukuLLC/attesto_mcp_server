@@ -24,7 +24,9 @@ defmodule AttestoMCP.Server do
 
   @modern "2026-07-28"
   @legacy "2025-11-25"
-  @versions [@modern, @legacy]
+  @legacy_2025_06_18 "2025-06-18"
+  @legacy_versions [@legacy, @legacy_2025_06_18]
+  @versions [@modern | @legacy_versions]
   @default_stream_queue 128
   @private_option_keys [
     :cursor_secret,
@@ -207,11 +209,13 @@ defmodule AttestoMCP.Server do
         monitor_owner? = not detached_legacy?
 
         on_event = detached_legacy_delivery(on_event, detached_legacy?)
-        era = normalize_era(Keyword.get(opts, :version, detect_era(request, request.params)))
+        raw_version = Keyword.get(opts, :version, detect_era(request, request.params))
+        era = request_era(opts, request, request.params)
 
         context =
           context
           |> Map.put_new(:server_capabilities, capabilities(runtime.opts))
+          |> Map.put_new(:protocol_version, raw_version)
           |> enrich_logging_context(runtime, era)
 
         case Task.Supervisor.start_child(runtime.task_supervisor, fn ->
@@ -262,7 +266,7 @@ defmodule AttestoMCP.Server do
                      |> Map.put(:owner, parent)
                      |> Map.put(:request_id, id)
                      |> Map.put(:request_extensions, Map.get(request, :extensions, %{}))
-                     |> Map.put(:protocol_version, Keyword.get(opts, :version))
+                     |> Map.put_new(:protocol_version, raw_version)
                      |> Map.put(:logging_level, request_logging_level(request, context, era))
 
                    result =
@@ -412,6 +416,9 @@ defmodule AttestoMCP.Server do
         System.monotonic_time(:millisecond) + timeout
       )
 
+  @doc "Binds an unnegotiated session to one enabled legacy protocol revision."
+  @spec set_session_version(pid() | atom(), binary(), String.t()) ::
+          :ok | {:error, :invalid_version}
   def set_session_version(server, id, version),
     do: GenServer.call(server, {:set_session_version, id, version})
 
@@ -512,6 +519,9 @@ defmodule AttestoMCP.Server do
   def ack_legacy_stream(server, stream_ref),
     do: GenServer.cast(server, {:ack_legacy_stream, stream_ref})
 
+  @doc "Negotiates one enabled legacy revision and capability map exactly once."
+  @spec negotiate_session(pid() | atom(), binary(), term(), term(), String.t(), map()) ::
+          :ok | {:error, :invalid_negotiation | :already_negotiated | :not_found}
   def negotiate_session(server, session_id, principal, tenant, version, capabilities),
     do:
       GenServer.call(
@@ -732,15 +742,25 @@ defmodule AttestoMCP.Server do
         state
       ) do
     case session_for(state, session_id, principal, tenant) do
-      {:ok, session} when version == @legacy and is_map(capabilities) ->
-        session = %{
-          Session.touch(session)
-          | version: version,
-            client_capabilities: capabilities
-        }
+      {:ok, session} ->
+        cond do
+          version not in @legacy_versions or version not in state.opts[:protocol_versions] or
+              not is_map(capabilities) ->
+            {:reply, {:error, :invalid_negotiation}, state}
 
-        :ets.insert(state.sessions, {session_id, session})
-        {:reply, :ok, state}
+          not is_nil(session.version) or session.initialized ->
+            {:reply, {:error, :already_negotiated}, state}
+
+          true ->
+            session = %{
+              Session.touch(session)
+              | version: version,
+                client_capabilities: capabilities
+            }
+
+            :ets.insert(state.sessions, {session_id, session})
+            {:reply, :ok, state}
+        end
 
       _ ->
         {:reply, {:error, :not_found}, state}
@@ -825,6 +845,7 @@ defmodule AttestoMCP.Server do
            session_for(state, session_id, principal, tenant, require_initialized: true),
          capability when is_binary(capability) <- client_capability(method),
          true <- Map.has_key?(session.client_capabilities, capability),
+         :ok <- validate_client_request_revision(session.version, method, params),
          {:ok, _stream_ref, stream} <-
            newest_live_legacy_stream(state.legacy_streams, session_id) do
       request_ref = make_ref()
@@ -857,6 +878,7 @@ defmodule AttestoMCP.Server do
     else
       false -> {:reply, {:error, :missing_capability}, state}
       nil -> {:reply, {:error, :unsupported}, state}
+      {:error, :unsupported} -> {:reply, {:error, :unsupported}, state}
       :stream_not_ready -> {:reply, {:error, :not_ready}, state}
       _ -> {:reply, {:error, :not_ready}, state}
     end
@@ -1092,13 +1114,17 @@ defmodule AttestoMCP.Server do
   def handle_call({:set_session_version, id, version}, _from, state) do
     case :ets.lookup(state.sessions, id) do
       [{^id, session}] ->
-        :ets.insert(state.sessions, {id, %{Session.touch(session) | version: version}})
+        if version in @legacy_versions and version in state.opts[:protocol_versions] and
+             (is_nil(session.version) or session.version == version) do
+          :ets.insert(state.sessions, {id, %{Session.touch(session) | version: version}})
+          {:reply, :ok, state}
+        else
+          {:reply, {:error, :invalid_version}, state}
+        end
 
       _ ->
-        :ok
+        {:reply, {:error, :invalid_version}, state}
     end
-
-    {:reply, :ok, state}
   end
 
   def handle_call({:delete_session, id}, _from, state) do
@@ -2696,6 +2722,21 @@ defmodule AttestoMCP.Server do
   defp client_capability("roots/list"), do: "roots"
   defp client_capability(_), do: nil
 
+  defp validate_client_request_revision(
+         @legacy_2025_06_18,
+         "elicitation/create",
+         %{"mode" => _mode}
+       ),
+       do: {:error, :unsupported}
+
+  defp validate_client_request_revision(@legacy_2025_06_18, "sampling/createMessage", params) do
+    if Map.has_key?(params, "tools") or Map.has_key?(params, "toolChoice"),
+      do: {:error, :unsupported},
+      else: :ok
+  end
+
+  defp validate_client_request_revision(_version, _method, _params), do: :ok
+
   defp encode_outcome(id, {:ok, result}, @modern, opts) when is_map(result) do
     result = stamp_server_info(result, opts)
 
@@ -2830,17 +2871,26 @@ defmodule AttestoMCP.Server do
          runtime,
          opts
        ) do
-    era = normalize_era(Keyword.get(opts, :version, detect_era(request, params)))
+    era = request_era(opts, request, params)
 
     with :ok <- validate_request_params_shape(params),
          :ok <- validate_legacy_initialize_request(method, era, params),
          :ok <- validate_era(era, params, runtime.opts),
+         :ok <- validate_protocol_binding(method, era, context, opts),
          :ok <- validate_trace_context(params),
          :ok <- authorization(method, context, runtime.opts, era) do
       dispatch_method(era, method, params, context, runtime, opts)
     end
   end
 
+  defp request_era(opts, request, params) do
+    case Keyword.fetch(opts, :version) do
+      {:ok, version} -> normalize_era(version)
+      :error -> detect_era(request, params)
+    end
+  end
+
+  defp normalize_era(version) when version in @legacy_versions, do: @legacy
   defp normalize_era(era), do: era
 
   defp detect_era(%{method: "initialize"}, params) do
@@ -2891,7 +2941,7 @@ defmodule AttestoMCP.Server do
       is_nil(version) ->
         {:error, Error.invalid_params(%{"reason" => "protocolVersion_required"})}
 
-      version not in runtime_opts[:protocol_versions] ->
+      version != @modern or version not in runtime_opts[:protocol_versions] ->
         {:error, Error.unsupported_version(version, runtime_opts[:protocol_versions])}
 
       not is_map(caps) ->
@@ -2906,6 +2956,31 @@ defmodule AttestoMCP.Server do
 
   defp validate_era(version, _params, runtime_opts),
     do: {:error, Error.unsupported_version(version, runtime_opts[:protocol_versions])}
+
+  defp validate_protocol_binding("initialize", @legacy, _context, _opts), do: :ok
+
+  defp validate_protocol_binding(
+         "ping",
+         @legacy,
+         %{session_id: session_id, legacy_session_state: :unnegotiated},
+         opts
+       )
+       when is_binary(session_id) do
+    if Keyword.get(opts, :version) == @legacy,
+      do: :ok,
+      else: {:error, Error.invalid_request(%{"reason" => "negotiated_version_mismatch"})}
+  end
+
+  defp validate_protocol_binding(_method, @legacy, %{session_id: session_id} = context, opts)
+       when is_binary(session_id) do
+    negotiated = context[:protocol_version]
+
+    if negotiated in @legacy_versions and Keyword.get(opts, :version) == negotiated,
+      do: :ok,
+      else: {:error, Error.invalid_request(%{"reason" => "negotiated_version_mismatch"})}
+  end
+
+  defp validate_protocol_binding(_method, _era, _context, _opts), do: :ok
 
   defp validate_legacy_initialize_request("initialize", era, params)
        when era == @legacy and is_map(params) do
@@ -3019,10 +3094,11 @@ defmodule AttestoMCP.Server do
   end
 
   defp dispatch_method(era, "initialize", params, context, runtime, _opts) when era == @legacy do
-    requested = List.wrap(params["protocolVersion"] || params["protocolVersions"] || @legacy)
-    selected = if @legacy in requested, do: @legacy, else: nil
+    requested = List.wrap(params["protocolVersion"] || @legacy)
+    supported = Enum.filter(@legacy_versions, &(&1 in runtime.opts[:protocol_versions]))
+    selected = Enum.find(supported, &(&1 in requested))
 
-    if selected in requested and lifecycle_initialize_allowed?(runtime.opts, context, params) do
+    if is_binary(selected) and lifecycle_initialize_allowed?(runtime.opts, context, params) do
       negotiated =
         if is_binary(context[:session_id]) do
           negotiate_session(
@@ -3030,7 +3106,7 @@ defmodule AttestoMCP.Server do
             context[:session_id],
             principal(context),
             tenant(context),
-            @legacy,
+            selected,
             params["capabilities"]
           )
         else
@@ -3047,13 +3123,21 @@ defmodule AttestoMCP.Server do
 
           {:ok, maybe_put_instructions(result, runtime.opts[:instructions])}
 
+        {:error, :already_negotiated} ->
+          {:error, Error.invalid_request(%{"reason" => "initialize_session_rejected"})}
+
         {:error, _reason} ->
           {:error, Error.internal(%{"reason" => "initialize_session_rejected"})}
       end
     else
-      if selected in requested,
+      if is_binary(selected),
         do: {:error, Error.internal(%{"reason" => "initialize_rejected"})},
-        else: {:error, Error.unsupported_version(List.first(requested), [@legacy])}
+        else:
+          {:error,
+           Error.unsupported_version(
+             List.first(requested),
+             if(supported == [], do: runtime.opts[:protocol_versions], else: supported)
+           )}
     end
   end
 
@@ -3286,7 +3370,8 @@ defmodule AttestoMCP.Server do
     if page[:error] do
       {:error, page.error}
     else
-      definitions = Enum.map(page.items, &public_definition(type, &1))
+      definitions =
+        Enum.map(page.items, &public_definition(type, &1, context[:protocol_version]))
 
       if Schema.json_value(definitions) == :ok do
         result = %{key => definitions}
@@ -3744,6 +3829,7 @@ defmodule AttestoMCP.Server do
             {:ok, output_value} ->
               output = normalize_tool_result(output_value)
               output = if era == @legacy, do: legacy_tool_result(output), else: output
+              output = filter_tool_result_revision(output, context[:protocol_version])
 
               output =
                 if tool.output_schema && Map.has_key?(output, "structuredContent"),
@@ -3886,6 +3972,9 @@ defmodule AttestoMCP.Server do
 
               normalized =
                 if era == @legacy, do: Map.delete(normalized, "resultType"), else: normalized
+
+              normalized =
+                filter_resource_result_revision(normalized, context[:protocol_version])
 
               if valid_resource_result?(normalized) do
                 {:ok,
@@ -4221,6 +4310,8 @@ defmodule AttestoMCP.Server do
               normalized =
                 if era == @legacy, do: Map.delete(normalized, "resultType"), else: normalized
 
+              normalized = filter_prompt_result_revision(normalized, context[:protocol_version])
+
               if valid_prompt_result?(normalized) do
                 {:ok,
                  Map.merge(
@@ -4522,6 +4613,11 @@ defmodule AttestoMCP.Server do
     |> maybe_map_put("_meta", item[:_meta] || item["_meta"])
   end
 
+  defp public_definition(type, item, @legacy_2025_06_18),
+    do: type |> public_definition(item) |> Map.delete("icons")
+
+  defp public_definition(type, item, _version), do: public_definition(type, item)
+
   defp invoke(nil, _params, context, _opts),
     do: invoke_with_telemetry(fn -> {:error, :missing_handler} end, context)
 
@@ -4628,6 +4724,48 @@ defmodule AttestoMCP.Server do
       is_map(value) and Map.has_key?(value, "messages") -> value
       is_list(value) -> %{"messages" => value}
       true -> %{"messages" => [value]}
+    end
+  end
+
+  defp filter_tool_result_revision(result, @legacy_2025_06_18) when is_map(result) do
+    map_list_field(result, "content", &filter_content_revision/1)
+  end
+
+  defp filter_tool_result_revision(result, _version), do: result
+
+  defp filter_resource_result_revision(result, @legacy_2025_06_18) when is_map(result) do
+    map_list_field(result, "contents", &drop_icons/1)
+  end
+
+  defp filter_resource_result_revision(result, _version), do: result
+
+  defp filter_prompt_result_revision(result, @legacy_2025_06_18) when is_map(result) do
+    map_list_field(result, "messages", fn
+      %{"content" => content} = message ->
+        Map.put(message, "content", filter_content_revision(content))
+
+      message ->
+        message
+    end)
+  end
+
+  defp filter_prompt_result_revision(result, _version), do: result
+
+  defp filter_content_revision(%{"type" => "resource_link"} = item), do: drop_icons(item)
+
+  defp filter_content_revision(%{"type" => "resource", "resource" => resource} = item)
+       when is_map(resource),
+       do: Map.put(item, "resource", drop_icons(resource))
+
+  defp filter_content_revision(item), do: item
+
+  defp drop_icons(item) when is_map(item), do: Map.delete(item, "icons")
+  defp drop_icons(item), do: item
+
+  defp map_list_field(result, key, mapper) do
+    case result[key] do
+      values when is_list(values) -> Map.put(result, key, Enum.map(values, mapper))
+      _ -> result
     end
   end
 
@@ -4879,7 +5017,7 @@ defmodule AttestoMCP.Server do
   defp server_info(opts),
     do: %{
       "name" => opts[:server_name] || "attesto_mcp_server",
-      "version" => opts[:server_version] || "0.8.0"
+      "version" => opts[:server_version] || "0.9.0"
     }
 
   defp cache_ttl(opts), do: max(opts[:cache_ttl_ms] || 30_000, 0)

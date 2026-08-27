@@ -3,6 +3,9 @@ defmodule AttestoMCP.Server.Stdio do
 
   alias AttestoMCP.Server.{Error, JSONRPC, Telemetry}
 
+  @legacy "2025-11-25"
+  @legacy_versions [@legacy, "2025-06-18"]
+
   @doc "Run until stdin reaches EOF. Only compact JSON-RPC messages go to stdout."
   @spec run(pid() | atom(), keyword()) :: term()
   def run(server, opts \\ []) do
@@ -225,7 +228,7 @@ defmodule AttestoMCP.Server.Stdio do
         cancel_request(server, context, pending, params)
 
       {:ok, %{kind: :notification, method: "notifications/initialized"} = request} ->
-        if version_for(request) == "2025-11-25" and mark_legacy_initialized(server, context) do
+        if legacy_version?(version_for(request)) and mark_legacy_initialized(server, context) do
           start_worker(server, context, opts, request, pending)
         else
           pending
@@ -322,7 +325,7 @@ defmodule AttestoMCP.Server.Stdio do
         result =
           AttestoMCP.Server.dispatch(server, request, request_context,
             transport: :stdio,
-            version: version_for(request),
+            version: dispatch_version_for(request, request_context),
             owner: self(),
             on_event: on_event,
             request_ref: work_ref,
@@ -430,21 +433,27 @@ defmodule AttestoMCP.Server.Stdio do
     do: Map.get(context, :principal) || Map.get(context, "principal")
 
   defp request_context(server, context, request) do
-    if version_for(request) == "2025-11-25" do
+    if legacy_version?(version_for(request)) do
       session_id = context[:legacy_session_id]
+      tenant = Map.get(context, :tenant) || Map.get(context, "tenant")
 
-      context = Map.put(context, :session_id, session_id)
+      case AttestoMCP.Server.get_session(server, session_id, context_principal(context), tenant) do
+        {:ok, session} ->
+          context
+          |> Map.put(:session_id, session_id)
+          |> Map.put(:protocol_version, session.version)
+          |> Map.put(
+            :legacy_session_state,
+            if(is_nil(session.version), do: :unnegotiated, else: :negotiated)
+          )
+          |> Map.put(:logging_level, session.logging_level)
 
-      Map.put(
-        context,
-        :logging_level,
-        AttestoMCP.Server.session_logging_level(
-          server,
-          session_id,
-          context_principal(context),
-          Map.get(context, :tenant) || Map.get(context, "tenant")
-        )
-      )
+        _ ->
+          context
+          |> Map.put(:session_id, session_id)
+          |> Map.put(:protocol_version, nil)
+          |> Map.put(:legacy_session_state, :unavailable)
+      end
     else
       Map.delete(context, :session_id)
     end
@@ -467,7 +476,7 @@ defmodule AttestoMCP.Server.Stdio do
            context_principal(context),
            Map.get(context, :tenant) || Map.get(context, "tenant")
          ) do
-      {:ok, %{version: "2025-11-25"}} ->
+      {:ok, %{version: version}} when version in @legacy_versions ->
         :ok = AttestoMCP.Server.mark_initialized(server, session_id)
 
         _ =
@@ -532,7 +541,7 @@ defmodule AttestoMCP.Server.Stdio do
   end
 
   defp legacy_not_ready?(server, context, request) do
-    version_for(request) == "2025-11-25" and
+    legacy_version?(version_for(request)) and
       request.method not in ["initialize", "ping", "notifications/initialized"] and
       case AttestoMCP.Server.get_session(
              server,
@@ -658,15 +667,38 @@ defmodule AttestoMCP.Server.Stdio do
   defp safe_server_request_callback(_callback, _event), do: :ok
 
   defp version_for(%{method: "initialize", params: params}) when is_map(params) do
-    get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]) || "2025-11-25"
+    modern = get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"])
+    requested = params["protocolVersion"]
+
+    cond do
+      is_binary(modern) -> "2026-07-28"
+      requested in @legacy_versions -> requested
+      true -> @legacy
+    end
   end
 
-  defp version_for(%{method: "initialize"}), do: "2025-11-25"
-  defp version_for(%{method: "notifications/initialized"}), do: "2025-11-25"
+  defp version_for(%{method: "initialize"}), do: @legacy
+  defp version_for(%{method: "notifications/initialized"}), do: @legacy
 
   defp version_for(%{params: params}) do
-    get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]) || "2025-11-25"
+    get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]) || @legacy
   end
+
+  defp dispatch_version_for(%{method: "initialize"} = request, _context),
+    do: version_for(request)
+
+  defp dispatch_version_for(request, context) do
+    version = version_for(request)
+
+    cond do
+      not legacy_version?(version) -> version
+      context[:protocol_version] in @legacy_versions -> context[:protocol_version]
+      request.method == "ping" -> @legacy
+      true -> nil
+    end
+  end
+
+  defp legacy_version?(version), do: version in @legacy_versions
 
   defp stdio_context(opts) do
     %{

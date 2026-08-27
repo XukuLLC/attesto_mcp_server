@@ -3,7 +3,8 @@
 This ledger uses the exact requirement and test identifiers from the clean-room
 baseline. `PASS` means the named observable evidence was run locally and is
 complete for that row. `PARTIAL` means only a subset was observed. `NOT RUN`
-means no evidence is claimed. Full official conformance remains external
+means no evidence is claimed. `BASELINE DEVIATION` identifies an intentional
+release addition that is separately specified and tested below. Full official conformance remains external
 evidence; independent SDK smoke evidence is recorded only where explicitly
 listed and is not treated as complete interoperability.
 
@@ -11,18 +12,18 @@ listed and is not treated as complete interoperability.
 
 | ID | Baseline requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PARTIAL | `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; metadata names the intended public source URL, while repository creation and hosted verification remain pending |
-| R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | released `attesto_mcp ~> 1.2`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
+| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0 release, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.9.0 hosted verification is tracked separately below |
+| R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | released `attesto_mcp ~> 1.2.1`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
 | R03 | Complete server surface: public registration/handler contracts for tools, resources, templates, prompts, completion, notifications, MRTR and optional per-era tasks, with stdio and Streamable HTTP adapters and deterministic duplicate rejection | PARTIAL | API, registry, MRTR, subscription, stdio, and adapter tests; Tasks are deliberately unadvertised |
 | R04 | Decode UTF-8 JSON-RPC 2.0 only; accept string or integer non-null IDs; reject batches; distinguish requests, notifications, responses, and malformed objects; validate selected dated schemas while preserving allowed extensions; default to JSON Schema 2020-12; never fetch network refs | PARTIAL | `lib/attesto_mcp_server/json_rpc.ex`, `lib/attesto_mcp_server/schema.ex`, schema tests, and the pinned fixture's scored schema scenarios; broad message corpus remains partial |
-| R05 | Support exactly 2026-07-28 and 2025-11-25 by default, selecting modern per request metadata and legacy from initialize without sharing negotiated state | PASS | core/legacy tests plus pinned authenticated runner: scored server scenarios pass in both eras |
+| R05 | Support exactly 2026-07-28 and 2025-11-25 by default, selecting modern per request metadata and legacy from initialize without sharing negotiated state | BASELINE DEVIATION (C01) | Both baseline eras remain supported and pass their original evidence; C01 deliberately adds `2025-06-18` to the default set |
 | R06 | Require modern protocolVersion/clientCapabilities metadata; implement discover; return exact unsupported-version/capability errors; include resultType and server identity metadata on modern successes | PASS | P0/P4/P10-P13 regressions plus pinned 2026 scored runner |
-| R07 | Legacy lifecycle: initialize is first non-ping interaction, negotiate 2025-11-25, return server info/capabilities/instructions, wait for initialized before server traffic, and restrict negotiated capabilities | PARTIAL | legacy core/Plug, detached-owner cancellation, newest-live same-session stream routing, stale teardown, and `test/p10_p13_regression_test.exs`; full stream matrix remains partial |
+| R07 | Legacy lifecycle: initialize is first non-ping interaction, negotiate 2025-11-25, return server info/capabilities/instructions, wait for initialized before server traffic, and restrict negotiated capabilities | PARTIAL | 2025-11-25 core/Plug/stdio tests, detached-owner cancellation, newest-live same-session stream routing, stale teardown, and `test/p10_p13_regression_test.exs`; full stream matrix remains partial |
 | R08 | Modern Streamable HTTP: one request/notification per POST, JSON/SSE Accept coverage, request-scoped SSE and empty 202 for notifications; modern GET/DELETE 405 and no sessions/resumption | PASS | modern Plug/Bandit tests, stream fixture, and pinned 2026 scored runner |
 | R09 | Legacy Streamable HTTP: dated POST/GET, optional secure session IDs, 400/404 lifecycle, DELETE, multiple streams without duplicate delivery, and only advertised resumption | PARTIAL | legacy Plug/Bandit tests plus deterministic same-session isolation and stale-teardown regressions; resumption is not advertised |
 | R10 | HTTP mirror headers: case-insensitive protocol/method/name/parameter declarations, exact Base64 sentinel, body/header equality, and official `x-mcp-header` constraints | PASS | `plug_auth_test.exs`, `p4_regression_test.exs`, and frozen HTTP scenarios |
-| R11 | Stdio: one compact UTF-8 JSON-RPC message per stdout line, logs on stderr, interleaved IDs, modern cancellation, prompt EOF, and legacy server requests only after capability negotiation | PARTIAL | `stdio_test.exs`, cold-start/live-pipe tests; broad client scripts remain partial |
-| R12 | Fixed auth pipeline: every protected HTTP leg enters the approved Attesto boundary before dispatch/body work, with canonical assigns; stdio uses launcher/environment credentials | PASS | released `attesto_mcp` 1.2.0; direct public `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` calls; boundary ordering, real-token audience binding, and stdio tests; no older fallback |
+| R11 | Stdio: one compact UTF-8 JSON-RPC message per stdout line, logs on stderr, interleaved IDs, modern cancellation, prompt EOF, and legacy server requests only after capability negotiation | PARTIAL | `stdio_test.exs`, 2025-06-18 initialize/list/call regression, and cold-start/live-pipe tests; broad client scripts remain partial |
+| R12 | Fixed auth pipeline: every protected HTTP leg enters the approved Attesto boundary before dispatch/body work, with canonical assigns; stdio uses launcher/environment credentials | PASS | released `attesto_mcp` 1.2.1; direct public `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` calls; boundary ordering, real-token audience binding, and stdio tests; no older fallback |
 | R13 | Resource metadata and audience: RFC 9728 metadata, authorization server, bearer header, resource_metadata challenges, and one pinned canonical resource/audience | PARTIAL | metadata and auth tests; deployment proxy matrix remains partial |
 | R14 | Token and sender constraints: Authorization on every leg, no query/body tokens by default, issuer/audience/time/purpose/principal/scopes and DPoP/mTLS binding through Attesto | PARTIAL | `p3_auth_acceptance_test.exs`; full deployment matrix remains partial |
 | R15 | Authorization policy: documented method scopes, operation plus configured subscription/task scopes, 401/403 challenges, and reauthorization for every handle/delivery | PARTIAL | subscription and auth tests; full sender/deployment matrix remains partial |
@@ -41,6 +42,12 @@ listed and is not treated as complete interoperability.
 | R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests; broad cross-connection matrix remains partial |
 | R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry and P5 tests; broad fuzz/stress remains partial |
 | R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; local release and final package scans pass; 9 not-scored Tasks failures, hosted CI, and broad fuzz remain open |
+
+## Release additions beyond the baseline
+
+| ID | Additional compatibility requirement | Status | Evidence |
+| --- | --- | --- | --- |
+| C01 | Add negotiated `2025-06-18` compatibility without weakening preferred `2026-07-28` or baseline `2025-11-25` behavior | PASS | exact initialize echo; immutable HTTP/stdio session binding; revision-specific field filtering; positive `2025-11-25` controls; authenticated HTTP POST/GET/DELETE and stdio regressions |
 
 ## Local black-box matrix
 
@@ -109,27 +116,26 @@ listed and is not treated as complete interoperability.
 
 ## Observed gate
 
-The current direct dependency resolution uses released `attesto_mcp` 1.2.0.
-The current-runtime `mix test.all` gate passed 205 total (one doctest plus 204
-tests), 79.39% coverage, zero-error/zero-skip Dialyzer, package unpack, and Hex
-advisory audit. Thirty randomized focused lifecycle/transport runs passed after
-atomic admission and terminal telemetry were corrected. The installed Elixir
-1.18.3/OTP 27.3 floor ran the same `mix test.all` gate with 205/205 checks,
-79.30% coverage, zero-error/zero-skip Dialyzer, package unpack, and Hex advisory
-audit. Both Elixir 1.18 and 1.20 formatters accept the final source.
+The current direct dependency constraint and observed resolution use released
+`attesto_mcp` 1.2.1.
+The current-runtime Elixir 1.20.3/OTP 29.0.5 `mix test.all` gate passed 218
+total checks (one doctest plus 217 tests), at least 79.5% coverage,
+zero-error/zero-skip Dialyzer, package unpack, and Hex advisory audit.
+Full-suite order-randomized runs for the 0.9.0 candidate passed at seeds 1,
+424242, and 99991. The Elixir 1.18.3/OTP 27.3 floor passed the same 218-check
+gate with at least 79.4% coverage, zero-error/zero-skip
+Dialyzer, package unpack, and Hex advisory audit. Hosted verification is
+recorded only after it runs against the release commit.
 
 The pinned runner `0.2.0-alpha.11` at commit
 `74edef34d674f563537be8c6587cebaa58e830ca` selected
 50 scenarios for 2026-07-28 (37 scored passed; raw 161 passed/30 failed, with
 9 failing Tasks and both pending header scenarios passing) and 33 scenarios for
-2025-11-25 (30 scored passed; raw 80 passed/0 failed across ten consecutive
-complete post-fix runs). No expected-failure baseline was used. Exact
+2025-11-25 (30 scored passed; raw 80 passed/0 failed in the candidate run).
+No expected-failure baseline was used. Exact
 TypeScript 2.0.0 and Python 2.1.1 clients passed authenticated list/call gates
-in both eras. Docs, a clean unpacked-package compile and 205-check run,
-production dependency/license review,
-outdated/unused checks, stdio cold install, consumer compile/run, and
-source-neutral/secret/path scans passed. Independent Fable review returned
-`GO`; its follow-up documentation and regression recommendations were fixed
-and verified. Hosted CI passed the Elixir 1.18.3/OTP 27.3 and Elixir
-1.20.3/OTP 29.0.5 verification matrix plus official interoperability before
-release.
+in both eras. The current source also passed formatting, documentation, package,
+version-floor, and source-neutral scans. The floor evidence above is current.
+An independent read-only release review returned GO at
+`2026-08-27T07:36:25Z`; hosted-CI evidence for `0.9.0` remains pending and is
+not inherited from `0.8.0`.

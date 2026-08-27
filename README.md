@@ -1,14 +1,14 @@
 # attesto_mcp_server
 
 `attesto_mcp_server` is an Apache-2.0, Attesto-native MCP server for Elixir.
-It provides one protocol core with MCP `2026-07-28` (preferred) and
-`2025-11-25` compatibility, a protected Plug-compatible Streamable HTTP
-boundary, and a line-oriented stdio adapter.
+It provides one protocol core with preferred MCP `2026-07-28` behavior and
+negotiated `2025-11-25`/`2025-06-18` compatibility, a protected
+Plug-compatible Streamable HTTP boundary, and a line-oriented stdio adapter.
 
 Protected HTTP traffic enters the approved
 `AttestoMCP.Plug.ProtectResource` boundary before body decoding and protocol
 dispatch, with route-derived scopes applied through its prepared dynamic
-authorization API. The required `attesto_mcp ~> 1.2` dependency provides
+authorization API. The required `attesto_mcp ~> 1.2.1` dependency provides
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3`; no older
 authentication fallback is included. Configure the canonical resource
 path/origin, Attesto verifier, replay and certificate callbacks, and

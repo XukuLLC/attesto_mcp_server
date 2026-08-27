@@ -8,6 +8,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
   @resource "https://mcp.example.com/mcp"
   @legacy "2025-11-25"
+  @legacy_2025_06_18 "2025-06-18"
 
   test "authenticated legacy initialize persists version and waits for initialized" do
     {:ok, server} = Server.start_link([])
@@ -98,11 +99,204 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
         "POST",
         %{"jsonrpc" => "2.0", "id" => 4, "method" => "ping", "params" => %{}},
         session_id: session_id,
-        protocol_version: "2024-01-01"
+        protocol_version: @legacy_2025_06_18
       )
 
     assert wrong_version.status == 400
     assert Jason.decode!(wrong_version.resp_body)["error"]["code"] == -32020
+  end
+
+  test "authenticated HTTP session negotiates and enforces 2025-06-18" do
+    {:ok, server} = Server.start_link([])
+
+    assert :ok =
+             Server.register_tool(server, "versioned_http", %{
+               icons: [%{src: "https://example.test/icon.png"}],
+               handler: fn _, _ -> {:ok, "ok"} end
+             })
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+
+    initialized =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 21,
+          "method" => "initialize",
+          "params" => %{
+            "protocolVersion" => @legacy_2025_06_18,
+            "capabilities" => %{},
+            "clientInfo" => %{"name" => "compat-http", "version" => "1.0"}
+          }
+        },
+        protocol_version: @legacy_2025_06_18
+      )
+
+    assert initialized.status == 200
+    assert Jason.decode!(initialized.resp_body)["result"]["protocolVersion"] == @legacy_2025_06_18
+    session_id = initialized |> get_resp_header("mcp-session-id") |> List.first()
+
+    before_initialized =
+      call(
+        plug,
+        token,
+        "POST",
+        %{"jsonrpc" => "2.0", "id" => 20, "method" => "tools/list", "params" => %{}},
+        session_id: session_id,
+        protocol_version: @legacy_2025_06_18
+      )
+
+    assert before_initialized.status == 400
+
+    missing_version =
+      conn(
+        :post,
+        "/mcp",
+        Jason.encode!(%{"jsonrpc" => "2.0", "id" => 24, "method" => "ping", "params" => %{}})
+      )
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("mcp-session-id", session_id)
+      |> AttestoMCP.Server.Plug.call(plug)
+
+    assert missing_version.status == 200
+    assert Jason.decode!(missing_version.resp_body)["result"] == %{}
+
+    notification =
+      call(
+        plug,
+        token,
+        "POST",
+        %{"jsonrpc" => "2.0", "method" => "notifications/initialized", "params" => %{}},
+        session_id: session_id,
+        protocol_version: @legacy_2025_06_18
+      )
+
+    assert notification.status == 202
+
+    listed =
+      call(
+        plug,
+        token,
+        "POST",
+        %{"jsonrpc" => "2.0", "id" => 22, "method" => "tools/list", "params" => %{}},
+        session_id: session_id,
+        protocol_version: @legacy_2025_06_18
+      )
+
+    assert listed.status == 200
+    assert [listed_tool] = Jason.decode!(listed.resp_body)["result"]["tools"]
+    assert listed_tool["name"] == "versioned_http"
+    refute Map.has_key?(listed_tool, "icons")
+
+    mismatched =
+      call(
+        plug,
+        token,
+        "POST",
+        %{"jsonrpc" => "2.0", "id" => 23, "method" => "ping", "params" => %{}},
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert mismatched.status == 400
+    assert Jason.decode!(mismatched.resp_body)["error"]["code"] == -32020
+
+    parent = self()
+
+    stream =
+      spawn(fn ->
+        conn =
+          conn(:get, "/mcp")
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> put_req_header("accept", "text/event-stream")
+          |> put_req_header("mcp-session-id", session_id)
+
+        send(parent, {:compat_stream_done, AttestoMCP.Server.Plug.call(conn, plug)})
+      end)
+
+    Process.sleep(50)
+    Server.publish(server, %{"type" => "toolsListChanged"})
+    Process.sleep(50)
+
+    deleted =
+      conn(:delete, "/mcp")
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("mcp-session-id", session_id)
+      |> AttestoMCP.Server.Plug.call(plug)
+
+    assert deleted.status == 200
+    assert_receive {:compat_stream_done, stream_conn}, 2_000
+    assert stream_conn.status == 200
+    assert stream_conn.resp_body =~ "notifications/tools/list_changed"
+    refute Process.alive?(stream)
+  end
+
+  test "legacy initialize header honors the configured revision set" do
+    {:ok, server} = Server.start_link(protocol_versions: [@legacy])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+
+    rejected =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 22,
+          "method" => "initialize",
+          "params" => %{
+            "protocolVersion" => @legacy,
+            "capabilities" => %{},
+            "clientInfo" => %{"name" => "legacy-plug", "version" => "1.0"}
+          }
+        },
+        protocol_version: @legacy_2025_06_18
+      )
+
+    assert rejected.status == 400
+    assert Jason.decode!(rejected.resp_body)["error"]["code"] == -32020
+  end
+
+  test "HTTP does not treat 2025-06-18 modern metadata as a modern request" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+
+    request = %{
+      "jsonrpc" => "2.0",
+      "id" => 25,
+      "method" => "tools/list",
+      "params" => %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => @legacy_2025_06_18,
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        }
+      }
+    }
+
+    without_session =
+      call(plug, token, "POST", request, protocol_version: @legacy_2025_06_18)
+
+    assert without_session.status == 400
+
+    assert Jason.decode!(without_session.resp_body)["error"]["data"]["reason"] ==
+             "legacy_session_required"
+
+    modern_header = call(plug, token, "POST", request, protocol_version: "2026-07-28")
+    assert modern_header.status == 400
+
+    assert Jason.decode!(modern_header.resp_body)["error"]["data"]["reason"] ==
+             "body_header_mismatch"
   end
 
   test "legacy GET is a standing incremental stream and DELETE closes only its owner" do
@@ -202,6 +396,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     config = AttestoMCP.Test.Factory.config()
     token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
     plug = plug(server, config)
+    sessions_before = Server.stats(server).sessions
 
     rejected =
       call(
@@ -224,6 +419,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     assert rejected.status == 400
     assert get_resp_header(rejected, "mcp-session-id") == []
     assert Jason.decode!(rejected.resp_body)["error"]["code"] == -32022
+    assert Server.stats(server).sessions == sessions_before
   end
 
   test "two concurrent legacy GET streams receive one routed event and both close" do

@@ -16,6 +16,8 @@ defmodule AttestoMCP.Server.Plug do
   @behaviour Plug
   @modern "2026-07-28"
   @legacy "2025-11-25"
+  @legacy_2025_06_18 "2025-06-18"
+  @legacy_versions [@legacy, @legacy_2025_06_18]
   @max_safe_integer 9_007_199_254_740_991
   @max_request_headers 64
   @max_request_header_name_bytes 256
@@ -426,13 +428,14 @@ defmodule AttestoMCP.Server.Plug do
          :ok <- rate_limit_request(conn, state, request),
          :ok <- validate_modern_headers(conn, request, era, state),
          :ok <- validate_legacy_session(request, conn, state, era),
-         {:ok, conn, session_id} <- maybe_initialize_session(conn, request, state, era) do
+         {:ok, conn, session_id} <- maybe_initialize_session(conn, request, state, era),
+         {:ok, session_context} <-
+           session_context_for_post(state, session_id, conn, request, era) do
       context =
         auth_context(conn)
         |> Map.put(:session_id, session_id)
         |> Map.put(:scope_map, state.opts[:scope_map] || %{})
-        |> maybe_session_capabilities(state, session_id, conn)
-        |> maybe_session_logging_level(state, session_id, conn)
+        |> Map.merge(session_context)
         |> maybe_subscription_authorizer(request, conn, state)
         |> Map.put(:owner, request_owner(era, session_id))
 
@@ -614,7 +617,7 @@ defmodule AttestoMCP.Server.Plug do
   defp dispatch_notification(conn_server, request, context, era, conn, session_id) do
     _ =
       AttestoMCP.Server.dispatch(conn_server, request, context,
-        version: era,
+        version: dispatch_version(era, request, context),
         transport: :http,
         owner: context[:owner]
       )
@@ -625,37 +628,55 @@ defmodule AttestoMCP.Server.Plug do
     send_resp(conn, 202, "")
   end
 
-  defp maybe_session_capabilities(context, _state, nil, _conn), do: context
+  defp session_context(_state, nil, _conn), do: {:ok, %{}}
 
-  defp maybe_session_capabilities(context, state, session_id, conn) do
-    capabilities =
-      AttestoMCP.Server.session_capabilities(
-        state.server,
-        session_id,
-        principal(conn),
-        tenant(conn)
-      )
+  defp session_context(state, session_id, conn) do
+    case AttestoMCP.Server.get_session(
+           state.server,
+           session_id,
+           principal(conn),
+           tenant(conn)
+         ) do
+      {:ok, session} ->
+        {:ok,
+         %{
+           client_capabilities: session.client_capabilities,
+           protocol_version: session.version,
+           logging_level: session.logging_level
+         }}
 
-    Map.put(context, :client_capabilities, capabilities)
+      _ ->
+        {:error, Error.invalid_request(%{"reason" => "legacy_session_unavailable"})}
+    end
   rescue
-    _ -> Map.put(context, :client_capabilities, %{})
+    _ -> {:error, Error.internal(%{"reason" => "legacy_session_lookup_failed"})}
+  catch
+    _, _ -> {:error, Error.internal(%{"reason" => "legacy_session_lookup_failed"})}
   end
 
-  defp maybe_session_logging_level(context, _state, nil, _conn), do: context
+  defp session_context_for_post(state, session_id, conn, request, era) do
+    case session_context(state, session_id, conn) do
+      {:ok, _context} = result ->
+        result
 
-  defp maybe_session_logging_level(context, state, session_id, conn) do
-    level =
-      AttestoMCP.Server.session_logging_level(
-        state.server,
-        session_id,
-        principal(conn),
-        tenant(conn)
-      )
+      {:error, _error} = result ->
+        if era == @legacy and request.kind == :request and request.method == "initialize" and
+             is_binary(session_id) do
+          _ = AttestoMCP.Server.delete_session(state.server, session_id)
+        end
 
-    Map.put(context, :logging_level, level)
-  rescue
-    _ -> Map.put(context, :logging_level, nil)
+        result
+    end
   end
+
+  defp dispatch_version(@modern, _request, _context), do: @modern
+  defp dispatch_version(@legacy, %{method: "initialize"}, _context), do: @legacy
+
+  defp dispatch_version(@legacy, %{method: "ping"}, context)
+       when not is_map_key(context, :protocol_version),
+       do: @legacy
+
+  defp dispatch_version(@legacy, _request, context), do: context[:protocol_version]
 
   defp dispatch_legacy_response(conn, state, request, session_id) do
     case AttestoMCP.Server.deliver_client_response(
@@ -729,7 +750,7 @@ defmodule AttestoMCP.Server.Plug do
         end
 
         case AttestoMCP.Server.dispatch(state.server, request, context,
-               version: era,
+               version: dispatch_version(era, request, context),
                transport: :http,
                owner: owner,
                on_event: on_event,
@@ -760,7 +781,7 @@ defmodule AttestoMCP.Server.Plug do
       end
     else
       case AttestoMCP.Server.dispatch(state.server, request, context,
-             version: era,
+             version: dispatch_version(era, request, context),
              transport: :http,
              owner: owner
            ) do
@@ -797,7 +818,7 @@ defmodule AttestoMCP.Server.Plug do
 
     result =
       AttestoMCP.Server.dispatch(state.server, request, context,
-        version: era,
+        version: dispatch_version(era, request, context),
         transport: :http,
         owner: self(),
         on_event: on_event,
@@ -1192,7 +1213,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp validate_legacy_session(request, conn, state, @legacy) do
     if request.kind == :request and request.method == "initialize" do
-      with :ok <- validate_legacy_initialize_header(conn),
+      with :ok <- validate_legacy_initialize_header(conn, state),
            {:error, :missing_session} <- header_session(conn) do
         :ok
       else
@@ -1212,11 +1233,19 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp validate_legacy_initialize_header(conn) do
+  defp validate_legacy_initialize_header(conn, state) do
     case get_req_header(conn, "mcp-protocol-version") do
-      [] -> :ok
-      [@legacy] -> :ok
-      _ -> {:error, Error.invalid_header(%{"reason" => "unsupported_protocol_version_header"})}
+      [] ->
+        :ok
+
+      [version] ->
+        if version in @legacy_versions and version in state.opts[:protocol_versions],
+          do: :ok,
+          else:
+            {:error, Error.invalid_header(%{"reason" => "unsupported_protocol_version_header"})}
+
+      _ ->
+        {:error, Error.invalid_header(%{"reason" => "unsupported_protocol_version_header"})}
     end
   end
 
@@ -1265,7 +1294,7 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_legacy_version(conn, session) do
     case get_req_header(conn, "mcp-protocol-version") do
       [] -> :ok
-      [version] when is_nil(session.version) or version == session.version -> :ok
+      [version] when version == session.version -> :ok
       [_] -> {:error, Error.invalid_header(%{"reason" => "negotiated_version_mismatch"})}
       _ -> {:error, Error.invalid_header(%{"reason" => "duplicate_protocol_version"})}
     end
@@ -1780,7 +1809,7 @@ defmodule AttestoMCP.Server.Plug do
 
     cond do
       @modern in header or body == @modern -> @modern
-      @legacy in header or body == @legacy -> @legacy
+      Enum.any?(@legacy_versions, &(&1 in header or body == &1)) -> @legacy
       true -> @legacy
     end
   end
@@ -1795,7 +1824,7 @@ defmodule AttestoMCP.Server.Plug do
   defp era_for(_request, conn) do
     case get_req_header(conn, "mcp-protocol-version") do
       [@modern] -> @modern
-      [@legacy] -> @legacy
+      [version] when version in @legacy_versions -> @legacy
       _ -> if session_header(conn), do: @legacy, else: @modern
     end
   end

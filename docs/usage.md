@@ -47,7 +47,7 @@ identifier), `resource_metadata_url` only when explicitly pinned, and DPoP
 replay/nonce plus mTLS DER callbacks when used by the deployment. The metadata
 endpoint is public; protected POST/GET/DELETE traffic is not.
 
-The package requires `attesto_mcp ~> 1.2` and calls the public
+The package requires `attesto_mcp ~> 1.2.1` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no sibling-path or pre-1.2 authentication fallback.
 
@@ -209,9 +209,10 @@ reject those bytes before dispatch.
 
 Modern requests carry `_meta.io.modelcontextprotocol/protocolVersion` and
 `clientCapabilities` per request and use POST-only request-scoped responses.
-Legacy starts with `initialize`, then `notifications/initialized`, and may use
-an expiring principal-bound `Mcp-Session-Id`. Modern requests never use a
-legacy session.
+Legacy `2025-11-25` and `2025-06-18` start with `initialize`, then
+`notifications/initialized`, and may use an expiring principal-bound
+`Mcp-Session-Id`. The server echoes and retains the exact accepted revision;
+modern requests never use a legacy session.
 
 Legacy GET is a standing incremental SSE stream with bounded keepalive and
 session-owner delivery. DELETE closes the authenticated session and its
@@ -281,11 +282,38 @@ adapter. Compilation and dependency diagnostics therefore stay off stdout;
 stdout
 contains protocol frames only. The preferred modern 2026 flow uses discovery and
 per-request `_meta` protocol-version/capability metadata; it does not send an
-`initialize` request. The adapter also accepts the frozen legacy
-initialize/initialized flow on stdin, writes only compact JSON-RPC messages to
-stdout, and exits on EOF. Its default bounded frame limit is 64,000 bytes;
-larger limits must be explicit. A host may instead call
+`initialize` request. The adapter also accepts the `2025-11-25` and
+`2025-06-18` legacy initialize/initialized flows on stdin, writes only compact
+JSON-RPC messages to stdout, and exits on EOF. Its default bounded frame limit
+is 64,000 bytes; larger limits must be explicit. A host may instead call
 `AttestoMCP.Server.Stdio.run/2` with its own supervised server and context.
 
-Only the two frozen versions are accepted: `2026-07-28` for modern discovery
-and per-request metadata, and `2025-11-25` for the negotiated legacy lifecycle.
+## Protocol version compatibility
+
+Only three frozen versions are accepted: `2026-07-28` for modern discovery and
+per-request metadata, plus `2025-11-25` and `2025-06-18` for the negotiated
+legacy lifecycle.
+
+Hosts may narrow that set with the server `protocol_versions` option. It must
+be a non-empty subset of those revisions. A legacy HTTP session is bound to the
+revision selected by `initialize`. Clients must send that revision in the
+`Mcp-Protocol-Version` header on later POST, GET, and DELETE requests. For
+backward compatibility, the server uses its authenticated session binding when
+the header is absent; an invalid or changed value fails closed.
+
+Modern discovery reports every revision the server supports. A client choosing
+`2026-07-28` continues with per-request metadata. A client choosing either
+legacy revision must open the dated `initialize`/`notifications/initialized`
+flow; a modern metadata envelope cannot carry a legacy revision.
+
+Revision-specific output is filtered before it reaches the client.
+`2025-06-18` catalogs and resource content omit the later `icons` field. That
+revision cannot send an explicit elicitation `mode` or sampling
+`tools`/`toolChoice` fields; form elicitation remains available by omitting
+`mode`. A server-side attempt to use one of those later fields returns
+`{:error, :unsupported}`.
+
+For legacy requests, handler context exposes the session's exact negotiated
+revision as `context.protocol_version`. This is `2025-11-25` or `2025-06-18`,
+not a generic legacy marker, so handlers can make revision-aware decisions
+without re-reading transport headers.

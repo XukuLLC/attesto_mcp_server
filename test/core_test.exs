@@ -46,6 +46,7 @@ defmodule AttestoMCP.Server.CoreTest do
 
     assert discovery["resultType"] == "complete"
     assert "2026-07-28" in discovery["supportedVersions"]
+    assert "2025-06-18" in discovery["supportedVersions"]
 
     assert get_in(discovery, ["_meta", "io.modelcontextprotocol/serverInfo", "version"]) ==
              Mix.Project.config()[:version]
@@ -78,6 +79,74 @@ defmodule AttestoMCP.Server.CoreTest do
     assert {4,
             %{"result" => %{"contents" => [%{"uri" => "urn:example:item", "text" => "hello"}]}}} =
              Server.dispatch(server, read, %{principal: "p"}, version: "2026-07-28")
+  end
+
+  test "modern metadata rejects legacy revisions instead of crossing lifecycle paths", %{
+    server: server
+  } do
+    request = %{
+      kind: :request,
+      id: 11,
+      method: "tools/list",
+      params: %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => "2025-06-18",
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        }
+      }
+    }
+
+    assert {11, %{"error" => %{"code" => -32022}}} =
+             Server.dispatch(server, request, %{principal: "p"})
+
+    assert {11, %{"error" => %{"code" => -32022}}} =
+             Server.dispatch(server, request, %{principal: "p"}, version: "2026-07-28")
+  end
+
+  test "configured protocol versions gate legacy initialization", %{server: _server} do
+    {:ok, server} = Server.start_link(protocol_versions: ["2026-07-28"])
+    {:ok, session} = Server.new_session(server, "configured", nil)
+
+    assert {:error, :invalid_negotiation} =
+             Server.negotiate_session(
+               server,
+               session.id,
+               "configured",
+               nil,
+               "2025-06-18",
+               %{}
+             )
+
+    assert {:error, :invalid_version} =
+             Server.set_session_version(server, session.id, "2025-06-18")
+
+    request = %{
+      kind: :request,
+      id: 12,
+      method: "initialize",
+      params: %{
+        "protocolVersion" => "2025-06-18",
+        "capabilities" => %{},
+        "clientInfo" => %{"name" => "configured-client", "version" => "1.0"}
+      }
+    }
+
+    assert {12, %{"error" => %{"code" => -32022, "data" => data}}} =
+             Server.dispatch(server, request, %{principal: "p"}, version: "2025-06-18")
+
+    assert data["supported"] == ["2026-07-28"]
+
+    {:ok, legacy_only} = Server.start_link(protocol_versions: ["2025-06-18"])
+
+    assert {12, %{"result" => %{"protocolVersion" => "2025-06-18"}}} =
+             Server.dispatch(legacy_only, request, %{principal: "p"}, version: "2025-06-18")
+
+    newer_request = put_in(request, [:params, "protocolVersion"], "2025-11-25")
+
+    assert {12, %{"error" => %{"code" => -32022, "data" => newer_data}}} =
+             Server.dispatch(legacy_only, newer_request, %{principal: "p"}, version: "2025-11-25")
+
+    assert newer_data["supported"] == ["2025-06-18"]
   end
 
   test "unknown modern methods preserve ID and use method-not-found", %{server: server} do

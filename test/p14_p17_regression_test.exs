@@ -142,16 +142,23 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
     executable = System.find_executable("elixir") || raise "elixir executable not found"
     script = Path.expand("../examples/stdio.exs", __DIR__)
 
+    install_dir =
+      Path.join(System.tmp_dir!(), "attesto-mcp-live-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(install_dir)
+
     port =
       Port.open({:spawn_executable, executable}, [
         :binary,
         :exit_status,
         :use_stdio,
+        {:env, [{~c"MIX_INSTALL_DIR", String.to_charlist(install_dir)}]},
         {:args, [script]}
       ])
 
     on_exit(fn ->
       if Port.info(port), do: Port.close(port)
+      File.rm_rf!(install_dir)
     end)
 
     request = %{
@@ -175,7 +182,7 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
     assert response["result"]["resultType"] == "complete"
   end
 
-  test "unsupported 2025-06-18 initialize is rejected" do
+  test "2025-06-18 initialize is accepted and echoed exactly" do
     {:ok, server} = Server.start_link([])
 
     request = %{
@@ -189,7 +196,7 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
       }
     }
 
-    assert {92, %{"error" => %{"code" => -32022}}} =
+    assert {92, %{"result" => %{"protocolVersion" => "2025-06-18"}}} =
              Server.dispatch(server, request, %{principal: "compat"}, version: "2025-06-18")
   end
 
