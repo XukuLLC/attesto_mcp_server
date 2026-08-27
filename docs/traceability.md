@@ -125,7 +125,7 @@ Full-suite order-randomized runs for the 0.9.0 candidate passed at seeds 1,
 424242, and 99991. The Elixir 1.18.3/OTP 27.3 floor passed the same 218-check
 gate with at least 79.4% coverage, zero-error/zero-skip
 Dialyzer, package unpack, and Hex advisory audit. Hosted verification is
-recorded only after it runs against the release commit.
+recorded below against the candidate implementation commit.
 
 The pinned runner `0.2.0-alpha.11` at commit
 `74edef34d674f563537be8c6587cebaa58e830ca` selected
@@ -137,5 +137,8 @@ TypeScript 2.0.0 and Python 2.1.1 clients passed authenticated list/call gates
 in both eras. The current source also passed formatting, documentation, package,
 version-floor, and source-neutral scans. The floor evidence above is current.
 An independent read-only release review returned GO at
-`2026-08-27T07:36:25Z`; hosted-CI evidence for `0.9.0` remains pending and is
-not inherited from `0.8.0`.
+`2026-08-27T07:36:25Z`. Hosted CI
+[run 33050469173](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33050469173)
+passed all three jobs at `2026-08-27T07:41:23Z` against implementation commit
+`18bd7af2c1cca325b4011a8b8f13ad8fcf8452ab`; neither result is inherited from
+`0.8.0`.
