@@ -21,6 +21,8 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
 - Python SDK smoke gates completed at: `2026-08-27T10:04:36Z`
+- `0.10.1` hosted official-interop job completed at: `2026-08-27T15:40:48Z`
+  in [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
@@ -30,8 +32,9 @@ Each fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
 `scripts`, `test`, and reusable installer `fixtures` files in lexical order.
 The table below was rerun against the exact `0.10.0` release candidate after
 the Phoenix installer work; it is not inherited from the `0.9.0` run. The
-`0.10.1` patch candidate adds a local regression for request bodies decoded by
-a host parser; its official runner is repeated by the hosted release gate.
+`0.10.1` patch candidate adds regressions for request bodies decoded or passed
+through by a host parser; its official runner and exact SDK client smokes were
+repeated successfully by the hosted release gate linked above.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |

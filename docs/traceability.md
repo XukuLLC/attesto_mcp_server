@@ -41,7 +41,7 @@ listed and is not treated as complete interoperability.
 | R27 | Deterministic lists/pagination: stable auth-visible order, opaque integrity/auth-bound cursors, fixed limits, and invalid/expired/cross-context rejection | PARTIAL | cache/cursor tests; cluster and full mutation matrix remain partial |
 | R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests; broad cross-connection matrix remains partial |
 | R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry and P5 tests; broad fuzz/stress remains partial |
-| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 local release and final package scans pass; 9 not-scored Tasks failures, 0.10.1 hosted CI, and broad fuzz remain open |
+| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 local and hosted release gates and final package scans pass; 9 not-scored Tasks failures and broad fuzz remain open |
 
 ## Release additions beyond the baseline
 
@@ -143,8 +143,11 @@ version-floor, optional-installer, disk-backed host, and source-neutral scans.
 The floor evidence above is current. The 0.10.1 patch adds Phoenix-style
 parser-pipeline and pass-through parser regressions while preserving encoded
 message-size and nesting bounds. Its independent read-only review returned GO
-at `2026-08-27T15:38:47Z`; its hosted gate is pending. An independent read-only
-0.10.0 release review returned GO at
+at `2026-08-27T15:38:47Z`. Hosted
+[run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
+passed all four jobs at `2026-08-27T15:45:09Z` against implementation commit
+`33eb0e86ed9ca39ec90c73e70b5794d6d0659500`. An independent read-only 0.10.0
+release review returned GO at
 `2026-08-27T10:23:42Z`. Hosted
 [run 33062882020](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33062882020)
 passed all four jobs at `2026-08-27T10:29:43Z` against implementation commit
