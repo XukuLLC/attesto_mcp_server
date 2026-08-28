@@ -187,6 +187,39 @@ defmodule AttestoMCP.Server.P3AuthAcceptanceTest do
         dpop_jkt: jkt
       )
 
+    bearer_bound =
+      http_call(plug, token, "tools/call", %{
+        "name" => "dpop",
+        "arguments" => %{}
+      })
+
+    assert bearer_bound.status == 401
+    assert [bearer_challenge] = get_resp_header(bearer_bound, "www-authenticate")
+    assert String.starts_with?(bearer_challenge, ~s(DPoP error="invalid_token"))
+
+    assert bearer_challenge =~
+             ~s(resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp")
+
+    assert Jason.decode!(bearer_bound.resp_body)["error_description"] == "dpop_proof_required"
+
+    fallback_plug =
+      plug(server, config,
+        replay_check: replay_check,
+        htu: fn _ -> @resource end,
+        credential_from_conn: fn _ -> {:ok, :dpop, token} end
+      )
+
+    fallback_bound =
+      http_call(fallback_plug, nil, "tools/call", %{
+        "name" => "dpop",
+        "arguments" => %{}
+      })
+
+    assert fallback_bound.status == 401
+    assert [fallback_challenge] = get_resp_header(fallback_bound, "www-authenticate")
+    assert String.starts_with?(fallback_challenge, ~s(DPoP error="invalid_dpop_proof"))
+    assert Jason.decode!(fallback_bound.resp_body)["error_description"] == "missing_proof"
+
     {valid_proof, ^jkt} = AttestoMCP.Test.Factory.dpop_proof(token, jwk: jwk, htu: @resource)
 
     valid =
@@ -197,6 +230,29 @@ defmodule AttestoMCP.Server.P3AuthAcceptanceTest do
 
     assert valid.status == 200
 
+    insufficient_token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [],
+        dpop_jkt: jkt
+      )
+
+    {insufficient_proof, ^jkt} =
+      AttestoMCP.Test.Factory.dpop_proof(insufficient_token, jwk: jwk, htu: @resource)
+
+    insufficient =
+      http_call(plug, {:dpop, insufficient_token, insufficient_proof}, "tools/call", %{
+        "name" => "dpop",
+        "arguments" => %{}
+      })
+
+    assert insufficient.status == 403
+    assert [insufficient_challenge] = get_resp_header(insufficient, "www-authenticate")
+    assert String.starts_with?(insufficient_challenge, ~s(DPoP error="insufficient_scope"))
+    assert insufficient_challenge =~ ~s(scope="mcp:tools:call")
+
+    assert insufficient_challenge =~
+             ~s(resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp")
+
     replay =
       http_call(plug, {:dpop, token, valid_proof}, "tools/call", %{
         "name" => "dpop",
@@ -204,6 +260,13 @@ defmodule AttestoMCP.Server.P3AuthAcceptanceTest do
       })
 
     assert replay.status == 401
+    assert [replay_challenge] = get_resp_header(replay, "www-authenticate")
+    assert String.starts_with?(replay_challenge, ~s(DPoP error="invalid_dpop_proof"))
+
+    assert replay_challenge =~
+             ~s(resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp")
+
+    assert Jason.decode!(replay.resp_body)["error_description"] == "replay"
 
     for flaw <- [:wrong_htm, :wrong_htu, :missing_ath, :expired] do
       proof = Attesto.Test.DPoP.invalid_proof(jwk, flaw, "POST", @resource, access_token: token)
@@ -267,6 +330,8 @@ defmodule AttestoMCP.Server.P3AuthAcceptanceTest do
 
     assert nonce_response.status == 401
     assert get_resp_header(nonce_response, "dpop-nonce") == ["nonce-1"]
+    assert [nonce_challenge] = get_resp_header(nonce_response, "www-authenticate")
+    assert String.starts_with?(nonce_challenge, ~s(DPoP error="use_dpop_nonce"))
 
     cert = AttestoMCP.Test.Factory.self_signed_cert_der()
     {:ok, thumbprint} = Attesto.MTLS.compute_thumbprint(cert)

@@ -319,20 +319,54 @@ defmodule AttestoMCP.Server.Plug do
   defp unauthorized(conn, auth_opts) do
     metadata_url = metadata_url(conn, auth_opts)
 
+    body =
+      case conn.assigns[:attesto_mcp_oauth_error] do
+        error when is_map(error) -> error
+        _ -> %{"error" => "invalid_token", "error_description" => "authentication required"}
+      end
+
     conn
-    |> put_resp_header("www-authenticate", ~s(Bearer resource_metadata="#{metadata_url}"))
+    |> put_authenticate_challenge(
+      ~s(Bearer resource_metadata="#{metadata_url}"),
+      anonymous_authentication?(conn, auth_opts)
+    )
     |> put_resp_header("cache-control", "private, no-store")
     |> put_resp_header("vary", "authorization")
     |> put_resp_content_type("application/json")
-    |> send_resp(
-      401,
-      Jason.encode!(%{
-        "error" => "invalid_token",
-        "error_description" => "authentication required"
-      })
-    )
+    |> send_resp(401, Jason.encode!(body))
   rescue
     _ -> send_resp(conn, 401, Jason.encode!(%{"error" => "invalid_token"}))
+  end
+
+  defp put_authenticate_challenge(conn, challenge),
+    do: put_authenticate_challenge(conn, challenge, false)
+
+  defp put_authenticate_challenge(conn, challenge, true),
+    do: put_resp_header(conn, "www-authenticate", challenge)
+
+  defp put_authenticate_challenge(conn, challenge, false) do
+    case get_resp_header(conn, "www-authenticate") do
+      [] -> put_resp_header(conn, "www-authenticate", challenge)
+      [_ | _] -> conn
+    end
+  end
+
+  defp anonymous_authentication?(conn, auth_opts) do
+    get_req_header(conn, "authorization") == [] and
+      get_req_header(conn, "dpop") == [] and
+      not Keyword.has_key?(auth_opts, :credential_from_conn) and
+      not body_credential?(conn, auth_opts)
+  end
+
+  defp body_credential?(conn, auth_opts) do
+    body_enabled? =
+      auth_opts
+      |> Keyword.get(:bearer_methods, [:header])
+      |> List.wrap()
+      |> Enum.any?(&(&1 in [:body, "body"]))
+
+    body_enabled? and
+      match?(%{"access_token" => token} when is_binary(token) and token != "", conn.body_params)
   end
 
   defp protocol(conn, state) do
@@ -523,6 +557,13 @@ defmodule AttestoMCP.Server.Plug do
     explicit_resource = auth_opts[:resource]
     explicit_audience = auth_opts[:resource_audience]
 
+    canonical_resource =
+      cond do
+        absolute_resource?(explicit_audience) -> explicit_audience
+        absolute_resource?(explicit_resource) -> explicit_resource
+        true -> nil
+      end
+
     audience =
       cond do
         absolute_resource?(explicit_audience) -> explicit_audience
@@ -533,6 +574,7 @@ defmodule AttestoMCP.Server.Plug do
       end
 
     auth_opts
+    |> maybe_pin_resource_origin(canonical_resource)
     |> Keyword.delete(:scopes)
     |> Keyword.delete(:allow_dynamic_origin)
     |> Keyword.delete(:resource)
@@ -542,6 +584,22 @@ defmodule AttestoMCP.Server.Plug do
     |> Keyword.put(:send_error, &__MODULE__.attesto_send_error/3)
     |> AttestoMCP.Plug.ProtectResource.prepare()
   end
+
+  defp maybe_pin_resource_origin(opts, resource) when is_binary(resource) do
+    if absolute_resource?(opts[:base_url] || opts[:origin]) do
+      opts
+    else
+      %URI{scheme: scheme, host: host, port: port} = URI.parse(resource)
+
+      Keyword.put(
+        opts,
+        :base_url,
+        "#{scheme}://#{format_host(host)}#{origin_port_suffix(scheme, port)}"
+      )
+    end
+  end
+
+  defp maybe_pin_resource_origin(opts, _resource), do: opts
 
   defp maybe_put_public_audience(opts, nil), do: opts
 
@@ -2527,9 +2585,8 @@ defmodule AttestoMCP.Server.Plug do
           ""
       end
 
-    put_resp_header(
+    put_authenticate_challenge(
       conn,
-      "www-authenticate",
       ~s(Bearer error="insufficient_scope"#{scope} resource_metadata="#{metadata_url}")
     )
   rescue

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.4 - 2026-08-28
+
+- Preserve Attesto's scheme-correct OAuth challenges and error details for
+  invalid DPoP proofs, sender-bound tokens presented as Bearer, nonce requests,
+  and insufficient scopes instead of replacing them with a generic Bearer
+  response.
+- Keep anonymous discovery challenges error-free, pin challenge metadata to the
+  configured canonical resource origin, and cover header and host-owned
+  credential paths with DPoP regressions.
+
 ## 0.10.3 - 2026-08-28
 
 - Configure detected `attesto_phoenix` hosts for URL client metadata and native
