@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.6 - 2026-08-28
 
 - Apply the automatic AttestoPhoenix access-token JTI revocation check and
   principal loader when authenticating each MCP request or stream, before
