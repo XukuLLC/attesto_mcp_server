@@ -8,12 +8,13 @@ repo_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 temp_root=${TMPDIR:-/tmp}
 host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-host.XXXXXX")
 phoenix_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-host.XXXXXX")
+phoenix_floor_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-floor-host.XXXXXX")
 absent_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-absent.XXXXXX")
 generated_root=$(mktemp -d "$temp_root/attesto-mcp-installer-generated.XXXXXX")
 generated_host_dir="$generated_root/installer_host"
 
 cleanup() {
-  rm -rf -- "$host_dir" "$phoenix_host_dir" "$absent_dir" "$generated_root"
+  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$absent_dir" "$generated_root"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -21,6 +22,8 @@ trap cleanup EXIT HUP INT TERM
 cp -R "$repo_dir/fixtures/installer_host/." "$host_dir"
 cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_host_dir/mix.exs"
+cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_floor_host_dir"
+cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_floor_host_dir/mix.exs"
 
 digest_tree() {
   {
@@ -40,6 +43,47 @@ digest_tree() {
     else
       shasum -a 256
     fi
+}
+
+installed_http_smoke() {
+  mix run -e '
+    protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+    principal = %{
+      kind: "service",
+      sub: "svc_installer",
+      scopes: [AttestoMCP.Scopes.tools_read()],
+      claims: %{"client_id" => "installer"}
+    }
+
+    {:ok, minted} = Attesto.Token.mint(protected[:config], principal)
+
+    body =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/list",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          }
+        }
+      })
+
+    conn =
+      Plug.Test.conn(:post, "/mcp", body)
+      |> Plug.Conn.put_req_header("authorization", "Bearer " <> minted.access_token)
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
+      |> Plug.Conn.put_req_header("mcp-protocol-version", "2026-07-28")
+      |> Plug.Conn.put_req_header("mcp-method", "tools/list")
+      |> InstallerHostWeb.Router.call(InstallerHostWeb.Router.init([]))
+
+    unless conn.status == 200 and Jason.decode!(conn.resp_body)["result"]["tools"] != [] do
+      raise("installed AttestoPhoenix MCP route rejected authenticated traffic")
+    end
+  '
 }
 
 (
@@ -103,8 +147,16 @@ digest_tree() {
 
     unless match?(%Attesto.Config{}, protected[:config]) and
              is_function(protected[:replay_check], 2) and
-             is_function(protected[:htu], 1) do
+             is_function(protected[:htu], 1) and
+             is_function(protected[:principal], 2) do
       raise("real attesto_phoenix integration omitted protected-resource callbacks")
+    end
+
+    unless protected[:principal].(
+             %{"sub" => "svc_installer", "client_id" => "installer"},
+             %{binding: :bearer}
+           ) == {:ok, %{id: "svc_installer"}} do
+      raise("real attesto_phoenix principal callback was not executable")
     end
 
     unless AttestoPhoenix.Config.client_id_metadata_enabled?(host_config) do
@@ -121,12 +173,56 @@ digest_tree() {
     end
   '
 
+  installed_http_smoke
+
   mix attesto_mcp_server.install \
     --base-url https://mcp.example.com \
     --yes
 
   second_digest=$(digest_tree)
   test "$first_digest" = "$second_digest"
+)
+
+(
+  cd "$phoenix_floor_host_dir"
+  export ATTESTO_MCP_SERVER_PATH="$repo_dir"
+  INSTALLER_HOST_SIGNING_PEM=$(openssl genpkey -algorithm ED25519 2>/dev/null)
+  export INSTALLER_HOST_SIGNING_PEM
+
+  elixir -e '
+    path = "mix.exs"
+    source = File.read!(path)
+    marker = ~s({:attesto_phoenix, "~> 2.14"})
+
+    unless length(:binary.matches(source, marker)) == 1 do
+      raise("attesto_phoenix floor dependency marker was not unique")
+    end
+
+    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "== 2.14.1"})))
+  '
+
+  mix deps.get
+  mix attesto_mcp_server.install --base-url https://mcp.example.com --yes
+  mix format --check-formatted
+  mix compile --warnings-as-errors
+  mix run -e '
+    protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+    unless to_string(Application.spec(:attesto_phoenix, :vsn)) == "2.14.1" do
+      raise("attesto_phoenix floor lane did not resolve exactly 2.14.1")
+    end
+
+    unless match?(%Attesto.Config{}, protected[:config]) and
+             is_function(protected[:principal], 2) and
+             protected[:principal].(
+               %{"sub" => "svc_installer", "client_id" => "installer"},
+               %{binding: :bearer}
+             ) == {:ok, %{id: "svc_installer"}} do
+      raise("attesto_phoenix 2.14.1 protected-resource integration failed")
+    end
+  '
+
+  installed_http_smoke
 )
 
 mix phx.new "$generated_host_dir" \
@@ -204,6 +300,7 @@ mix phx.new "$generated_host_dir" \
       current
       |> Keyword.put(:keystore, InstallerHost.InstallerTestKeystore)
       |> Keyword.put(:principal_kinds, principal_kinds)
+      |> Keyword.put(:load_principal, fn subject -> {:ok, %{id: subject}} end)
 
     Application.put_env(
       :installer_host,
@@ -221,8 +318,16 @@ mix phx.new "$generated_host_dir" \
 
     unless match?(%Attesto.Config{}, protected[:config]) and
              is_function(protected[:replay_check], 2) and
-             is_function(protected[:htu], 1) do
+             is_function(protected[:htu], 1) and
+             is_function(protected[:principal], 2) do
       raise("generated Phoenix host omitted protected-resource callbacks")
+    end
+
+    unless protected[:principal].(
+             %{"sub" => "installer_test_1", "client_id" => "installer"},
+             %{binding: :bearer}
+           ) == {:ok, %{id: "installer_test_1"}} do
+      raise("generated Phoenix host principal callback was not executable")
     end
 
     unless AttestoPhoenix.Config.client_id_metadata_enabled?(config) do

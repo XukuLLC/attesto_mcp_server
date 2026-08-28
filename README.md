@@ -11,9 +11,9 @@ dispatch, with route-derived scopes applied through its prepared dynamic
 authorization API. The required `attesto_mcp ~> 1.2.1` dependency provides
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3`; no older
 authentication fallback is included. Configure the canonical resource
-path/origin, Attesto verifier, replay and certificate callbacks, and
-least-privilege scopes in the host application. The package does not contain an
-OAuth authorization server or token issuer.
+path/origin, Attesto verifier, principal policy, replay and certificate
+callbacks, and least-privilege scopes in the host application. The package does
+not contain an OAuth authorization server or token issuer.
 
 ## Quick start
 
@@ -59,16 +59,24 @@ mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 
 When the host already depends on `attesto_phoenix`, the generated routes derive
 the verifier and protected-resource callbacks from that package's validated
-OTP configuration on each applicable request. This carries the host's DPoP
-replay/nonce, canonical-request, and mTLS certificate policy into the MCP
-boundary without freezing callback closures at router compile time. The
-installer also enables secure URL client metadata and ephemeral `localhost`
-callback ports for native desktop/CLI clients, adding the Req dependency used
-by the default fetcher. Existing host values win, so an application can keep a
-narrower metadata-host allowlist or stricter loopback policy.
+OTP configuration on each applicable request. This carries access-token JTI
+revocation, principal loading, DPoP replay/nonce, canonical-request, and mTLS
+certificate policy into the MCP boundary without freezing callback closures at
+router compile time. The installer also enables secure URL client metadata and
+ephemeral `localhost` callback ports for native desktop/CLI clients, adding the
+Req dependency used by the default fetcher. Existing host values win, so an
+application can keep a narrower metadata-host allowlist or stricter loopback
+policy.
+
+Automatic AttestoPhoenix integration requires every authenticated token
+subject to resolve through the host's `load_principal` callback. A revoked JTI,
+an unresolved subject, or a callback failure denies the MCP request with a
+neutral invalid-token response. Return a principal term whose equality is
+stable for the same identity: the server uses it for request ownership,
+session and subscription isolation, and rate/concurrency accounting.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 2.14.0 and < 3.0.0` and Req requirements that overlap
+overlap `>= 2.14.1 and < 3.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`; existing stable requirements are narrowed to their
 intersection. That intersection must contain at least one stable release;
 pre-release-only matches are intentionally rejected. If the dependency catalog

@@ -219,6 +219,8 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp validate_auth_options!(auth_opts) do
+    validate_auth_assign_keys!(auth_opts)
+
     if not pinned_resource?(auth_opts) do
       raise ArgumentError,
             "auth must pin :resource/:resource_audience or :base_url/:origin; " <>
@@ -234,6 +236,31 @@ defmodule AttestoMCP.Server.Plug do
 
     :ok
   end
+
+  defp validate_auth_assign_keys!(auth_opts) do
+    configured =
+      Enum.map(@resolver_assign_keys, fn {option, canonical_key} ->
+        {option, canonical_key, Keyword.get(auth_opts, option, canonical_key)}
+      end)
+
+    configured_keys = Enum.map(configured, &elem(&1, 2))
+    canonical_keys = Map.values(@resolver_assign_keys)
+
+    valid? =
+      Enum.all?(configured_keys, &valid_auth_assign_key?/1) and
+        length(configured_keys) == length(Enum.uniq(configured_keys)) and
+        Enum.all?(configured, fn {_option, canonical_key, configured_key} ->
+          configured_key == canonical_key or configured_key not in canonical_keys
+        end)
+
+    unless valid? do
+      raise ArgumentError,
+            "auth assign keys must be distinct non-nil, non-boolean atoms and cannot reuse " <>
+              "another package-owned key"
+    end
+  end
+
+  defp valid_auth_assign_key?(key), do: is_atom(key) and key not in [nil, true, false]
 
   defp validate_auth_resolver!(resolver) when is_function(resolver, 0) do
     case Function.info(resolver, :type) do
@@ -667,10 +694,59 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp protect_resource(conn, state, _scopes) do
-    checked = AttestoMCP.Plug.ProtectResource.authenticate(conn, state.auth_boundary)
-    if checked.halted, do: {:halt, checked}, else: {:ok, checked}
-  rescue
-    _ -> {:halt, auth_halt(conn, 401)}
+    conn = clear_auth_assigns(conn, state.auth_opts)
+
+    try do
+      checked = AttestoMCP.Plug.ProtectResource.authenticate(conn, state.auth_boundary)
+
+      if checked.halted,
+        do: {:halt, checked},
+        else: {:ok, canonicalize_auth_assigns(checked, state.auth_opts)}
+    rescue
+      _error ->
+        auth_policy_failure(:verifier, :exception)
+        {:halt, auth_halt(conn, 401)}
+    catch
+      kind, _reason ->
+        auth_policy_failure(:verifier, kind)
+        {:halt, auth_halt(conn, 401)}
+    end
+  end
+
+  # Authentication owns both the configured assign keys and the package's
+  # canonical aliases. Clear any upstream values before verification so an
+  # optional nil principal cannot inherit an attacker-controlled assign.
+  defp clear_auth_assigns(conn, auth_opts) do
+    configured_keys =
+      Enum.map(@resolver_assign_keys, fn {option, canonical_key} ->
+        Keyword.get(auth_opts, option, canonical_key)
+      end)
+
+    auth_keys = Enum.uniq(Map.values(@resolver_assign_keys) ++ configured_keys)
+    %{conn | assigns: Map.drop(conn.assigns, auth_keys)}
+  end
+
+  # Static auth configuration may retain host-selected assign keys. Keep those
+  # assigns intact while copying verified values to the package-owned keys used
+  # for dispatch, ownership, rate limiting, and subscription reauthorization.
+  # Resolver-backed auth already requires the canonical keys.
+  defp canonicalize_auth_assigns(conn, auth_opts) do
+    authenticated_assigns = conn.assigns
+
+    Enum.reduce(@resolver_assign_keys, conn, fn {option, canonical_key}, conn ->
+      configured_key = Keyword.get(auth_opts, option, canonical_key)
+
+      cond do
+        configured_key == canonical_key ->
+          conn
+
+        Map.has_key?(authenticated_assigns, configured_key) ->
+          assign(conn, canonical_key, Map.fetch!(authenticated_assigns, configured_key))
+
+        true ->
+          %{conn | assigns: Map.delete(conn.assigns, canonical_key)}
+      end
+    end)
   end
 
   # The initial ProtectResource call authenticates before reading the body.
@@ -767,6 +843,14 @@ defmodule AttestoMCP.Server.Plug do
 
   defp auth_refusal(category) do
     Telemetry.execute([:auth, :refusal], %{count: 1}, %{category: category, transport: :http})
+  end
+
+  defp auth_policy_failure(category, error) do
+    Telemetry.execute(
+      [:auth, :policy_failure],
+      %{count: 1},
+      %{category: category, error: error}
+    )
   end
 
   defp rate_limit_request(conn, state, request) do
@@ -2521,20 +2605,20 @@ defmodule AttestoMCP.Server.Plug do
        when is_binary(token) do
     claims = Map.get(initial_context, :attesto_mcp_claims) || %{}
     confirmation = Map.get(claims, "cnf", %{})
-
-    verify_opts = [
-      expected_typ: "access",
-      trusted_audiences: [canonical]
-    ]
+    sender = Map.get(initial_context, :attesto_mcp_sender)
 
     with %Attesto.Config{} <- config,
+         sender_opts when is_list(sender_opts) <- sender_verification_opts(sender),
+         verify_opts <-
+           [expected_typ: "access", trusted_audiences: [canonical]] ++ sender_opts,
          {:ok, current_claims} <- Attesto.Token.verify(config, token, verify_opts),
          true <- Map.get(current_claims, "cnf", %{}) == confirmation,
-         current_principal <- current_claims["sub"] || current_claims["client_id"],
+         initial_actor when not is_nil(initial_actor) <- token_actor(claims),
+         ^initial_actor <- token_actor(current_claims),
          current_tenant <- current_claims["tenant"],
          current_scopes when is_list(current_scopes) <- token_scopes(current_claims),
-         true <- current_principal == (owner[:principal] || owner["principal"]),
-         true <- current_tenant == (owner[:tenant] || owner["tenant"]),
+         true <- Map.get(initial_context, :principal) == owner_value(owner, :principal),
+         true <- current_tenant == owner_value(owner, :tenant),
          true <- scopes_grant?(required_scopes, current_scopes) do
       true
     else
@@ -2545,6 +2629,45 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp reauthorize_delivery?(_, _, _, _, _, _), do: false
+
+  defp sender_verification_opts(%{binding: :bearer}), do: []
+
+  defp sender_verification_opts(%{binding: :dpop, jkt: jkt})
+       when is_binary(jkt) and jkt != "",
+       do: [dpop_jkt: jkt]
+
+  defp sender_verification_opts(%{binding: :mtls, x5t_s256: thumbprint})
+       when is_binary(thumbprint) and thumbprint != "",
+       do: [mtls_cert_thumbprint: thumbprint]
+
+  defp sender_verification_opts(_sender), do: :error
+
+  defp token_actor(%{"sub" => subject} = claims) when is_binary(subject) and subject != "" do
+    case Map.fetch(claims, "client_id") do
+      {:ok, client_id} when is_binary(client_id) and client_id != "" ->
+        {:subject, subject, client_id}
+
+      :error ->
+        {:subject, subject, nil}
+
+      _invalid ->
+        nil
+    end
+  end
+
+  defp token_actor(%{"client_id" => client_id}) when is_binary(client_id) and client_id != "",
+    do: {:client, client_id}
+
+  defp token_actor(_claims), do: nil
+
+  defp owner_value(owner, key) when is_map(owner) do
+    case Map.fetch(owner, key) do
+      {:ok, value} -> value
+      :error -> Map.get(owner, Atom.to_string(key))
+    end
+  end
+
+  defp owner_value(_owner, _key), do: nil
 
   defp scopes_grant?([], _granted), do: true
 

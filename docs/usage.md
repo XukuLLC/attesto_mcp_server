@@ -7,9 +7,19 @@ that also uses `attesto_phoenix`, the latter remains the authorization server:
 it owns issuer, consent, token, refresh, revocation, and sender-constrained
 credential behavior. The installer reuses both its validated core
 `Attesto.Config` and its public protected-resource adapter for DPoP
-replay/nonce, canonical-request, and mTLS certificate callbacks; it does not
-duplicate or reconfigure those responsibilities. There is no hard dependency
-from this package to `attesto_phoenix`.
+replay/nonce, canonical-request, and mTLS certificate callbacks. The resulting
+MCP boundary also applies the host's access-token JTI revocation check and
+principal loader before reading the request body; it does not duplicate or
+reconfigure those responsibilities. There is no hard dependency from this
+package to `attesto_phoenix`.
+
+On this automatic path, every authenticated token subject must resolve through
+the host's `load_principal` callback. A revoked JTI, an unresolved subject, or
+a callback failure denies the request with a neutral invalid-token response.
+The loaded principal is the server's security identity for ownership checks,
+session and subscription isolation, and rate/concurrency accounting. Return a
+term whose equality remains stable for the same identity across requests; do
+not include per-load timestamps, references, or other changing values.
 
 With `attesto_phoenix` already declared directly by the host, run:
 
@@ -35,7 +45,7 @@ not replaced, and the installer does not enable dynamic registration or invent
 client persistence.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 2.14.0 and < 3.0.0` and Req requirements that overlap
+overlap `>= 2.14.1 and < 3.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -106,7 +116,9 @@ The explicit `--attesto-config` path instead keeps the static
 `auth: [config: &Elixir.MyApp.MCP.attesto_config/0, resource: "/mcp",
 base_url: "https://mcp.example.com"]` form. Such hosts remain responsible for
 supplying every replay, nonce, canonical-request, and certificate callback
-their sender-constraint policy needs.
+their sender-constraint policy needs, plus any application-specific
+`:principal` callback that performs principal availability or access-token
+revocation checks.
 
 Keep both forwards outside browser-session and CSRF pipelines. The metadata
 route is intentionally public; the MCP route authenticates every protected
@@ -179,8 +191,18 @@ POST decoding; Attesto owns token, DPoP, mTLS, RFC 9728 challenges, and scope
 algebra. Configure an
 issuer/resource verifier, `resource: "/mcp"` (or a canonical resource
 identifier), `resource_metadata_url` only when explicitly pinned, and DPoP
-replay/nonce plus mTLS DER callbacks when used by the deployment. The metadata
+replay/nonce plus mTLS DER callbacks when used by the deployment. Hosts using
+the explicit callback path can also provide a `:principal` callback for
+principal availability and access-token revocation policy. The metadata
 endpoint is public; protected POST/GET/DELETE traffic is not.
+
+Static `:auth` options may select distinct, non-nil, non-boolean atom keys for
+`:claims_key`, `:context_key`, `:principal_key`, `:scopes_key`, and
+`:sender_key`, provided a custom key does not reuse a different package-owned
+canonical key. These configured slots and their canonical aliases belong to
+the authentication boundary: it clears them before verification and
+repopulates them only from the verified result. Do not use those assign names
+for unrelated upstream state.
 
 For advanced runtime integration, `:auth` may be an external zero-arity
 function or an MFA whose arguments are portable compile-time literals. The
@@ -195,10 +217,17 @@ The package requires `attesto_mcp ~> 1.2.1` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no sibling-path or pre-1.2 authentication fallback.
 
-Per-delivery subscription reauthorization requires an executable `%Attesto.Config{}`
-through `auth: [config: ...]`. An `issuer:` without a verifier configuration is
-metadata-only: it may serve RFC 9728 metadata, but protected traffic fails
-closed until the host supplies an executable Attesto configuration.
+Per-delivery subscription reauthorization requires an executable
+`%Attesto.Config{}` through `auth: [config: ...]`. It re-verifies the captured
+access token's validity, audience, sender binding, and required scopes before
+modern or legacy event delivery. Comparisons with the opening token actor,
+principal, and tenant preserve the authenticated stream's ownership snapshot;
+they do not re-run host policy. Host revocation and principal callbacks run
+when the stream is authenticated, not inside shared publish processes; a later
+host-policy change applies on the next request or reconnect. An `issuer:`
+without a verifier configuration is metadata-only: it may serve RFC 9728
+metadata, but protected traffic fails closed until the host supplies an
+executable Attesto configuration.
 
 ### Handler notifications and logging
 
@@ -447,12 +476,16 @@ stable event contract is:
 * `http_request` and `stdio`: `start`, `stop`, and `exception`.
 * `request`, `handler`, and `stream`: `start`, `stop`, `exception`, with
   `timeout`, `open`, `close`, and `backpressure` where applicable.
-* `auth/refusal`, `protocol/error`, `cancellation/request`,
+* `auth/refusal`, `auth/policy_failure`, `protocol/error`, `cancellation/request`,
   `cancellation/stop`, and `progress/emit` or `progress/reject`.
 * `mrtr/round`, `subscription/open`, `subscription/close`,
   `subscription/suppressed`, and `subscription/backpressure`.
 * `cache/choice`, `cache/invalidation`, `session/open`, `session/close`, and
   `supervision/restart`.
+
+`auth/policy_failure` identifies the failing boundary only through a safe
+`principal_policy` or `verifier` category and an atom failure kind; it never
+includes the callback reason, token claims, or principal.
 
 Credential, proof, request-state, baggage, private content, and arbitrary
 callback values are removed before Telemetry emission.

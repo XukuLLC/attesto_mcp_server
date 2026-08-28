@@ -1,5 +1,11 @@
 defmodule AttestoMCP.Server.Telemetry do
-  @moduledoc "Telemetry helpers for protocol, auth, handler, and transport events."
+  @moduledoc """
+  Telemetry helpers for protocol, auth, handler, and transport events.
+
+  The `[:attesto_mcp_server, :auth, :policy_failure]` event reports an invalid
+  revocation result, a caught host-policy callback failure, or an HTTP verifier
+  failure without including the callback reason, token claims, or principal.
+  """
 
   @prefix [:attesto_mcp_server]
   @allowed_metadata ~w(

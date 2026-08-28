@@ -9,6 +9,10 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
   @resource "https://mcp.example.com/mcp"
   @version "2026-07-28"
 
+  def telemetry_handler(event, measurements, metadata, owner) do
+    send(owner, {:telemetry_event, event, measurements, metadata})
+  end
+
   defmodule Resolver do
     @moduledoc false
 
@@ -45,11 +49,77 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
     def noncanonical_assign_options(key),
       do: [{key, :host_owned}, issuer: "https://issuer.example"]
 
+    def duplicate_assign_options,
+      do: [
+        claims_key: :shared_auth,
+        principal_key: :shared_auth,
+        issuer: "https://issuer.example"
+      ]
+
+    def cross_owned_assign_options,
+      do: [claims_key: :attesto_context, issuer: "https://issuer.example"]
+
     def non_header_options,
       do: [issuer: "https://issuer.example", bearer_methods: [:body]]
 
     def wrong_resource_path,
       do: [issuer: "https://issuer.example", resource_path: "/other"]
+
+    def raise_credential(_conn), do: raise("credential callback failed")
+    def throw_credential(_conn), do: throw(:credential_callback_failed)
+    def exit_credential(_conn), do: exit(:credential_callback_failed)
+
+    def principal_options(fixture) do
+      Agent.get_and_update(fixture, fn state ->
+        options = [
+          config: state.config,
+          principal: {__MODULE__, :composite_principal, [fixture]}
+        ]
+
+        {options, Map.update!(state, :calls, &(&1 + 1))}
+      end)
+    end
+
+    def composite_principal(claims, _sender, fixture) do
+      Agent.get_and_update(fixture, fn state ->
+        state = record_event(state, {:revocation_check, claims["jti"]})
+
+        if state.revoked? do
+          {{:error, :revoked}, state}
+        else
+          state =
+            state
+            |> record_event(:load_principal)
+            |> Map.update!(:loader_calls, &(&1 + 1))
+
+          {state.loader_result, state}
+        end
+      end)
+    end
+
+    def record(fixture, event),
+      do: Agent.update(fixture, &record_event(&1, event))
+
+    defp record_event(state, event),
+      do: Map.update!(state, :events, &(&1 ++ [event]))
+  end
+
+  defmodule BodyReadProbeAdapter do
+    @moduledoc false
+
+    def read_req_body({payload, fixture}, opts) do
+      Resolver.record(fixture, :body_read)
+
+      {result, body, next_payload} = Plug.Adapters.Test.Conn.read_req_body(payload, opts)
+      {result, body, {next_payload, fixture}}
+    end
+
+    def send_resp({payload, fixture}, status, headers, body) do
+      {:ok, sent_body, next_payload} =
+        Plug.Adapters.Test.Conn.send_resp(payload, status, headers, body)
+
+      {:ok, sent_body, {next_payload, fixture}}
+    end
   end
 
   setup do
@@ -180,6 +250,22 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
       assert (request() |> Server.Plug.call(noncanonical_assign)).status == 500
     end
 
+    for resolver <- [
+          &Resolver.duplicate_assign_options/0,
+          &Resolver.cross_owned_assign_options/0
+        ] do
+      invalid_assigns =
+        Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          auth: resolver,
+          resource: "/mcp",
+          base_url: "https://mcp.example.com"
+        )
+
+      assert (request() |> Server.Plug.call(invalid_assigns)).status == 500
+    end
+
     non_header =
       Server.Plug.init(
         server: server,
@@ -222,6 +308,25 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
     assert static.auth_opts[:principal_key] == :host_principal
     assert static.auth_opts[:scopes_key] == :host_scopes
     assert static.auth_opts[:sender_key] == :host_sender
+
+    for auth_options <- [
+          [claims_key: :shared_auth, context_key: :shared_auth],
+          [claims_key: :attesto_context],
+          [principal_key: nil],
+          [scopes_key: true],
+          [sender_key: false]
+        ] do
+      assert_raise ArgumentError,
+                   ~r/auth assign keys must be distinct non-nil, non-boolean atoms/,
+                   fn ->
+                     Server.Plug.init(
+                       server: server,
+                       auth: [issuer: "https://issuer.example"] ++ auth_options,
+                       resource: "/mcp",
+                       base_url: "https://mcp.example.com"
+                     )
+                   end
+    end
   end
 
   test "resolver accepts only external zero-arity callbacks or MFA and remains deferred", %{
@@ -311,6 +416,260 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
     assert fixture_calls(fixture) == 1
   end
 
+  test "runtime revocation and principal rejection happen before request-body reads", %{
+    config: config,
+    server: server
+  } do
+    parent = self()
+
+    assert :ok =
+             Server.register_tool(server, "principal-context", %{
+               handler: fn _, _ ->
+                 send(parent, :unexpected_handler)
+                 {:ok, "unexpected"}
+               end
+             })
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()]
+      )
+
+    {:ok, claims} = Attesto.Token.verify(config, token)
+    jti = claims["jti"]
+
+    cases = [
+      {:revoked, true, {:ok, %{id: "principal-1"}}, 0, [{:revocation_check, jti}]},
+      {:loader_rejected, false, {:error, :principal_unavailable}, 1,
+       [{:revocation_check, jti}, :load_principal]}
+    ]
+
+    challenges =
+      for {label, revoked?, loader_result, loader_calls, expected_events} <- cases do
+        fixture =
+          start_fixture(%{
+            calls: 0,
+            config: config,
+            events: [],
+            loader_calls: 0,
+            loader_result: loader_result,
+            revoked?: revoked?
+          })
+
+        plug = principal_plug(server, fixture)
+
+        response =
+          "principal-context"
+          |> raw_request("not-json")
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> probe_body_reads(fixture)
+          |> Server.Plug.call(plug)
+
+        assert response.status == 401, inspect(label)
+        assert Jason.decode!(response.resp_body) == %{"error" => "invalid_token"}, inspect(label)
+        assert fixture_calls(fixture) == 1, inspect(label)
+        assert fixture_value(fixture, :loader_calls) == loader_calls, inspect(label)
+        assert fixture_value(fixture, :events) == expected_events, inspect(label)
+        refute_receive :unexpected_handler
+
+        assert [challenge] = get_resp_header(response, "www-authenticate")
+        assert challenge =~ ~s(error="invalid_token")
+        refute challenge =~ "error_description"
+        refute challenge =~ "revoked"
+        refute challenge =~ "principal_unavailable"
+        challenge
+      end
+
+    assert length(Enum.uniq(challenges)) == 1
+  end
+
+  test "a successfully loaded principal precedes body reading and reaches the handler", %{
+    config: config,
+    server: server
+  } do
+    parent = self()
+    loaded_principal = %{id: "principal-1", role: :operator}
+
+    fixture =
+      start_fixture(%{
+        calls: 0,
+        config: config,
+        events: [],
+        loader_calls: 0,
+        loader_result: {:ok, loaded_principal},
+        revoked?: false
+      })
+
+    assert :ok =
+             Server.register_tool(server, "principal-context", %{
+               handler: fn _, context ->
+                 Resolver.record(fixture, :handler)
+                 send(parent, {:handler_context, context})
+                 {:ok, "accepted"}
+               end
+             })
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()]
+      )
+
+    {:ok, claims} = Attesto.Token.verify(config, token)
+    plug = principal_plug(server, fixture)
+
+    response =
+      "principal-context"
+      |> request()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> probe_body_reads(fixture)
+      |> Server.Plug.call(plug)
+
+    assert response.status == 200
+    assert fixture_calls(fixture) == 1
+    assert fixture_value(fixture, :loader_calls) == 1
+
+    assert fixture_value(fixture, :events) == [
+             {:revocation_check, claims["jti"]},
+             :load_principal,
+             :body_read,
+             :handler
+           ]
+
+    assert_receive {:handler_context, context}
+    assert context.principal == loaded_principal
+    assert context.attesto_mcp_principal == loaded_principal
+    assert context.attesto_context.principal == loaded_principal
+  end
+
+  test "nil principal callbacks cannot inherit upstream default or custom principal assigns", %{
+    config: config,
+    server: server
+  } do
+    parent = self()
+
+    assert :ok =
+             Server.register_tool(server, "principal-fallback", %{
+               handler: fn _, context ->
+                 send(parent, {:principal_fallback_context, context})
+                 {:ok, "accepted"}
+               end
+             })
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()]
+      )
+
+    {:ok, claims} = Attesto.Token.verify(config, token)
+
+    for {principal_options, custom_key?} <- [
+          {[], false},
+          {[principal_key: :host_principal], true}
+        ] do
+      plug =
+        Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          auth: [config: config, resource: @resource, principal: nil] ++ principal_options
+        )
+
+      response =
+        "principal-fallback"
+        |> request()
+        |> assign(:attesto_mcp_principal, :untrusted)
+        |> assign(:host_principal, :untrusted)
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> Server.Plug.call(plug)
+
+      assert response.status == 200
+      refute Map.has_key?(response.assigns, :attesto_mcp_principal)
+
+      if custom_key?,
+        do: refute(Map.has_key?(response.assigns, :host_principal)),
+        else: assert(response.assigns.host_principal == :untrusted)
+
+      assert_receive {:principal_fallback_context, context}
+      assert context.principal == claims["sub"]
+      assert context.attesto_mcp_principal == nil
+      assert context.attesto_context.principal == nil
+    end
+  end
+
+  test "authentication failures cannot restore upstream auth assigns", %{
+    config: config,
+    server: server
+  } do
+    telemetry_event = [:attesto_mcp_server, :auth, :policy_failure]
+    telemetry_handler = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        telemetry_handler,
+        telemetry_event,
+        &__MODULE__.telemetry_handler/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(telemetry_handler) end)
+
+    configured_keys = [
+      :host_claims,
+      :host_context,
+      :host_principal,
+      :host_scopes,
+      :host_sender
+    ]
+
+    canonical_keys = [
+      :attesto_mcp_claims,
+      :attesto_context,
+      :attesto_mcp_principal,
+      :attesto_mcp_scopes,
+      :attesto_mcp_sender
+    ]
+
+    for {credential_callback, expected_error} <- [
+          {&Resolver.raise_credential/1, :exception},
+          {&Resolver.throw_credential/1, :throw},
+          {&Resolver.exit_credential/1, :exit}
+        ] do
+      plug =
+        Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          auth: [
+            config: config,
+            resource: @resource,
+            claims_key: :host_claims,
+            context_key: :host_context,
+            principal_key: :host_principal,
+            scopes_key: :host_scopes,
+            sender_key: :host_sender,
+            credential_from_conn: credential_callback
+          ]
+        )
+
+      response =
+        Enum.reduce(configured_keys ++ canonical_keys, request(), fn key, conn ->
+          assign(conn, key, :untrusted)
+        end)
+        |> assign(:host_marker, :preserved)
+        |> Server.Plug.call(plug)
+
+      assert response.status == 401
+      assert response.assigns.host_marker == :preserved
+
+      assert Enum.all?(
+               configured_keys ++ canonical_keys,
+               &(not Map.has_key?(response.assigns, &1))
+             )
+
+      assert_receive {:telemetry_event, ^telemetry_event, measurements, metadata}
+      assert measurements == %{count: 1}
+      assert metadata == %{category: :verifier, error: expected_error}
+    end
+  end
+
   defp start_fixture(state) do
     name = Module.concat(__MODULE__, "Fixture#{System.unique_integer([:positive])}")
     {:ok, _fixture} = Agent.start_link(fn -> state end, name: name)
@@ -318,6 +677,8 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
   end
 
   defp fixture_calls(fixture), do: Agent.get(fixture, & &1.calls)
+
+  defp fixture_value(fixture, key), do: Agent.get(fixture, &Map.fetch!(&1, key))
 
   defp local_options, do: [issuer: "https://issuer.example"]
 
@@ -328,13 +689,23 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
     |> Server.Plug.call(plug)
   end
 
-  defp request do
+  defp principal_plug(server, fixture) do
+    Server.Plug.init(
+      server: server,
+      path: "/mcp",
+      auth: {Resolver, :principal_options, [fixture]},
+      resource: "/mcp",
+      base_url: "https://mcp.example.com"
+    )
+  end
+
+  defp request(name \\ "dpop") do
     payload = %{
       "jsonrpc" => "2.0",
       "id" => 1,
       "method" => "tools/call",
       "params" => %{
-        "name" => "dpop",
+        "name" => name,
         "arguments" => %{},
         "_meta" => %{
           "io.modelcontextprotocol/protocolVersion" => @version,
@@ -343,11 +714,19 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
       }
     }
 
-    conn(:post, "/mcp", Jason.encode!(payload))
+    raw_request(name, Jason.encode!(payload))
+  end
+
+  defp raw_request(name, body) do
+    conn(:post, "/mcp", body)
     |> put_req_header("content-type", "application/json")
     |> put_req_header("accept", "application/json, text/event-stream")
     |> put_req_header("mcp-protocol-version", @version)
     |> put_req_header("mcp-method", "tools/call")
-    |> put_req_header("mcp-name", "dpop")
+    |> put_req_header("mcp-name", name)
+  end
+
+  defp probe_body_reads(%Plug.Conn{adapter: {Plug.Adapters.Test.Conn, payload}} = conn, fixture) do
+    %{conn | adapter: {BodyReadProbeAdapter, {payload, fixture}}}
   end
 end

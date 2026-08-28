@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- Apply the automatic AttestoPhoenix access-token JTI revocation check and
+  principal loader when authenticating each MCP request or stream, before
+  request-body reads, returning a neutral invalid-token response when either
+  rejects.
+- Treat configured and canonical authentication assigns as boundary-owned:
+  clear them before verification, repopulate them only from verified results,
+  and reject non-atom, nil, boolean, duplicate, or cross-owned assign-key
+  configurations at Plug initialization. Verifier exceptions also retain the
+  cleared boundary.
+- Emit a payload-free `[:attesto_mcp_server, :auth, :policy_failure]` telemetry
+  event when the automatic Phoenix revocation check returns an invalid result
+  or its revocation/principal callback or the HTTP verifier raises, throws, or
+  exits.
+- Fix modern and legacy DPoP- and mTLS-bound subscription delivery with loaded
+  opaque principals, including static auth configurations that use custom
+  assign keys. Delivery re-verifies the captured token and sender binding
+  without running host policy callbacks in shared publish processes; later
+  revocation or principal-policy changes take effect on the next request or
+  stream reconnect.
+- Require the oldest published compatible AttestoPhoenix release, 2.14.1,
+  when the installer reuses its protected-resource policy.
+
 ## 0.10.5 - 2026-08-28
 
 - Carry the host's current AttestoPhoenix protected-resource adapter options

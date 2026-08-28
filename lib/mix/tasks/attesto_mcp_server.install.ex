@@ -20,12 +20,12 @@ defmodule Mix.Tasks.AttestoMcpServer.Install.Docs do
     router, and adds conservative server configuration. It is idempotent and
     does not invent credentials, authorization policy, or a public origin.
 
-    When `attesto_phoenix` is already a direct dependency, the generated MCP
-    module reuses its validated `Attesto.Config`. The installer enables URL
-    client metadata and ephemeral `localhost` callback ports when those host
-    keys are absent, and adds the Req dependency used by the default metadata
-    fetcher. Other hosts must supply a zero-arity callback with
-    `--attesto-config`.
+    When `attesto_phoenix` is already a direct dependency, the generated routes
+    reuse its validated verifier, access-token revocation and principal policy,
+    and sender-constraint callbacks. The installer enables URL client
+    metadata and ephemeral `localhost` callback ports when those host keys are
+    absent, and adds the Req dependency used by the default metadata fetcher.
+    Other hosts must supply a zero-arity callback with `--attesto-config`.
 
     ## Example
 
@@ -57,7 +57,7 @@ if Code.ensure_loaded?(Igniter) do
     @moduledoc Mix.Tasks.AttestoMcpServer.Install.Docs.long_doc()
     @example Mix.Tasks.AttestoMcpServer.Install.Docs.example()
     @origin_pattern ~r/\A(https?):\/\/(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?\/?\z/i
-    @attesto_phoenix_requirement ">= 2.14.0 and < 3.0.0"
+    @attesto_phoenix_requirement ">= 2.14.1 and < 3.0.0"
     @req_requirement ">= 0.6.1 and < 1.0.0"
     @max_version_component 99_999_999_999_999
     @requirement_atom_pattern ~r/\A\s*(?<operator>~>|>=|<=|>|<|==)?\s*(?<major>[0-9]+)(?:\.(?<minor>[0-9]+))?(?:\.(?<patch>[0-9]+))?(?<suffix>[+-].*)?\s*\z/
@@ -2841,7 +2841,7 @@ if Code.ensure_loaded?(Igniter) do
       auth_notice =
         case auth_source do
           {:attesto_phoenix, _app} ->
-            "The generated routes reuse the host's validated attesto_phoenix verifier and sender-constraint callbacks, enable URL client metadata, and accept ephemeral localhost callback ports for native clients."
+            "The generated routes reuse the host's validated attesto_phoenix verifier, revocation/principal policy, and sender-constraint callbacks, enable URL client metadata, and accept ephemeral localhost callback ports for native clients."
 
           {:callback, module, function} ->
             "The generated server uses #{inspect(module)}.#{function}/0 for Attesto verification."

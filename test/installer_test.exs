@@ -367,7 +367,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     end
 
     assert diff =~
-             ~s({:attesto_phoenix, ">= 2.14.0 and < 3.0.0"})
+             ~s({:attesto_phoenix, ">= 2.14.1 and < 3.0.0"})
 
     partial =
       true
@@ -435,7 +435,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       [req_dependency: ~s({:req, "~> 0.6.1-rc.0"})],
       [req_dependency: ~s({:req, "~> 0.7", [:not_a_keyword_option]})],
       [attesto_phoenix_requirement: "2.13.0"],
-      [attesto_phoenix_requirement: "< 2.14.0"]
+      [attesto_phoenix_requirement: "< 2.14.1"]
     ]
 
     for options <- cases do
