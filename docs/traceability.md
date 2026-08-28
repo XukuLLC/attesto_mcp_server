@@ -12,7 +12,7 @@ listed and is not treated as complete interoperability.
 
 | ID | Baseline requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0/0.10.0/0.10.1/0.10.2 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata; 0.10.3 patch-candidate verification is recorded separately below |
+| R01 | Package identity and license: publish as `:attesto_mcp_server`, license original code Apache-2.0, include `LICENSE`, metadata, source URL, changelog, security policy, and attribution/source ledger | PASS | public repository and hosted 0.8.0/0.9.0/0.10.0/0.10.1/0.10.2/0.10.3/0.10.4 releases, `mix.exs`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, and package metadata |
 | R02 | Dependencies and HTTP boundary: require compatible Attesto/AttestoMCP and Plug; use a normal Plug entry point; no production Bandit/web-server dependency; Bandit only in development/test/example scope | PASS | direct requirement `attesto_mcp ~> 1.2.1`, `mix.exs`, production dependency tree, auth tests, server-neutral Plug tests, and Bandit adapter tests |
 | R03 | Complete server surface: public registration/handler contracts for tools, resources, templates, prompts, completion, notifications, MRTR and optional per-era tasks, with stdio and Streamable HTTP adapters and deterministic duplicate rejection | PARTIAL | API, registry, MRTR, subscription, stdio, and adapter tests; Tasks are deliberately unadvertised |
 | R04 | Decode UTF-8 JSON-RPC 2.0 only; accept string or integer non-null IDs; reject batches; distinguish requests, notifications, responses, and malformed objects; validate selected dated schemas while preserving allowed extensions; default to JSON Schema 2020-12; never fetch network refs | PARTIAL | `lib/attesto_mcp_server/json_rpc.ex`, `lib/attesto_mcp_server/schema.ex`, parsed-body bounds, recoverable/detached binary-ID regressions, schema tests, and the pinned fixture's scored schema scenarios; broad message corpus remains partial |
@@ -41,7 +41,7 @@ listed and is not treated as complete interoperability.
 | R27 | Deterministic lists/pagination: stable auth-visible order, opaque integrity/auth-bound cursors, fixed limits, and invalid/expired/cross-context rejection | PARTIAL | cache/cursor tests including catalog-bound cursor rejection; cluster and full mutation matrix remain partial |
 | R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests plus atom cache-scope normalization and facade pagination/cache-option coverage; broad cross-connection matrix remains partial |
 | R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry, P5, exact public-notification validation, direct Origin enforcement, four-way HTTP header-budget rejection, and bounded subscription tests; broad fuzz/stress remains partial |
-| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1, 0.10.2, and 0.10.3 local and hosted release gates pass; the 0.10.3 aggregate gate passes 312 checks at 81.54% coverage with zero-error/zero-skip Dialyzer; 9 not-scored Tasks failures and broad fuzz remain open |
+| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 through 0.10.4 local and hosted release gates pass; the 0.10.4 aggregate gate passes 312 checks at 81.59% coverage with zero-error/zero-skip Dialyzer; 9 not-scored Tasks failures and broad fuzz remain open |
 
 ## Release additions beyond the baseline
 
@@ -59,7 +59,7 @@ listed and is not treated as complete interoperability.
 | ID | Status | Evidence |
 | --- | --- | --- |
 | T01 | PASS | API tests and `examples/consumer` compile/run |
-| T02 | PARTIAL | `test/conformance_fixture_test.exs`, `examples/conformance_server.exs`, `scripts/run_conformance_fixture.sh`, and the 0.10.3 hosted official-interop lane in run 33180401361 |
+| T02 | PARTIAL | `test/conformance_fixture_test.exs`, `examples/conformance_server.exs`, `scripts/run_conformance_fixture.sh`, and the 0.10.4 hosted official-interop lane in run 33190111361 |
 | T03 | PARTIAL | primitive matrix |
 | T04 | PARTIAL | JSON-RPC and P4 tests |
 | T05 | PASS | core discovery test and pinned 2026 fixture |
@@ -125,15 +125,15 @@ The current direct dependency constraint is `attesto_mcp ~> 1.2.1`. The fresh
 local and public-package installer-host resolutions are released 1.2.2 within
 that constraint.
 The current-runtime Elixir 1.20.3/OTP 29.0.5 `mix test.all` gate passed 312
-total checks (one doctest plus 311 tests), 81.54% coverage at randomized seed
-231368,
+total checks (one doctest plus 311 tests), 81.59% coverage at randomized seed
+711770,
 zero-error/zero-skip Dialyzer, package unpack, and Hex advisory audit.
 Full-suite order-randomized runs for the 0.10.0 candidate passed at seeds 1,
 424242, and 99991; the 0.10.3 candidate independently passed full-suite runs at
 seeds 424242 and 99991. The 0.10.2 hosted Elixir 1.18.3/OTP 27.3 floor passed its
 244-check gate with 79.84% coverage, zero-error/zero-skip Dialyzer, package
 unpack, and Hex advisory audit. Hosted verification is recorded below for
-0.10.0 through 0.10.3.
+0.10.0 through 0.10.4.
 
 The pinned runner `0.2.0-alpha.11` at commit
 `74edef34d674f563537be8c6587cebaa58e830ca` selected
@@ -149,9 +149,18 @@ combined-installer run in a fresh Phoenix 1.8.13 application using the public
 Hex dependency graph. Hosted
 [run 33180401361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33180401361)
 passed all four jobs at `2026-08-28T14:35:44Z` against implementation commit
-`d6492bb8184702859bb0160343fd92de647fbdf8`. The 0.10.1 patch adds Phoenix-style
-parser-pipeline and pass-through parser regressions while preserving encoded
-message-size and nesting bounds. Its independent read-only review returned GO
+`d6492bb8184702859bb0160343fd92de647fbdf8`. The 0.10.4 patch preserves
+scheme-correct OAuth challenges and error details for DPoP failures, nonce
+requests, and insufficient scopes while keeping anonymous discovery
+error-free and challenge metadata bound to the configured canonical resource.
+Hosted
+[run 33190111361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33190111361)
+passed all four jobs at `2026-08-28T16:34:28Z` against implementation commit
+`e7d19a02ad9b73ccdd19b9b7a583590bfa5fcf56`; its aggregate gate passed 312
+checks at 81.59% coverage with zero-error/zero-skip Dialyzer. The 0.10.1 patch
+adds Phoenix-style parser-pipeline and pass-through parser regressions while
+preserving encoded message-size and nesting bounds. Its independent read-only
+review returned GO
 at `2026-08-27T15:38:47Z`. Hosted
 [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
 passed all four jobs at `2026-08-27T15:45:09Z` against implementation commit

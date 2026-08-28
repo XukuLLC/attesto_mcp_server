@@ -21,6 +21,8 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
   `791e7308119c10261a579896efdb5a2b43c1c8dea944d5426cb3ab681c7a46a5`
 - `0.10.3` patch-candidate source fingerprint:
   `c39c0cd59444d08ed1d356d836b05490caf13ec9bc0c511a43523fc98a7878c4`
+- `0.10.4` patch-candidate source fingerprint:
+  `4e40ffedc43508c726dccf9d67008dec9768fc304b830bb845c9806a349a70bb`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
@@ -31,6 +33,8 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
   in [run 33100777065](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33100777065)
 - `0.10.3` hosted official-interop job completed at: `2026-08-28T14:30:51Z`
   in [run 33180401361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33180401361)
+- `0.10.4` hosted official-interop job completed at: `2026-08-28T16:29:34Z`
+  in [run 33190111361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33190111361)
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
@@ -59,6 +63,15 @@ coverage, zero-error/zero-skip Dialyzer, package construction, and the Hex
 advisory audit. Hosted run 33180401361 passed all four jobs at
 `2026-08-28T14:35:44Z` against implementation commit
 `d6492bb8184702859bb0160343fd92de647fbdf8`.
+The `0.10.4` patch candidate preserves Attesto's scheme-correct OAuth
+challenges and error details for invalid DPoP proofs, sender-bound tokens
+presented as Bearer, nonce requests, and insufficient scopes; keeps anonymous
+discovery challenges error-free; and pins challenge metadata to the configured
+canonical resource origin. Its hosted aggregate gate passed 312 checks (one
+doctest plus 311 tests), 81.59% coverage, zero-error/zero-skip Dialyzer,
+package construction, and the Hex advisory audit. Hosted run 33190111361
+passed all four jobs at `2026-08-28T16:34:28Z` against implementation commit
+`e7d19a02ad9b73ccdd19b9b7a583590bfa5fcf56`.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |
