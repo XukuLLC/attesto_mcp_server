@@ -88,6 +88,37 @@ defmodule AttestoMCP.Server.StdioTest do
     assert Enum.all?(messages, &(get_in(&1, ["error", "code"]) == -32602))
   end
 
+  test "stdio rejects non-object metadata and continues serving later frames" do
+    {:ok, server} = Server.start_link([])
+
+    input =
+      [
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{"_meta" => 5}
+        },
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 2,
+          "method" => "ping",
+          "params" => %{"_meta" => ["invalid"]}
+        },
+        %{"jsonrpc" => "2.0", "id" => 3, "method" => "ping", "params" => %{}}
+      ]
+      |> Enum.map_join("\n", &Jason.encode!/1)
+      |> Kernel.<>("\n")
+
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-meta-scalar") end)
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.map(messages, & &1["id"]) |> Enum.sort() == [1, 2, 3]
+    assert Enum.find(messages, &(&1["id"] == 1))["error"]["code"] == -32602
+    assert Enum.find(messages, &(&1["id"] == 2))["error"]["code"] == -32602
+    assert Enum.find(messages, &(&1["id"] == 3))["result"] == %{}
+  end
+
   test "stdio rejects an unsupported legacy revision" do
     {:ok, server} = Server.start_link([])
 
@@ -355,6 +386,7 @@ defmodule AttestoMCP.Server.StdioTest do
         :wait ->
           receive do
             :continue -> :eof
+            {:line, line} -> line
           end
 
         value ->
@@ -381,7 +413,15 @@ defmodule AttestoMCP.Server.StdioTest do
              })
 
     Process.sleep(300)
-    assert :ok = Server.close_subscription(server, 70)
+
+    cancellation =
+      Jason.encode!(%{
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: %{"requestId" => 70}
+      }) <> "\n"
+
+    send(input_pid, {:line, cancellation})
     send(input_pid, :continue)
 
     assert_receive {:stdio_catalog_output, output}, 2_000
@@ -390,6 +430,52 @@ defmodule AttestoMCP.Server.StdioTest do
     assert Enum.any?(messages, &(&1["method"] == "notifications/tools/list_changed"))
     assert Enum.any?(messages, &(&1["id"] == 70))
     refute Process.alive?(runner)
+  end
+
+  test "an unknown stdio cancellation cannot cancel another owner's subscription" do
+    {:ok, server} = Server.start_link(max_concurrency: 4)
+    parent = self()
+
+    params = %{
+      "_meta" => %{
+        "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities" => %{}
+      },
+      "notifications" => %{"toolsListChanged" => true}
+    }
+
+    assert {88, %{"result" => %{"resultType" => "complete"}}} =
+             Server.dispatch(
+               server,
+               %{kind: :request, id: 88, method: "subscriptions/listen", params: params},
+               %{principal: "subscription-owner"},
+               version: "2026-07-28",
+               on_event: fn event -> send(parent, {:owned_subscription_event, event}) end
+             )
+
+    assert_receive {:owned_subscription_event,
+                    %{"method" => "notifications/subscriptions/acknowledged"}}
+
+    cancellation =
+      Jason.encode!(%{
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: %{"requestId" => 88}
+      }) <> "\n"
+
+    assert "" ==
+             capture_io(cancellation, fn ->
+               Stdio.run(server, principal: "unrelated-stdio-client")
+             end)
+
+    refute_receive {:mcp_subscription_cancel, 88}, 25
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+
+    assert_receive {:mcp_subscription, _tag, 88,
+                    %{"method" => "notifications/tools/list_changed"}}
+
+    assert :ok = Server.close_subscription(server, 88)
+    refute_receive {:mcp_subscription_close, 88}, 25
   end
 
   test "legacy stdio negotiates initialize before interleaved requests" do
@@ -430,6 +516,58 @@ defmodule AttestoMCP.Server.StdioTest do
 
     assert Enum.map(messages, & &1["id"]) |> Enum.filter(&(&1 != nil)) |> Enum.sort() == [1, 2, 3]
     assert Enum.find(messages, &(&1["id"] == 1))["result"]["protocolVersion"] == "2025-11-25"
+  end
+
+  test "rejected legacy stdio subscriptions do not refresh the session idle timer" do
+    {:ok, server} = Server.start_link(session_idle_timeout: 500)
+
+    lines = [
+      {0,
+       %{
+         jsonrpc: "2.0",
+         id: 1,
+         method: "initialize",
+         params: %{
+           "protocolVersion" => "2025-11-25",
+           "capabilities" => %{},
+           "clientInfo" => %{"name" => "stdio-subscription-bounds", "version" => "1.0"}
+         }
+       }},
+      {100, %{jsonrpc: "2.0", method: "notifications/initialized", params: %{}}},
+      {300,
+       %{
+         jsonrpc: "2.0",
+         id: 2,
+         method: "resources/subscribe",
+         params: %{"uri" => "urn:" <> String.duplicate("x", 4_093)}
+       }},
+      {400, %{jsonrpc: "2.0", id: 3, method: "tools/list", params: %{}}}
+    ]
+
+    {:ok, source} = Agent.start_link(fn -> lines end)
+
+    input = fn ->
+      Agent.get_and_update(source, fn
+        [{delay, message} | rest] ->
+          Process.sleep(delay)
+          {Jason.encode!(message) <> "\n", rest}
+
+        [] ->
+          {:eof, []}
+      end)
+    end
+
+    output =
+      capture_io(fn ->
+        Stdio.run(server, principal: "stdio-subscription-bounds", input: input)
+      end)
+
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    rejection = Enum.find(messages, &(&1["id"] == 2))
+    assert rejection["error"]["data"]["reason"] == "invalid_resource_uri"
+
+    expired_follow_up = Enum.find(messages, &(&1["id"] == 3))
+    assert expired_follow_up["error"]["data"]["reason"] == "initialized_notification_required"
   end
 
   test "stdio completes a 2025-06-18 initialize, list, and call sequence" do

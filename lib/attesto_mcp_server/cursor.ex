@@ -51,6 +51,7 @@ defmodule AttestoMCP.Server.Cursor do
 
   defp context_digest(opts) do
     context = %{
+      "catalog" => Keyword.get(opts, :catalog),
       "scopes" => opts |> Keyword.get(:scopes, []) |> List.wrap() |> Enum.sort(),
       "visibility" => Keyword.get(opts, :visibility, Keyword.get(opts, :visibility_digest)),
       "revision" => Keyword.get(opts, :revision, 0),
@@ -77,15 +78,27 @@ defmodule AttestoMCP.Server.Cursor do
         value
 
       _ ->
-        case :persistent_term.get({__MODULE__, :secret}, nil) do
-          value when is_binary(value) ->
-            value
+        persisted_secret()
+    end
+  end
 
-          _ ->
-            value = :crypto.strong_rand_bytes(32)
-            :persistent_term.put({__MODULE__, :secret}, value)
-            value
-        end
+  defp persisted_secret do
+    case :persistent_term.get({__MODULE__, :secret}, nil) do
+      value when is_binary(value) ->
+        value
+
+      _ ->
+        :global.trans({{__MODULE__, :secret}, self()}, fn ->
+          case :persistent_term.get({__MODULE__, :secret}, nil) do
+            value when is_binary(value) ->
+              value
+
+            _ ->
+              value = :crypto.strong_rand_bytes(32)
+              :persistent_term.put({__MODULE__, :secret}, value)
+              value
+          end
+        end)
     end
   end
 end

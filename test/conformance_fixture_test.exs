@@ -92,7 +92,7 @@ defmodule AttestoMCP.Server.ConformanceFixtureTest do
              AttestoMCP.Server.register_prompt(server, "greeting", %{
                description: "A greeting",
                arguments: [%{"name" => "name", "required" => true}],
-               handler: fn %{"name" => name}, _ ->
+               handler: fn %{arguments: %{"name" => name}}, _ ->
                  {:ok, [%{"role" => "user", "content" => %{"type" => "text", "text" => name}}]}
                end
              })
@@ -132,6 +132,23 @@ defmodule AttestoMCP.Server.ConformanceFixtureTest do
 
     assert call.status == 200
     assert call.body["result"]["resultType"] == "complete"
+
+    prompt =
+      request(
+        port,
+        token,
+        "prompts/get",
+        Map.merge(modern_params(), %{"name" => "greeting", "arguments" => %{"name" => "Ada"}}),
+        [
+          {"mcp-protocol-version", @modern},
+          {"mcp-method", "prompts/get"},
+          {"mcp-name", "greeting"}
+        ]
+      )
+
+    assert prompt.status == 200
+    assert prompt.body["result"]["resultType"] == "complete"
+    assert get_in(prompt.body, ["result", "messages", Access.at(0), "content", "text"]) == "Ada"
   end
 
   defp legacy_probe(port, token) do
@@ -175,6 +192,18 @@ defmodule AttestoMCP.Server.ConformanceFixtureTest do
 
     assert list.status == 200
     assert list.body["result"]["tools"] != []
+
+    prompt =
+      request(
+        port,
+        token,
+        "prompts/get",
+        %{"name" => "greeting", "arguments" => %{"name" => "Grace"}},
+        [{"mcp-session-id", session}, {"mcp-protocol-version", @legacy}]
+      )
+
+    assert prompt.status == 200
+    assert get_in(prompt.body, ["result", "messages", Access.at(0), "content", "text"]) == "Grace"
   end
 
   defp modern_params,

@@ -2,7 +2,7 @@ defmodule AttestoMCP.Server.Plug do
   @moduledoc """
   Plug-compatible Streamable HTTP boundary for modern and legacy MCP.
 
-  Every protected MCP leg authenticates through `AttestoMCP.Plug.Authenticate`
+  Every protected MCP leg authenticates through `AttestoMCP.Plug.ProtectResource`
   before package-owned request decoding or registry dispatch. A host parser
   placed earlier in the endpoint runs before this Plug and must apply its own
   input limit. Metadata discovery is the one intentionally public route
@@ -25,6 +25,7 @@ defmodule AttestoMCP.Server.Plug do
   @max_request_header_name_bytes 256
   @max_request_header_value_bytes 8_192
   @max_request_header_bytes 65_536
+  @static_path_pattern ~r/\A\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\z/
   @allowed_plug_option_keys [
     :server,
     :path,
@@ -134,12 +135,11 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp validate_path!(path) when is_binary(path) do
-    invalid_segment? = Enum.any?(String.split(path, "/"), &(&1 == ".."))
+    invalid_segment? = Enum.any?(String.split(path, "/"), &(&1 in [".", ".."]))
 
-    if path == "" or not String.starts_with?(path, "/") or invalid_segment? or
-         String.contains?(path, ["?", "#"]) or
-         Enum.any?(:binary.bin_to_list(path), &(&1 < 0x20 or &1 == 0x7F)) do
-      raise ArgumentError, ":path must be an absolute safe path"
+    if path == "" or not Regex.match?(@static_path_pattern, path) or invalid_segment? do
+      raise ArgumentError,
+            ":path must be an absolute static ASCII path using only unreserved URI characters and slash separators"
     end
   end
 
@@ -252,22 +252,27 @@ defmodule AttestoMCP.Server.Plug do
 
       result
     rescue
-      _error ->
-        Telemetry.execute(
-          [:http_request, :exception],
-          %{duration: System.monotonic_time() - started},
-          %{
-            method: conn.method,
-            transport: :http,
-            status: 500,
-            outcome: :exception
-          }
-        )
-
-        if conn.state in [:sent, :chunked],
-          do: conn,
-          else: send_resp(conn, 500, "internal server error")
+      _error -> recover_http_failure(conn, started)
+    catch
+      _kind, _reason -> recover_http_failure(conn, started)
     end
+  end
+
+  defp recover_http_failure(conn, started) do
+    Telemetry.execute(
+      [:http_request, :exception],
+      %{duration: System.monotonic_time() - started},
+      %{
+        method: conn.method,
+        transport: :http,
+        status: 500,
+        outcome: :exception
+      }
+    )
+
+    if conn.state in [:sent, :chunked],
+      do: conn,
+      else: send_resp(conn, 500, "internal server error")
   end
 
   defp resolve_server_state(%{server: server} = state) do
@@ -286,6 +291,8 @@ defmodule AttestoMCP.Server.Plug do
     end
   rescue
     _ -> :unavailable
+  catch
+    _kind, _reason -> :unavailable
   end
 
   defp protected(conn, state) do
@@ -630,14 +637,15 @@ defmodule AttestoMCP.Server.Plug do
     send_resp(conn, 202, "")
   end
 
-  defp session_context(_state, nil, _conn), do: {:ok, %{}}
+  defp session_context(_state, nil, _conn, _request), do: {:ok, %{}}
 
-  defp session_context(state, session_id, conn) do
-    case AttestoMCP.Server.get_session(
+  defp session_context(state, session_id, conn, request) do
+    case legacy_session_lookup(
            state.server,
            session_id,
            principal(conn),
-           tenant(conn)
+           tenant(conn),
+           request
          ) do
       {:ok, session} ->
         {:ok,
@@ -657,7 +665,7 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp session_context_for_post(state, session_id, conn, request, era) do
-    case session_context(state, session_id, conn) do
+    case session_context(state, session_id, conn, request) do
       {:ok, _context} = result ->
         result
 
@@ -915,7 +923,7 @@ defmodule AttestoMCP.Server.Plug do
 
           {:error, _reason} ->
             cancel_subscription_keepalive(request_ref)
-            AttestoMCP.Server.close_subscription(state.server, subscription_id, self())
+            close_owned_subscription(state.server, subscription_id)
             conn
         end
 
@@ -962,7 +970,7 @@ defmodule AttestoMCP.Server.Plug do
 
       {:mcp_subscription_cancel, ^subscription_id} ->
         cancel_subscription_keepalive(request_ref)
-        AttestoMCP.Server.cancel_subscription(state.server, subscription_id, self())
+        cancel_owned_subscription(state.server, subscription_id)
         maybe_touch(state.server, session_id)
 
         Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :cancelled})
@@ -971,14 +979,14 @@ defmodule AttestoMCP.Server.Plug do
 
       {:mcp_subscription_close, ^subscription_id} ->
         cancel_subscription_keepalive(request_ref)
-        AttestoMCP.Server.close_subscription(state.server, subscription_id, self())
+        close_owned_subscription(state.server, subscription_id)
         maybe_touch(state.server, session_id)
         Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :closed})
         emit_final_subscription_response(conn, state.server, subscription_id, final_response)
     after
       state.opts[:subscription_timeout] || 300_000 ->
         cancel_subscription_keepalive(request_ref)
-        AttestoMCP.Server.close_subscription(state.server, subscription_id, self())
+        close_owned_subscription(state.server, subscription_id)
         maybe_touch(state.server, session_id)
         Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :timeout})
         emit_final_subscription_response(conn, state.server, subscription_id, final_response)
@@ -1006,6 +1014,28 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
+  defp close_owned_subscription(server, subscription_id) do
+    AttestoMCP.Server.close_subscription(server, subscription_id, self())
+    drain_subscription_controls(subscription_id)
+  end
+
+  defp cancel_owned_subscription(server, subscription_id) do
+    AttestoMCP.Server.cancel_subscription(server, subscription_id, self())
+    drain_subscription_controls(subscription_id)
+  end
+
+  defp drain_subscription_controls(subscription_id) do
+    receive do
+      {:mcp_subscription_close, ^subscription_id} ->
+        drain_subscription_controls(subscription_id)
+
+      {:mcp_subscription_cancel, ^subscription_id} ->
+        drain_subscription_controls(subscription_id)
+    after
+      0 -> :ok
+    end
+  end
+
   defp event_subscription_id(%{
          "params" => %{"_meta" => %{"io.modelcontextprotocol/subscriptionId" => id}}
        }),
@@ -1024,8 +1054,7 @@ defmodule AttestoMCP.Server.Plug do
           outcome: :closed
         })
 
-        if not is_nil(subscription_id),
-          do: AttestoMCP.Server.close_subscription(server, subscription_id, self())
+        if not is_nil(subscription_id), do: close_owned_subscription(server, subscription_id)
 
         {:closed, conn}
     end
@@ -1042,8 +1071,7 @@ defmodule AttestoMCP.Server.Plug do
           outcome: :closed
         })
 
-        if not is_nil(subscription_id),
-          do: AttestoMCP.Server.close_subscription(server, subscription_id, self())
+        if not is_nil(subscription_id), do: close_owned_subscription(server, subscription_id)
 
         conn
     end
@@ -1253,7 +1281,13 @@ defmodule AttestoMCP.Server.Plug do
 
   defp validate_legacy_session_bound(request, conn, state) do
     with {:ok, id} <- header_session(conn) do
-      case AttestoMCP.Server.get_session(state.server, id, principal(conn), tenant(conn)) do
+      case legacy_session_lookup(
+             state.server,
+             id,
+             principal(conn),
+             tenant(conn),
+             request
+           ) do
         {:ok, session} ->
           with :ok <- validate_legacy_version(conn, session),
                :ok <-
@@ -1276,22 +1310,44 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
+  defp legacy_session_lookup(server, id, principal, tenant, %{method: method})
+       when method in ["resources/subscribe", "resources/unsubscribe"],
+       do: AttestoMCP.Server.peek_session(server, id, principal, tenant)
+
+  defp legacy_session_lookup(server, id, principal, tenant, _request),
+    do: AttestoMCP.Server.get_session(server, id, principal, tenant)
+
   defp validate_legacy_initialized(request, session, state, id, principal, tenant) do
     if session.initialized or Map.get(request, :method) in ["notifications/initialized", "ping"] do
       :ok
     else
-      case AttestoMCP.Server.await_initialized(
+      case await_legacy_initialized(
              state.server,
              id,
              principal,
              tenant,
-             state.opts[:legacy_initialized_grace_ms] || 50
+             state.opts[:legacy_initialized_grace_ms] || 50,
+             request
            ) do
         :ok -> :ok
         _ -> {:error, Error.invalid_request(%{"reason" => "initialized_notification_required"})}
       end
     end
   end
+
+  defp await_legacy_initialized(server, id, principal, tenant, timeout, %{method: method})
+       when method in ["resources/subscribe", "resources/unsubscribe"],
+       do:
+         AttestoMCP.Server.await_initialized_without_touch(
+           server,
+           id,
+           principal,
+           tenant,
+           timeout
+         )
+
+  defp await_legacy_initialized(server, id, principal, tenant, timeout, _request),
+    do: AttestoMCP.Server.await_initialized(server, id, principal, tenant, timeout)
 
   defp validate_legacy_version(conn, session) do
     case get_req_header(conn, "mcp-protocol-version") do
@@ -1309,9 +1365,15 @@ defmodule AttestoMCP.Server.Plug do
   defp required_scopes_for(%{kind: :response}, _opts), do: []
 
   defp required_scopes_for(%{method: "completion/complete", params: params}, opts) do
-    case params["ref"] do
-      %{"type" => "ref/resource"} -> scope_for("resources/read", opts)
-      _ -> scope_for("prompts/read", opts)
+    case configured_scope_for("completion/complete", opts) do
+      {:ok, scopes} ->
+        scopes
+
+      :error ->
+        case params["ref"] do
+          %{"type" => "ref/resource"} -> default_scope_for("resources/read")
+          _ -> default_scope_for("completion/complete")
+        end
     end
   end
 
@@ -1366,9 +1428,16 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp scope_for(method, opts) do
+    case configured_scope_for(method, opts) do
+      {:ok, scopes} -> scopes
+      :error -> default_scope_for(method)
+    end
+  end
+
+  defp configured_scope_for(method, opts) do
     case Map.get(opts[:scope_map] || %{}, method) do
-      scopes when is_list(scopes) and scopes != [] -> scopes
-      _ -> default_scope_for(method)
+      scopes when is_list(scopes) and scopes != [] -> {:ok, scopes}
+      _ -> :error
     end
   end
 
@@ -1807,7 +1876,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp era_for(%{method: "initialize", params: params}, conn) do
     header = get_req_header(conn, "mcp-protocol-version")
-    body = get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"])
+    body = metadata_value(params, "io.modelcontextprotocol/protocolVersion")
 
     cond do
       @modern in header or body == @modern -> @modern
@@ -1868,14 +1937,21 @@ defmodule AttestoMCP.Server.Plug do
 
   defp streaming_request?(%{method: method, params: params}, _state)
        when method in ["resources/read", "prompts/get", "completion/complete"],
-       do: get_in(params, ["_meta", "progressToken"]) != nil or params["stream"] == true
+       do: metadata_value(params, "progressToken") != nil or params["stream"] == true
 
   defp streaming_request?(_request, _state), do: false
 
   defp streaming_request?(%{params: params}),
-    do: get_in(params, ["_meta", "progressToken"]) != nil or params["stream"] == true
+    do: metadata_value(params, "progressToken") != nil or params["stream"] == true
 
   defp streaming_request?(_request), do: false
+
+  defp metadata_value(params, key) do
+    case Map.get(params, "_meta") do
+      metadata when is_map(metadata) -> Map.get(metadata, key)
+      _ -> nil
+    end
+  end
 
   defp request_owner(@legacy, session_id) when is_binary(session_id),
     do: {:legacy_session, session_id}

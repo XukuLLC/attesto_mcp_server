@@ -32,6 +32,9 @@ defmodule AttestoMCP.Server.API do
   @typedoc "A supervised server pid or a registered server name."
   @type server :: pid() | atom()
 
+  @typedoc "A cache scope; string values are restricted to `\"private\"` or `\"public\"`."
+  @type cache_scope :: :private | :public | String.t()
+
   @typedoc "A supported server startup option and its value."
   @type server_option ::
           {:name, atom()}
@@ -47,7 +50,8 @@ defmodule AttestoMCP.Server.API do
           | {:max_body_bytes, pos_integer()}
           | {:max_message_bytes, pos_integer()}
           | {:max_queue, pos_integer()}
-          | {:stream_keepalive_ms, pos_integer()}
+          | {:stream_keepalive_ms, non_neg_integer()}
+          | {:legacy_keepalive_ms, non_neg_integer()}
           | {:stream_queue_size, pos_integer()}
           | {:subscription_queue_size, pos_integer()}
           | {:rate_limits, map()}
@@ -60,6 +64,10 @@ defmodule AttestoMCP.Server.API do
           | {:request_state_ttl, pos_integer()}
           | {:scope_map, map()}
           | {:subscription_timeout, pos_integer()}
+          | {:page_size, pos_integer()}
+          | {:cache_ttl_ms, non_neg_integer()}
+          | {:cache_scope, cache_scope()}
+          | {:allow_public_cache, boolean()}
           | {:initialize_callback, (map(), map() -> :ok | {:error, term()})}
           | {:instructions, String.t()}
           | {:server_name, String.t()}
@@ -196,9 +204,17 @@ defmodule AttestoMCP.Server.API do
   @spec close_subscription(server(), term()) :: :ok | {:error, term()}
   defdelegate close_subscription(server, id), to: AttestoMCP.Server
 
+  @doc "Closes a modern subscription owned by the given sink process."
+  @spec close_subscription(server(), term(), pid()) :: :ok | {:error, term()}
+  defdelegate close_subscription(server, id, owner), to: AttestoMCP.Server
+
   @doc "Cancels a modern subscription."
   @spec cancel_subscription(server(), term()) :: :ok | {:error, term()}
   defdelegate cancel_subscription(server, id), to: AttestoMCP.Server
+
+  @doc "Cancels a modern subscription owned by the given sink process."
+  @spec cancel_subscription(server(), term(), pid()) :: :ok | {:error, term()}
+  defdelegate cancel_subscription(server, id, owner), to: AttestoMCP.Server
 
   @doc "Cancels a request owned by a principal."
   @spec cancel_request(server(), term(), term()) :: :ok | {:error, term()}

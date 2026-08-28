@@ -299,6 +299,164 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
              "body_header_mismatch"
   end
 
+  test "legacy HTTP rejects non-object metadata before streaming selection" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+    session_id = initialize_session(plug, token)
+    assert :ok = Server.mark_initialized(server, session_id)
+
+    rejected =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 26,
+          "method" => "resources/read",
+          "params" => %{"uri" => "urn:legacy", "_meta" => 5}
+        },
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert rejected.status == 200
+    assert Jason.decode!(rejected.resp_body)["error"]["code"] == -32602
+
+    recovered =
+      call(
+        plug,
+        token,
+        "POST",
+        %{"jsonrpc" => "2.0", "id" => 27, "method" => "ping", "params" => %{}},
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert recovered.status == 200
+  end
+
+  test "rejected legacy resource subscriptions do not refresh the session idle timer" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+    session_id = initialize_session(plug, token)
+
+    assert {:ok, before_initialized_rejection} =
+             Server.peek_session(server, session_id, "usr_123", nil)
+
+    Process.sleep(5)
+
+    before_initialized =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 27,
+          "method" => "resources/subscribe",
+          "params" => %{"uri" => "urn:before-initialized"}
+        },
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert before_initialized.status == 400
+
+    assert Jason.decode!(before_initialized.resp_body)["error"]["data"]["reason"] ==
+             "initialized_notification_required"
+
+    assert {:ok, after_initialized_rejection} =
+             Server.peek_session(server, session_id, "usr_123", nil)
+
+    assert after_initialized_rejection.last_seen == before_initialized_rejection.last_seen
+    assert :ok = Server.mark_initialized(server, session_id)
+
+    for index <- 1..128 do
+      assert :ok =
+               Server.subscribe_resource(server, session_id, "usr_123", nil, "urn:#{index}")
+    end
+
+    assert {:ok, before_rejections} =
+             Server.peek_session(server, session_id, "usr_123", nil)
+
+    Process.sleep(5)
+
+    at_limit =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 28,
+          "method" => "resources/subscribe",
+          "params" => %{"uri" => "urn:129"}
+        },
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert at_limit.status == 200
+
+    assert Jason.decode!(at_limit.resp_body)["error"]["data"]["reason"] ==
+             "resource_subscription_limit"
+
+    assert {:ok, after_limit} = Server.peek_session(server, session_id, "usr_123", nil)
+    assert after_limit.last_seen == before_rejections.last_seen
+
+    Process.sleep(5)
+
+    oversized =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 29,
+          "method" => "resources/subscribe",
+          "params" => %{"uri" => "urn:" <> String.duplicate("x", 4_093)}
+        },
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert oversized.status == 200
+
+    assert Jason.decode!(oversized.resp_body)["error"]["data"]["reason"] ==
+             "invalid_resource_uri"
+
+    assert {:ok, after_oversized} = Server.peek_session(server, session_id, "usr_123", nil)
+    assert after_oversized.last_seen == before_rejections.last_seen
+
+    Process.sleep(5)
+
+    duplicate =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 30,
+          "method" => "resources/subscribe",
+          "params" => %{"uri" => "urn:1"}
+        },
+        session_id: session_id,
+        protocol_version: @legacy
+      )
+
+    assert duplicate.status == 200
+    assert Jason.decode!(duplicate.resp_body)["result"] == %{}
+    assert {:ok, after_success} = Server.peek_session(server, session_id, "usr_123", nil)
+    assert after_success.last_seen > after_oversized.last_seen
+  end
+
   test "legacy GET is a standing incremental stream and DELETE closes only its owner" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()

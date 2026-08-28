@@ -270,6 +270,15 @@ defmodule AttestoMCP.Server.P8P9NotificationsTest do
 
     assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
 
+    for notification <- [
+          %{"type" => "toolsListChanged", "_meta" => 5},
+          %{"type" => "toolsListChanged", "unexpected" => true},
+          %{"type" => "resource", "uri" => "urn:one", "_meta" => 5},
+          %{"type" => "resource", "uri" => "urn:one", "unexpected" => true}
+        ] do
+      assert {:error, :invalid_notification} = Server.publish(server, notification)
+    end
+
     assert {:error, :invalid_notification} =
              Server.publish(server, %{
                "jsonrpc" => "2.0",

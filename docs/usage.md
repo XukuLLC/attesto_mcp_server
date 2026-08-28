@@ -15,6 +15,33 @@ With `attesto_phoenix` already declared directly by the host, run:
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 ```
 
+On this combined path the installer adds the compatible Req dependency and,
+when the corresponding keys are absent, configures:
+
+```elixir
+config :my_app, AttestoPhoenix.Config,
+  client_id_metadata: [enabled: true],
+  native_apps: [loopback_include_localhost: true]
+```
+
+This supports clients that use an HTTPS Client ID Metadata Document and native
+clients that register a portless `http://localhost/...` callback before binding
+an ephemeral port. The default AttestoPhoenix fetcher retains its HTTPS,
+DNS/IP, size, timeout, redirect, and cache validation. Deployments with a known
+client set should add a narrow `:allowed_hosts` list. Existing configuration is
+not replaced, and the installer does not enable dynamic registration or invent
+client persistence.
+
+This path supports direct public-Hex `attesto_phoenix` requirements that
+overlap `>= 2.14.0 and < 3.0.0` and Req requirements that overlap
+`>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
+intersection, which must contain at least one stable release; pre-release-only
+matches are intentionally rejected. The task accepts only the public packages
+with safe runtime options; an ambiguous dependency catalog or a dynamic,
+duplicate, incompatible, restricted, custom-source, or unsupported declaration
+makes installation stop before any edit. The explicit-callback path below
+remains dependency-neutral.
+
 For an Attesto host without `attesto_phoenix`, name a zero-arity callback that
 returns the verifier configuration:
 
@@ -49,23 +76,29 @@ order. The generated metadata wrapper keeps the two forwarded plug modules
 distinct for Phoenix 1.7 compatibility:
 
 ```elixir
-forward "/.well-known/oauth-protected-resource/mcp", MyApp.MCP.MetadataPlug,
-  server: MyApp.MCP,
+Elixir.Phoenix.Router.forward(
+  "/.well-known/oauth-protected-resource/mcp",
+  Elixir.MyApp.MCP.MetadataPlug,
+  server: Elixir.MyApp.MCP,
   path: "/mcp",
   auth: [
-    config: &MyApp.MCP.attesto_config/0,
+    config: &Elixir.MyApp.MCP.attesto_config/0,
     resource: "/mcp",
     base_url: "https://mcp.example.com"
   ]
+)
 
-forward "/mcp", AttestoMCP.Server.Plug,
-  server: MyApp.MCP,
+Elixir.Phoenix.Router.forward(
+  "/mcp",
+  Elixir.AttestoMCP.Server.Plug,
+  server: Elixir.MyApp.MCP,
   path: "/mcp",
   auth: [
-    config: &MyApp.MCP.attesto_config/0,
+    config: &Elixir.MyApp.MCP.attesto_config/0,
     resource: "/mcp",
     base_url: "https://mcp.example.com"
   ]
+)
 ```
 
 Keep both forwards outside browser-session and CSRF pipelines. The metadata
@@ -83,6 +116,17 @@ Additional options are `--mcp-path`, `--server-module`, `--router`, and
 `--attesto-config`. Run the task inside the Phoenix child application rather
 than at an umbrella root. The generated `server_status` tool is deliberately a
 small starter; replace it with application-specific registrations and scopes.
+`--mcp-path` must be a non-root ASCII path whose nonempty segments use only
+URI-unreserved letters, digits, `.`, `_`, `~`, and `-`. The same canonical
+path grammar is enforced by the runtime Plug so an encoded client path cannot
+silently differ from the configured resource. The generated MCP module owns a
+dedicated source file; move unrelated modules or file-level compiler directives
+elsewhere before rerunning the installer. A selected Phoenix router must
+likewise be the only top-level module in its file so inherited aliases and
+imports cannot redirect its routing DSL. Installation also stops when an
+existing exact, parameterized, glob, resource, or forwarded route could overlap
+either generated mount; resolve the conflict or mount the two forwards manually
+at an intentional precedence point.
 
 ## Bandit development server
 
@@ -104,8 +148,8 @@ the host supplies a token; it contains no hidden application module or secret.
 The package includes an authenticated, package-owned Bandit fixture under
 `test/conformance_fixture_test.exs`. It registers representative tools,
 resources, a URI template, prompts, and completion, then exercises real TCP
-HTTP with an Attesto test token. Run the fixture independently for each frozen
-requirements set:
+HTTP tool listing, tool calling, and prompt retrieval with an Attesto test
+token. Run the fixture independently for each frozen requirements set:
 
 ```sh
 MCP_REQUIREMENTS=2026-07-28 MIX_ENV=test mix test test/conformance_fixture_test.exs --seed 0
@@ -246,7 +290,16 @@ subscription queues use `max_queue`. A Plug option overrides the corresponding
 server option for that adapter. The server `scope_map` is the default policy;
 an explicit Plug `scope_map` replaces it for HTTP, and the effective map is
 used both by the prepared AttestoMCP authorization boundary and by protocol dispatch.
-There is no second implicit scope source.
+There is no second implicit scope source. Non-empty entries override method
+defaults; absent or empty entries retain the fail-closed HTTP defaults. For
+`completion/complete`, one explicit method entry governs both prompt and
+resource references; without it, each reference uses its category read scope.
+Legacy resource subscriptions per session and modern resource filters per
+subscription have fixed defensive bounds of 128 unique URIs and 4,096 bytes
+per URI. Repeating an existing legacy subscription is idempotent,
+unsubscribing releases its entry, and modern filters preserve the first
+occurrence of each URI. Invalid or over-limit legacy changes do not refresh
+the session idle deadline.
 
 `rate_limits` is an optional map of bounded token buckets for `calls`,
 `completion`, `subscriptions`, and `auth_failures`; each entry is
@@ -327,6 +380,12 @@ reject those bytes before dispatch.
 
 Modern requests carry `_meta.io.modelcontextprotocol/protocolVersion` and
 `clientCapabilities` per request and use POST-only request-scoped responses.
+`_meta` must be a JSON object when present; non-object values return a
+correlated protocol error without terminating the transport.
+Host-published catalog notifications accept only `type` and optional object
+`_meta`; resource-update notifications additionally require a valid `uri`.
+Unknown fields and malformed metadata are rejected before either delivery
+path.
 Legacy `2025-11-25` and `2025-06-18` start with `initialize`, then
 `notifications/initialized`, and may use an expiring principal-bound
 `Mcp-Session-Id`. The server echoes and retains the exact accepted revision;
@@ -405,6 +464,9 @@ per-request `_meta` protocol-version/capability metadata; it does not send an
 JSON-RPC messages to stdout, and exits on EOF. Its default bounded frame limit
 is 64,000 bytes; larger limits must be explicit. A host may instead call
 `AttestoMCP.Server.Stdio.run/2` with its own supervised server and context.
+`AttestoMCP.Server.Stdio.main/1` accepts the adapter-only identity, input,
+server-request, and EOF controls too; it removes those controls before starting
+the owned server so core unknown-option validation stays strict.
 
 ## Protocol version compatibility
 

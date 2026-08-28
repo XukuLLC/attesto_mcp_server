@@ -19,6 +19,8 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
   `442e5e16946eb90149bef41acc0461f18f7d4fdd682dd40b226c3a9814d29543`
 - `0.10.2` patch-candidate source fingerprint:
   `791e7308119c10261a579896efdb5a2b43c1c8dea944d5426cb3ab681c7a46a5`
+- `0.10.3` patch-candidate source fingerprint:
+  `c39c0cd59444d08ed1d356d836b05490caf13ec9bc0c511a43523fc98a7878c4`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
@@ -43,6 +45,18 @@ The `0.10.2` patch candidate clarifies primitive callback inputs and removes a
 hard-coded default server version. Its hosted release gate passed all four jobs
 at `2026-08-27T17:59:31Z` against implementation commit
 `81a1f7cfa5c6fbf291c8c6cf155faabdf4048545`.
+The `0.10.3` patch candidate hardens optional-installer dependency, route,
+callback, and generated-module ownership preflight; normalizes atom cache-scope
+options; keeps stdio adapter controls out of owned server startup; and exercises
+combined installers in a fresh Phoenix 1.8.13 host against released
+`attesto_mcp` 1.2.2 and `attesto_phoenix` 2.14.1. It also hardens completion
+scope enforcement, metadata handling, notification publication, retained
+request identifiers, and bounded legacy/modern resource subscriptions. Its
+local aggregate gate passed 312 checks (one doctest plus 311 tests), 81.54%
+coverage, zero-error/zero-skip Dialyzer, package construction, and the Hex
+advisory audit. Hosted
+official-runner and version-floor results are not claimed here until the
+candidate commit completes the hosted release gate.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |
@@ -95,7 +109,9 @@ The package-owned authenticated fixture was also exercised with exact released
 official clients. Each gate negotiated the named era, listed tools, called
 `test_simple_text`, validated its text response, and closed the connection.
 These four gates were rerun against the fingerprinted `0.10.0` candidate at the
-recorded completion time.
+recorded completion time. The package fixture wrapper inserts its own bearer
+token into each client transport. These gates therefore validate authenticated
+server protocol interoperability, not SDK OAuth discovery or token acquisition.
 
 | Client artifact | `2025-11-25` | `2026-07-28` |
 | --- | --- | --- |

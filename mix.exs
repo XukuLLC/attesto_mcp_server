@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "0.10.2"
+  @version "0.10.3"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -92,7 +92,10 @@ defmodule AttestoMCP.Server.MixProject do
   end
 
   defp test_with_coverage(_args) do
-    run_command!("MIX_ENV=test mix test --cover --seed 0", "coverage test")
+    run_command!(
+      "MIX_ENV=test mix do compile --warnings-as-errors + test --cover --warnings-as-errors",
+      "coverage test"
+    )
   end
 
   defp build_unpacked(_args), do: run_command!("mix hex.build --unpack", "package build")

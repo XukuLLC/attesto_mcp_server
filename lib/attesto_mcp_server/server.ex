@@ -44,6 +44,8 @@ defmodule AttestoMCP.Server do
   @max_template_value_bytes 2_048
   @max_template_query_pairs 32
   @max_notifications_per_request 128
+  @max_resource_subscription_uri_bytes 4_096
+  @max_resource_subscriptions_per_session 128
   @max_rate_buckets 10_000
   @log_levels ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
   @traceparent_pattern ~r/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
@@ -183,7 +185,7 @@ defmodule AttestoMCP.Server do
         get_in(request, [:params, "requestId"]) || get_in(request, [:params, "request_id"])
 
       cancel_request(server, principal, request_id, Keyword.get(opts, :owner))
-      cancel_subscription(server, request_id, Keyword.get(opts, :owner))
+      cancel_subscription(server, request_id, Keyword.get(opts, :owner) || self())
 
       :notification
     else
@@ -232,7 +234,7 @@ defmodule AttestoMCP.Server do
                        request_metadata}
                     ) do
                  :ok ->
-                   progress_token = get_in(request, [:params, "_meta", "progressToken"])
+                   progress_token = metadata_value(request.params, "progressToken")
                    progress = progress_callback(parent, ref, progress_token, on_event)
 
                    notify =
@@ -402,6 +404,10 @@ defmodule AttestoMCP.Server do
   def get_session(server, id, principal, tenant \\ nil),
     do: GenServer.call(server, {:get_session, id, principal, tenant})
 
+  @doc false
+  def peek_session(server, id, principal, tenant \\ nil),
+    do: GenServer.call(server, {:peek_session, id, principal, tenant})
+
   def touch_session(server, id), do: GenServer.call(server, {:touch_session, id})
   def delete_session(server, id), do: GenServer.call(server, {:delete_session, id})
   def mark_initialized(server, id), do: GenServer.call(server, {:mark_initialized, id})
@@ -413,7 +419,20 @@ defmodule AttestoMCP.Server do
         id,
         principal,
         tenant,
-        System.monotonic_time(:millisecond) + timeout
+        System.monotonic_time(:millisecond) + timeout,
+        true
+      )
+
+  @doc false
+  def await_initialized_without_touch(server, id, principal, tenant, timeout \\ 50),
+    do:
+      await_initialized_until(
+        server,
+        id,
+        principal,
+        tenant,
+        System.monotonic_time(:millisecond) + timeout,
+        false
       )
 
   @doc "Binds an unnegotiated session to one enabled legacy protocol revision."
@@ -473,11 +492,14 @@ defmodule AttestoMCP.Server do
               "resourceUpdated",
               "resourceSubscriptions"
             ] do
-    valid_resource? =
-      type not in ["resource", "resourceUpdated", "resourceSubscriptions"] or
-        is_binary(notification["uri"] || notification[:uri])
+    params = Map.delete(notification, "type")
 
-    if valid_resource? and Schema.json_value(notification) == :ok,
+    valid_params? =
+      if type in ["resource", "resourceUpdated", "resourceSubscriptions"],
+        do: validate_resource_updated_notification_params(params) == :ok,
+        else: validate_catalog_notification_params(params) == :ok
+
+    if valid_params? and Schema.json_value(notification) == :ok,
       do: {:ok, notification},
       else: {:error, :invalid_notification}
   end
@@ -563,7 +585,9 @@ defmodule AttestoMCP.Server do
         {:resource_subscription, :unsubscribe, session_id, principal, tenant, uri}
       )
 
-  def close_subscription(server, id, owner \\ nil) do
+  def close_subscription(server, id), do: close_subscription(server, id, self())
+
+  def close_subscription(server, id, owner) do
     try do
       Subscriptions.close(GenServer.call(server, :subscriptions), id, owner)
     catch
@@ -571,7 +595,9 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  def cancel_subscription(server, id, owner \\ nil) do
+  def cancel_subscription(server, id), do: cancel_subscription(server, id, self())
+
+  def cancel_subscription(server, id, owner) do
     try do
       Subscriptions.cancel(GenServer.call(server, :subscriptions), id, owner)
     catch
@@ -579,7 +605,9 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  def ack_subscription(server, id, owner \\ nil) do
+  def ack_subscription(server, id), do: ack_subscription(server, id, self())
+
+  def ack_subscription(server, id, owner) do
     try do
       Subscriptions.ack(GenServer.call(server, :subscriptions), id, owner)
     catch
@@ -904,18 +932,18 @@ defmodule AttestoMCP.Server do
       when operation in [:subscribe, :unsubscribe] and is_binary(uri) do
     case session_for(state, session_id, principal, tenant, require_initialized: true) do
       {:ok, session} ->
-        subscriptions =
-          case operation do
-            :subscribe -> Map.put(session.resource_subscriptions, uri, true)
-            :unsubscribe -> Map.delete(session.resource_subscriptions, uri)
-          end
+        with :ok <- validate_resource_subscription_uri(uri),
+             {:ok, subscriptions} <-
+               update_resource_subscriptions(operation, session.resource_subscriptions, uri) do
+          :ets.insert(
+            state.sessions,
+            {session_id, %{Session.touch(session) | resource_subscriptions: subscriptions}}
+          )
 
-        :ets.insert(
-          state.sessions,
-          {session_id, %{Session.touch(session) | resource_subscriptions: subscriptions}}
-        )
-
-        {:reply, :ok, state}
+          {:reply, :ok, state}
+        else
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
 
       _ ->
         {:reply, {:error, :not_found}, state}
@@ -1056,37 +1084,12 @@ defmodule AttestoMCP.Server do
   end
 
   def handle_call({:get_session, id, principal, tenant}, _from, state) do
-    {result, state} =
-      case :ets.lookup(state.sessions, id) do
-        [{^id, session}] ->
-          cond do
-            not Session.valid?(session) ->
-              :ets.delete(state.sessions, id)
-              Telemetry.execute([:session, :close], %{count: 1}, %{outcome: :expired})
+    {result, state} = lookup_session(state, id, principal, tenant, true)
+    {:reply, result, state}
+  end
 
-              {{:error, :not_found},
-               close_legacy_streams_for_session(state, id, :session_expired)}
-
-            not Session.same_principal?(session, principal) or
-                not Session.same_tenant?(session, tenant) ->
-              {{:error, :not_found}, state}
-
-            true ->
-              {{:ok, Session.touch(session)}, state}
-          end
-
-        _ ->
-          {{:error, :not_found}, state}
-      end
-
-    case result do
-      {:ok, session} ->
-        :ets.insert(state.sessions, {id, session})
-
-      _ ->
-        :ok
-    end
-
+  def handle_call({:peek_session, id, principal, tenant}, _from, state) do
+    {result, state} = lookup_session(state, id, principal, tenant, false)
     {:reply, result, state}
   end
 
@@ -1440,6 +1443,8 @@ defmodule AttestoMCP.Server do
       |> Keyword.put(:modern_tasks, false)
       |> Keyword.put(:legacy_tasks, false)
 
+    normalized = normalize_cache_scope_option(normalized)
+
     normalized =
       normalized
       |> put_default_if_nil(:stream_queue_size, normalized[:max_queue])
@@ -1459,6 +1464,14 @@ defmodule AttestoMCP.Server do
 
   defp put_default_if_nil(opts, key, default) do
     if is_nil(Keyword.get(opts, key)), do: Keyword.put(opts, key, default), else: opts
+  end
+
+  defp normalize_cache_scope_option(opts) do
+    case Keyword.get(opts, :cache_scope) do
+      :private -> Keyword.put(opts, :cache_scope, "private")
+      :public -> Keyword.put(opts, :cache_scope, "public")
+      _ -> opts
+    end
   end
 
   defp merge_rate_limit_defaults(opts) do
@@ -1851,7 +1864,7 @@ defmodule AttestoMCP.Server do
 
       {:mcp_subscription, ^ref, id, event} ->
         delivery = deliver_event(on_event, event)
-        Subscriptions.ack(subscriptions, id)
+        Subscriptions.ack(subscriptions, id, self())
 
         case delivery do
           :ok ->
@@ -2199,7 +2212,7 @@ defmodule AttestoMCP.Server do
   end
 
   defp validate_resource_updated_notification_params(params) when is_map(params) do
-    uri = params["uri"]
+    uri = Map.get(params, "uri")
 
     if is_binary(uri) and byte_size(uri) in 1..4_096 and String.valid?(uri) and
          Enum.all?(Map.keys(params), &(&1 in ["uri", "_meta"])) and
@@ -2433,8 +2446,38 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp await_initialized_until(server, id, principal, tenant, deadline) do
-    case get_session(server, id, principal, tenant) do
+  defp lookup_session(state, id, principal, tenant, touch?) do
+    case :ets.lookup(state.sessions, id) do
+      [{^id, session}] ->
+        cond do
+          not Session.valid?(session) ->
+            :ets.delete(state.sessions, id)
+            Telemetry.execute([:session, :close], %{count: 1}, %{outcome: :expired})
+
+            {{:error, :not_found}, close_legacy_streams_for_session(state, id, :session_expired)}
+
+          not Session.same_principal?(session, principal) or
+              not Session.same_tenant?(session, tenant) ->
+            {{:error, :not_found}, state}
+
+          true ->
+            session = if touch?, do: Session.touch(session), else: session
+            if touch?, do: :ets.insert(state.sessions, {id, session})
+            {{:ok, session}, state}
+        end
+
+      _ ->
+        {{:error, :not_found}, state}
+    end
+  end
+
+  defp await_initialized_until(server, id, principal, tenant, deadline, touch?) do
+    session =
+      if touch?,
+        do: get_session(server, id, principal, tenant),
+        else: peek_session(server, id, principal, tenant)
+
+    case session do
       {:ok, %{initialized: true}} ->
         :ok
 
@@ -2443,7 +2486,7 @@ defmodule AttestoMCP.Server do
 
         if remaining > 0 do
           Process.sleep(min(remaining, 5))
-          await_initialized_until(server, id, principal, tenant, deadline)
+          await_initialized_until(server, id, principal, tenant, deadline, touch?)
         else
           {:error, :not_initialized}
         end
@@ -2678,6 +2721,9 @@ defmodule AttestoMCP.Server do
         "resourceUpdated" ->
           {"notifications/resources/updated", Map.delete(event, "type")}
 
+        "resourceSubscriptions" ->
+          {"notifications/resources/updated", Map.delete(event, "type")}
+
         "toolsListChanged" ->
           {"notifications/tools/list_changed", notification_meta(event)}
 
@@ -2894,10 +2940,7 @@ defmodule AttestoMCP.Server do
   defp normalize_era(era), do: era
 
   defp detect_era(%{method: "initialize"}, params) do
-    case if(is_map(params),
-           do: get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]),
-           else: nil
-         ) do
+    case metadata_value(params, "io.modelcontextprotocol/protocolVersion") do
       @modern -> @modern
       _ -> @legacy
     end
@@ -3074,7 +3117,7 @@ defmodule AttestoMCP.Server do
 
   defp trace_context(params) when is_map(params) do
     params
-    |> Map.get("_meta", %{})
+    |> metadata()
     |> Map.take(["traceparent", "tracestate", "baggage"])
   end
 
@@ -3355,17 +3398,61 @@ defmodule AttestoMCP.Server do
       end
 
     case result do
-      :ok -> {:ok, %{}}
-      _ -> {:error, Error.invalid_params(%{"reason" => "session_not_found"})}
+      :ok ->
+        {:ok, %{}}
+
+      {:error, :invalid_uri} ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_resource_uri"})}
+
+      {:error, :limit_reached} ->
+        {:error, Error.invalid_params(%{"reason" => "resource_subscription_limit"})}
+
+      _ ->
+        {:error, Error.invalid_params(%{"reason" => "session_not_found"})}
     end
   end
 
   defp resource_subscription(_params, _context, _runtime, _operation),
     do: {:error, Error.invalid_params(%{"reason" => "uri_required"})}
 
+  defp validate_resource_subscription_uri(uri)
+       when is_binary(uri) and byte_size(uri) in 1..@max_resource_subscription_uri_bytes do
+    if String.valid?(uri) and not String.contains?(uri, ["\u0000", "\r", "\n"]),
+      do: :ok,
+      else: {:error, :invalid_uri}
+  end
+
+  defp validate_resource_subscription_uri(_uri), do: {:error, :invalid_uri}
+
+  defp update_resource_subscriptions(:subscribe, subscriptions, uri) do
+    cond do
+      Map.has_key?(subscriptions, uri) ->
+        {:ok, subscriptions}
+
+      map_size(subscriptions) >= @max_resource_subscriptions_per_session ->
+        {:error, :limit_reached}
+
+      true ->
+        {:ok, Map.put(subscriptions, :binary.copy(uri), true)}
+    end
+  end
+
+  defp update_resource_subscriptions(:unsubscribe, subscriptions, uri),
+    do: {:ok, Map.delete(subscriptions, uri)}
+
+  defp metadata(params) when is_map(params) do
+    case Map.get(params, "_meta") do
+      metadata when is_map(metadata) -> metadata
+      _ -> %{}
+    end
+  end
+
+  defp metadata(_params), do: %{}
+  defp metadata_value(params, key), do: Map.get(metadata(params), key)
+
   defp list_result(registry, type, params, context, era, key, opts) do
     values = Registry.list(registry, type) |> Enum.filter(&visible?(&1, context))
-    page = page(values, params["cursor"], context, era, opts, registry)
+    page = page(values, params["cursor"], context, era, opts, registry, type)
 
     if page[:error] do
       {:error, page.error}
@@ -3384,9 +3471,9 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp page(values, nil, context, era, opts, registry) do
+  defp page(values, nil, context, era, opts, registry, type) do
     page_size = page_size(opts)
-    cursor_opts = cursor_options(values, context, era, opts, registry, page_size)
+    cursor_opts = cursor_options(values, context, era, opts, registry, page_size, type)
 
     %{
       items: Enum.take(values, page_size),
@@ -3397,9 +3484,9 @@ defmodule AttestoMCP.Server do
     }
   end
 
-  defp page(values, cursor, context, era, opts, registry) do
+  defp page(values, cursor, context, era, opts, registry, type) do
     page_size = page_size(opts)
-    cursor_opts = cursor_options(values, context, era, opts, registry, page_size)
+    cursor_opts = cursor_options(values, context, era, opts, registry, page_size, type)
 
     case Cursor.verify(cursor, principal(context), era, cursor_opts) do
       {:ok, position} when is_integer(position) ->
@@ -3416,10 +3503,11 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp cursor_options(values, context, era, opts, registry, page_size) do
+  defp cursor_options(values, context, era, opts, registry, page_size, type) do
     [
       secret: opts[:cursor_secret],
       ttl: opts[:cursor_ttl],
+      catalog: type,
       tenant: tenant(context),
       scopes: Map.get(context, :scopes, Map.get(context, "scopes", [])) || [],
       visibility: Enum.map(values, & &1.identity),
@@ -3730,7 +3818,11 @@ defmodule AttestoMCP.Server do
   end
 
   defp require_input_capabilities(params, requests) do
-    capabilities = get_in(params, ["_meta", "io.modelcontextprotocol/clientCapabilities"]) || %{}
+    capabilities =
+      case metadata_value(params, "io.modelcontextprotocol/clientCapabilities") do
+        value when is_map(value) -> value
+        _ -> %{}
+      end
 
     {supported, missing} =
       Enum.split_with(requests, fn {_key, %{"method" => method}} ->

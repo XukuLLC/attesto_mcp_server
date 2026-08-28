@@ -59,7 +59,20 @@ mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 
 When the host already depends on `attesto_phoenix`, the generated application
 module derives its verifier configuration from that package's validated OTP
-configuration. Otherwise, provide an application-owned callback:
+configuration. The installer also enables secure URL client metadata and
+ephemeral `localhost` callback ports for native desktop/CLI clients, adding the
+Req dependency used by the default fetcher. Existing host values win, so an
+application can keep a narrower metadata-host allowlist or stricter loopback
+policy.
+
+This path supports direct public-Hex `attesto_phoenix` requirements that
+overlap `>= 2.14.0 and < 3.0.0` and Req requirements that overlap
+`>= 0.6.1 and < 1.0.0`; existing stable requirements are narrowed to their
+intersection. That intersection must contain at least one stable release;
+pre-release-only matches are intentionally rejected. If the dependency catalog
+or either required declaration cannot be validated safely, installation stops
+before editing. The explicit-callback path does not modify dependencies. Hosts
+without `attesto_phoenix` provide an application-owned callback instead:
 
 ```sh
 mix igniter.install attesto_mcp_server \
@@ -72,9 +85,14 @@ configuration, a starter registration test, and distinct top-level forwards
 for `/mcp` and its public RFC 9728 metadata URL. The metadata forward uses a
 generated application-owned wrapper, preserving compatibility with Phoenix
 1.7's one-forward-per-plug rule. It never creates an issuer, credentials,
-consent policy, or token storage. See
+consent policy, token storage, or dynamic-registration policy. See
 [Phoenix installation](docs/usage.md#phoenix-installation) for options and the
 division of responsibilities between the packages.
+
+Custom `--mcp-path` values must be non-root ASCII paths made from
+slash-separated URI-unreserved segments (`A-Z`, `a-z`, digits, `.`, `_`, `~`,
+and `-`). The task stops before editing when dependency, router, route, or
+installer-owned module provenance cannot be established conservatively.
 
 Bandit is the documented development/test adapter, while the production
 library depends only on Plug. For a local loopback example, see
@@ -91,16 +109,29 @@ or production configuration.
 
 Tools listing uses `AttestoMCP.Scopes.tools_read/0`; tool execution uses
 `tools_call/0`; resources and prompt/completion reads use their corresponding
-`AttestoMCP.Scopes` helpers. Every HTTP request is reauthenticated and handles
-or session IDs are never authorities by themselves.
+`AttestoMCP.Scopes` helpers. A non-empty `scope_map["completion/complete"]`
+entry replaces the category default for both prompt and resource references;
+an absent or empty entry cannot disable those defaults. Every HTTP request is
+reauthenticated and handles or session IDs are never authorities by themselves.
 
 ## Operational notes
 
 Pin the public origin behind a trusted proxy, use TLS in deployment, and keep
 credentials/proofs/private content out of logs and Telemetry. Configure the
 documented `max_queue`, `stream_keepalive_ms`, `stream_queue_size`, and
-concurrency/timeout limits; Plug options override server defaults for that
-adapter, while its effective `scope_map` is the single HTTP policy source.
+concurrency/timeout limits. `page_size` bounds catalog pages; `cache_ttl_ms`,
+`cache_scope`, and `allow_public_cache` control cache metadata, with public
+caching requiring both explicit opt-in and an authorization-independent result.
+Request `_meta` values must be JSON objects when present; malformed values
+produce request-local protocol errors without taking down either transport.
+Published catalog notifications accept only `type` and optional object
+`_meta`; resource-update notifications additionally require `uri`. Unknown
+fields or malformed metadata are rejected before modern or legacy fanout.
+Legacy resource subscriptions per session and modern resource filters per
+subscription are fixed at 128 unique URIs and 4,096 bytes per URI; duplicates
+do not consume another entry.
+Plug options override server defaults for that adapter, while its effective
+`scope_map` is the single HTTP policy source.
 Optional task profiles are disabled for this release; their
 incomplete in-memory implementation cannot be enabled. A future durable
 host-store contract is required before either profile can be advertised.

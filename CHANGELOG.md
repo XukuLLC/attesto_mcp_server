@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.10.3 - 2026-08-28
+
+- Configure detected `attesto_phoenix` hosts for URL client metadata and native
+  loopback clients by enabling Client ID Metadata Documents and ephemeral
+  `localhost` callback ports without replacing existing host choices.
+- Add the compatible Req dependency required by the default secure CIMD
+  fetcher only on the `attesto_phoenix` installer path; explicit Attesto
+  callback installations remain dependency-neutral.
+- Harden dependency preflight to inspect only literal catalogs, intersect
+  stable Hex requirements with the supported `attesto_phoenix` and Req ranges,
+  and stop without edits on dynamic, duplicate, incompatible, restricted,
+  custom-source, or otherwise unsafe declarations.
+- Harden route and ownership recognition across forward arities 2–4, qualified
+  and effective scoped calls, source-ordered/chained/grouped aliases, dynamic
+  plug refusal, Phoenix-router identity, exact generated callbacks, fully
+  qualified generated routes, and rooted generated module references.
+- Fail closed on executable managed-module attributes, compile hooks, custom
+  macro enablement, enclosing-file compiler directives, unsafe nested modules,
+  and non-canonical endpoint paths; installer and runtime paths now use only
+  slash-separated ASCII URI-unreserved segments.
+- Preserve compatibility with the exact zero-option `AttestoPhoenix.Router`
+  integration emitted after a trusted primary Phoenix router use while keeping
+  every other secondary router macro source opaque and requiring router modules
+  to own their source file for lexical provenance.
+- Normalize atom cache-scope options, expose pagination and cache controls
+  through the stable facade type, and keep stdio-only controls out of owned
+  server startup.
+- Exercise the combined installers in both the reusable fixture and an actual
+  Phoenix 1.8.13 `mix phx.new` application, including config construction,
+  generated routes, warnings-as-errors compilation, starter tests,
+  authorization-installer reruns, and a zero-diff second MCP installation.
+- Harden subscription ownership and cleanup, contain non-exception Plug
+  failures, serialize first-use cursor secrets, and exercise prompt retrieval
+  through both dated HTTP fixture paths.
+- Enforce prompt and resource completion scopes at the authenticated HTTP
+  boundary, including one explicit method override for both reference types.
+- Preserve evaluated array-item annotations when JSON Schema references are
+  reached through applicators, avoiding false rejection by `unevaluatedItems`.
+- Reject non-object request `_meta` values as correlated protocol errors while
+  keeping both stdio and HTTP transports available for later requests.
+- Bound each legacy session and each modern resource filter to 128 unique
+  resource URIs at 4,096 bytes per URI, detach retained URI slices from request
+  bodies, and canonicalize duplicates without extra entries.
+- Route every supported resource-update alias through the same legacy URI
+  filter and avoid extending idle lifetime for rejected subscription changes.
+- Reject malformed public notification fields before modern or legacy fanout,
+  and suppress malformed direct subscription events without terminating the
+  registry or preventing a later valid delivery.
+- Detach accepted binary JSON-RPC and modern subscription IDs from larger
+  decoded request buffers before retaining them.
+- Refuse installer edits when existing static, parameterized, glob, resource,
+  or forwarded routes overlap either generated mount; reject required macro
+  calls whose router effects cannot be proven and accept callback punctuation
+  only as a terminal Elixir identifier suffix.
+- Bind pagination cursors to their catalog method and skip explicit
+  owner-local subscription IDs when allocating server-generated identifiers.
+- Add direct regressions for HTTP Origin enforcement and header budgets, plus
+  a live stdio pipe recovery check spanning malformed, oversized, and valid
+  consecutive frames.
+
 ## 0.10.2 - 2026-08-27
 
 - Document the distinct tool, prompt, resource, and completion callback inputs,

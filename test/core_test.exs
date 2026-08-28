@@ -267,6 +267,49 @@ defmodule AttestoMCP.Server.CoreTest do
              )
   end
 
+  test "pagination cursors cannot cross catalog methods" do
+    {:ok, server} = Server.start_link(page_size: 1, cursor_secret: "catalog-secret")
+
+    for name <- ["one", "two"] do
+      assert :ok = Server.register_tool(server, name, %{handler: fn _, _ -> {:ok, "ok"} end})
+
+      assert :ok =
+               Server.register_prompt(server, name, %{
+                 handler: fn _, _ -> {:ok, %{"messages" => []}} end
+               })
+    end
+
+    metadata = %{
+      "_meta" => %{
+        "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities" => %{}
+      }
+    }
+
+    assert {1, %{"result" => %{"nextCursor" => cursor}}} =
+             Server.dispatch(
+               server,
+               %{kind: :request, id: 1, method: "tools/list", params: metadata},
+               %{principal: "catalog"},
+               version: "2026-07-28"
+             )
+
+    assert {2, %{"error" => %{"code" => -32602, "data" => data}}} =
+             Server.dispatch(
+               server,
+               %{
+                 kind: :request,
+                 id: 2,
+                 method: "prompts/list",
+                 params: Map.put(metadata, "cursor", cursor)
+               },
+               %{principal: "catalog"},
+               version: "2026-07-28"
+             )
+
+    assert data["reason"] == "invalid_cursor"
+  end
+
   test "MRTR requires elicitation capability and accepts one signed retry", %{server: server} do
     assert :ok =
              Server.register_tool(server, "ask", %{

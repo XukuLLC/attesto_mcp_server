@@ -350,7 +350,8 @@ defmodule AttestoMCP.Server.P10P13RegressionTest do
     assert get_in(event, ["params", "_meta", "io.modelcontextprotocol/subscriptionId"]) == 11
 
     Server.ack_subscription(server, 11)
-    :ok = Server.close_subscription(server, 11)
+    closer = Task.async(fn -> Server.close_subscription(server, 11, parent) end)
+    assert :ok = Task.await(closer)
     assert_receive {:mcp_subscription_close, 11}
 
     assert {12, %{"error" => %{"code" => -32602}}} =

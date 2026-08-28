@@ -149,7 +149,7 @@ defmodule AttestoMCP.Server.JSONRPC do
          with_extensions(
            %{
              kind: :request,
-             id: Map.fetch!(map, "id"),
+             id: canonical_id(Map.fetch!(map, "id")),
              method: method,
              params: Map.get(map, "params", %{})
            },
@@ -173,7 +173,12 @@ defmodule AttestoMCP.Server.JSONRPC do
          {:ok, result} <- response_result(map) do
       {:ok,
        with_extensions(
-         %{kind: :response, id: id, result: result, error: Map.get(map, "error")},
+         %{
+           kind: :response,
+           id: canonical_id(id),
+           result: result,
+           error: Map.get(map, "error")
+         },
          map,
          ["jsonrpc", "id", "result", "error"]
        )}
@@ -203,6 +208,9 @@ defmodule AttestoMCP.Server.JSONRPC do
 
   defp validate_id(_),
     do: {:error, Error.invalid_request(%{"reason" => "id_must_be_string_or_integer"})}
+
+  defp canonical_id(id) when is_binary(id), do: :binary.copy(id)
+  defp canonical_id(id), do: id
 
   defp validate_method(method) when byte_size(method) in 1..256 do
     if String.valid?(method) and not String.contains?(method, ["\u0000", "\r", "\n"]),

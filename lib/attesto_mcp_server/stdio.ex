@@ -5,6 +5,15 @@ defmodule AttestoMCP.Server.Stdio do
 
   @legacy "2025-11-25"
   @legacy_versions [@legacy, "2025-06-18"]
+  @adapter_only_options [
+    :context,
+    :input,
+    :principal,
+    :tenant,
+    :scopes,
+    :on_server_request,
+    :eof_grace_ms
+  ]
 
   @doc "Run until stdin reaches EOF. Only compact JSON-RPC messages go to stdout."
   @spec run(pid() | atom(), keyword()) :: term()
@@ -50,7 +59,11 @@ defmodule AttestoMCP.Server.Stdio do
   @doc "Starts a server and runs the stdio adapter until EOF."
   @spec main(keyword()) :: term()
   def main(opts \\ []) do
-    {:ok, server} = AttestoMCP.Server.start_link(opts)
+    # Adapter controls belong to run/2. Keep them out of server startup so a
+    # normal command-line invocation can provide identity/input callbacks
+    # without weakening the server's unknown-option validation.
+    server_opts = Keyword.drop(opts, @adapter_only_options)
+    {:ok, server} = AttestoMCP.Server.start_link(server_opts)
     run(server, opts)
   end
 
@@ -360,12 +373,15 @@ defmodule AttestoMCP.Server.Stdio do
 
   defp cancel_request(server, context, pending, params) do
     request_id = params["requestId"] || params["request_id"]
-    owner = pending[request_id] && pending[request_id].pid
 
-    if Map.has_key?(pending, request_id),
-      do: AttestoMCP.Server.cancel_request(server, context_principal(context), request_id, owner)
+    case pending[request_id] do
+      %{pid: owner} when is_pid(owner) ->
+        AttestoMCP.Server.cancel_request(server, context_principal(context), request_id, owner)
+        AttestoMCP.Server.cancel_subscription(server, request_id, owner)
 
-    AttestoMCP.Server.cancel_subscription(server, request_id, owner)
+      _ ->
+        :ok
+    end
 
     pending
   end
@@ -437,7 +453,13 @@ defmodule AttestoMCP.Server.Stdio do
       session_id = context[:legacy_session_id]
       tenant = Map.get(context, :tenant) || Map.get(context, "tenant")
 
-      case AttestoMCP.Server.get_session(server, session_id, context_principal(context), tenant) do
+      case legacy_session_lookup(
+             server,
+             session_id,
+             context_principal(context),
+             tenant,
+             request
+           ) do
         {:ok, session} ->
           context
           |> Map.put(:session_id, session_id)
@@ -543,16 +565,24 @@ defmodule AttestoMCP.Server.Stdio do
   defp legacy_not_ready?(server, context, request) do
     legacy_version?(version_for(request)) and
       request.method not in ["initialize", "ping", "notifications/initialized"] and
-      case AttestoMCP.Server.get_session(
+      case legacy_session_lookup(
              server,
              context[:legacy_session_id],
              context_principal(context),
-             Map.get(context, :tenant) || Map.get(context, "tenant")
+             Map.get(context, :tenant) || Map.get(context, "tenant"),
+             request
            ) do
         {:ok, session} -> not session.initialized
         _ -> true
       end
   end
+
+  defp legacy_session_lookup(server, id, principal, tenant, %{method: method})
+       when method in ["resources/subscribe", "resources/unsubscribe"],
+       do: AttestoMCP.Server.peek_session(server, id, principal, tenant)
+
+  defp legacy_session_lookup(server, id, principal, tenant, _request),
+    do: AttestoMCP.Server.get_session(server, id, principal, tenant)
 
   defp take_ref(pending, ref) do
     case Enum.find(pending, fn {_id, entry} -> entry.ref == ref end) do
@@ -667,7 +697,7 @@ defmodule AttestoMCP.Server.Stdio do
   defp safe_server_request_callback(_callback, _event), do: :ok
 
   defp version_for(%{method: "initialize", params: params}) when is_map(params) do
-    modern = get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"])
+    modern = metadata_value(params, "io.modelcontextprotocol/protocolVersion")
     requested = params["protocolVersion"]
 
     cond do
@@ -681,7 +711,7 @@ defmodule AttestoMCP.Server.Stdio do
   defp version_for(%{method: "notifications/initialized"}), do: @legacy
 
   defp version_for(%{params: params}) do
-    get_in(params, ["_meta", "io.modelcontextprotocol/protocolVersion"]) || @legacy
+    metadata_value(params, "io.modelcontextprotocol/protocolVersion") || @legacy
   end
 
   defp dispatch_version_for(%{method: "initialize"} = request, _context),
@@ -699,6 +729,13 @@ defmodule AttestoMCP.Server.Stdio do
   end
 
   defp legacy_version?(version), do: version in @legacy_versions
+
+  defp metadata_value(params, key) do
+    case Map.get(params, "_meta") do
+      metadata when is_map(metadata) -> Map.get(metadata, key)
+      _ -> nil
+    end
+  end
 
   defp stdio_context(opts) do
     %{

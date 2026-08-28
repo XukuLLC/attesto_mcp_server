@@ -182,6 +182,65 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
     assert response["result"]["resultType"] == "complete"
   end
 
+  test "live stdio pipe recovers after malformed and over-limit lines" do
+    executable = System.find_executable("elixir") || raise "elixir executable not found"
+    script = Path.expand("../examples/stdio.exs", __DIR__)
+
+    install_dir =
+      Path.join(System.tmp_dir!(), "attesto-mcp-recovery-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(install_dir)
+
+    port =
+      Port.open({:spawn_executable, executable}, [
+        :binary,
+        :exit_status,
+        :use_stdio,
+        {:env, [{~c"MIX_INSTALL_DIR", String.to_charlist(install_dir)}]},
+        {:args, [script]}
+      ])
+
+    on_exit(fn ->
+      if Port.info(port), do: Port.close(port)
+      File.rm_rf!(install_dir)
+    end)
+
+    valid_request = %{
+      "jsonrpc" => "2.0",
+      "id" => 95,
+      "method" => "server/discover",
+      "params" => %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => @modern,
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        }
+      }
+    }
+
+    input = [
+      "not-json\n",
+      String.duplicate("x", 64_001),
+      "\n",
+      Jason.encode!(valid_request),
+      "\n"
+    ]
+
+    assert Port.command(port, IO.iodata_to_binary(input))
+
+    [malformed_error, oversized_error, response] =
+      port
+      |> receive_port_lines(3, "")
+      |> Enum.map(&Jason.decode!/1)
+
+    assert malformed_error["id"] == nil
+    assert malformed_error["error"]["code"] == -32700
+    assert oversized_error["id"] == nil
+    assert oversized_error["error"]["code"] == -32700
+    assert oversized_error["error"]["data"]["reason"] == "message_too_large"
+    assert response["id"] == 95
+    assert response["result"]["resultType"] == "complete"
+  end
+
   test "2025-06-18 initialize is accepted and echoed exactly" do
     {:ok, server} = Server.start_link([])
 
@@ -252,6 +311,21 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
         after
           30_000 -> flunk("stdio live pipe did not answer")
         end
+    end
+  end
+
+  defp receive_port_lines(port, count, buffer) do
+    if length(:binary.matches(buffer, "\n")) >= count do
+      buffer
+      |> String.split("\n", trim: true)
+      |> Enum.take(count)
+    else
+      receive do
+        {^port, {:data, data}} -> receive_port_lines(port, count, buffer <> data)
+        {^port, {:exit_status, status}} -> flunk("stdio exited before responses: #{status}")
+      after
+        30_000 -> flunk("stdio live pipe did not answer")
+      end
     end
   end
 end

@@ -63,7 +63,9 @@ defmodule AttestoMCP.Server.APITest do
 
     assert :ok = API.publish(server, %{"type" => "toolsListChanged"})
     assert :ok = API.close_subscription(server, "missing")
+    assert :ok = API.close_subscription(server, "missing", self())
     assert :ok = API.cancel_subscription(server, "missing")
+    assert :ok = API.cancel_subscription(server, "missing", self())
     assert :ok = API.cancel_request(server, "principal", "missing")
   end
 end

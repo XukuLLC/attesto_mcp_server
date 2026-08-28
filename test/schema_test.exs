@@ -195,6 +195,27 @@ defmodule AttestoMCP.Server.SchemaTest do
                "unevaluatedItems" => false
              })
 
+    assert :ok =
+             Schema.validate([1], %{
+               "$defs" => %{"tuple" => %{"prefixItems" => [%{"type" => "integer"}]}},
+               "allOf" => [%{"$ref" => "#/$defs/tuple"}],
+               "unevaluatedItems" => false
+             })
+
+    assert {:error, :unevaluated_items} =
+             Schema.validate([1, 2], %{
+               "$defs" => %{"tuple" => %{"prefixItems" => [%{"type" => "integer"}]}},
+               "allOf" => [%{"$ref" => "#/$defs/tuple"}],
+               "unevaluatedItems" => false
+             })
+
+    assert :ok =
+             Schema.validate(%{"x" => 1}, %{
+               "$defs" => %{"props" => %{"properties" => %{"x" => %{"type" => "integer"}}}},
+               "allOf" => [%{"$ref" => "#/$defs/props"}],
+               "unevaluatedProperties" => false
+             })
+
     assert {:error, _} =
              Schema.validate(["head", 2], %{
                "prefixItems" => [%{"type" => "string"}],

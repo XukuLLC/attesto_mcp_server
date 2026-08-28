@@ -120,7 +120,7 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     Process.sleep(50)
     Server.publish(server, %{"type" => "toolsListChanged"})
     Process.sleep(50)
-    Server.close_subscription(server, 99)
+    Server.close_subscription(server, 99, pid)
 
     assert_receive {:subscription_done, conn}, 2_000
     assert conn.status == 200
@@ -187,7 +187,7 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
              })
 
     Process.sleep(50)
-    Server.close_subscription(server, 109)
+    Server.close_subscription(server, 109, pid)
 
     assert_receive {:catalog_stream, conn}, 2_000
     messages = stream_messages(conn)
@@ -222,7 +222,7 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     Server.publish(server, %{"type" => "toolsListChanged"})
     Server.publish(server, %{"type" => "promptsListChanged"})
     Process.sleep(50)
-    Server.close_subscription(server, 100)
+    Server.close_subscription(server, 100, first)
 
     assert_receive {:subscription_done, 100, first_conn}, 2_000
     first_messages = stream_messages(first_conn)
@@ -247,7 +247,7 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     Server.publish(server, %{"type" => "toolsListChanged"})
     Server.publish(server, %{"type" => "promptsListChanged"})
     Process.sleep(50)
-    Server.close_subscription(server, 101)
+    Server.close_subscription(server, 101, second)
 
     assert_receive {:subscription_done, 101, second_conn}, 2_000
     second_messages = stream_messages(second_conn)
@@ -272,6 +272,46 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
 
     refute Process.alive?(first)
     refute Process.alive?(second)
+  end
+
+  test "a timed-out HTTP subscription leaves no terminal signal for a reused id" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        subscription_timeout: 15,
+        auth: [config: config, resource: @resource]
+      )
+
+    first =
+      plug
+      |> listen_conn(token, 140, %{"toolsListChanged" => true})
+      |> AttestoMCP.Server.Plug.call(plug)
+
+    assert Enum.map(stream_messages(first), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             nil
+           ]
+
+    refute_receive {:mcp_subscription_close, 140}, 25
+    refute_receive {:mcp_subscription_cancel, 140}, 25
+
+    second =
+      plug
+      |> listen_conn(token, 140, %{"toolsListChanged" => true})
+      |> AttestoMCP.Server.Plug.call(plug)
+
+    assert Enum.map(stream_messages(second), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             nil
+           ]
+
+    refute_receive {:mcp_subscription_close, 140}, 25
+    refute_receive {:mcp_subscription_cancel, 140}, 25
   end
 
   defp start_stream(parent, plug, token, id, filter) do

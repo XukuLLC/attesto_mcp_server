@@ -5,6 +5,8 @@ defmodule AttestoMCP.Server.Subscriptions do
   alias AttestoMCP.Server.Telemetry
 
   @max_queue 128
+  @max_resource_uri_bytes 4_096
+  @max_resource_uris 128
 
   @typedoc "Modern subscription category flags and resource URI filters."
   @type filter :: %{optional(String.t()) => boolean() | [String.t()]}
@@ -36,7 +38,7 @@ defmodule AttestoMCP.Server.Subscriptions do
 
   @doc "Acknowledges one delivered event and releases queue capacity."
   @spec ack(pid(), term()) :: :ok
-  def ack(pid, id), do: GenServer.cast(pid, {:ack, id})
+  def ack(pid, id), do: GenServer.cast(pid, {:ack, id, self()})
 
   @doc "Returns bounded public counters for active subscriptions and queued events."
   @spec stats(pid()) :: %{count: non_neg_integer(), queued: non_neg_integer()}
@@ -44,14 +46,14 @@ defmodule AttestoMCP.Server.Subscriptions do
 
   @doc "Gracefully closes one subscription."
   @spec close(pid(), term()) :: :ok
-  def close(pid, id), do: GenServer.call(pid, {:close, id, nil})
+  def close(pid, id), do: GenServer.call(pid, {:close, id, self()})
 
   @spec close(pid(), term(), pid() | nil) :: :ok
   def close(pid, id, owner), do: GenServer.call(pid, {:close, id, owner})
 
   @doc "Cancels one subscription without affecting its peers."
   @spec cancel(pid(), term()) :: :ok
-  def cancel(pid, id), do: GenServer.call(pid, {:cancel, id, nil})
+  def cancel(pid, id), do: GenServer.call(pid, {:cancel, id, self()})
 
   @spec cancel(pid(), term(), pid() | nil) :: :ok
   def cancel(pid, id, owner), do: GenServer.call(pid, {:cancel, id, owner})
@@ -104,33 +106,37 @@ defmodule AttestoMCP.Server.Subscriptions do
     {:reply, %{count: map_size(state.subscriptions), queued: queued}, state}
   end
 
-  def handle_call({:close, id, owner}, _from, state) do
+  def handle_call({:close, id, owner}, {caller, _tag}, state) do
     Telemetry.execute([:subscription, :close], %{count: 1}, %{transport: :core})
 
     key = find_key(state, id, owner)
 
     case state.subscriptions[key] do
-      %{sink: sink} when is_pid(sink) -> send(sink, {:mcp_subscription_close, id})
-      _ -> :ok
+      %{sink: sink} when is_pid(sink) and sink != caller ->
+        send(sink, {:mcp_subscription_close, id})
+
+      _ ->
+        :ok
     end
 
     {:reply, :ok, remove(state, key)}
   end
 
-  def handle_call({:cancel, id, owner}, _from, state) do
+  def handle_call({:cancel, id, owner}, {caller, _tag}, state) do
     key = find_key(state, id, owner)
 
     case state.subscriptions[key] do
-      %{sink: sink} when is_pid(sink) -> send(sink, {:mcp_subscription_cancel, id})
-      _ -> :ok
+      %{sink: sink} when is_pid(sink) and sink != caller ->
+        send(sink, {:mcp_subscription_cancel, id})
+
+      _ ->
+        :ok
     end
 
     {:reply, :ok, remove(state, key)}
   end
 
   @impl true
-  def handle_cast({:ack, id}, state), do: handle_cast({:ack, id, nil}, state)
-
   def handle_cast({:ack, id, owner}, state) do
     key = find_key(state, id, owner)
 
@@ -176,18 +182,32 @@ defmodule AttestoMCP.Server.Subscriptions do
     {:noreply, Enum.reduce(ids, state, &remove(&2, &1))}
   end
 
-  defp choose_id(nil, _sink, state) do
-    id = "sub_" <> Integer.to_string(state.seq + 1)
-    {:ok, id, %{state | seq: state.seq + 1}}
+  defp choose_id(nil, sink, state) when is_pid(sink), do: choose_generated_id(sink, state)
+
+  defp choose_id(id, sink, state) when is_binary(id) and is_pid(sink) do
+    id = :binary.copy(id)
+
+    if Map.has_key?(state.subscriptions, {sink, id}),
+      do: {:error, :duplicate},
+      else: {:ok, id, state}
   end
 
-  defp choose_id(id, sink, state) when (is_binary(id) or is_integer(id)) and is_pid(sink) do
+  defp choose_id(id, sink, state) when is_integer(id) and is_pid(sink) do
     if Map.has_key?(state.subscriptions, {sink, id}),
       do: {:error, :duplicate},
       else: {:ok, id, state}
   end
 
   defp choose_id(_, _sink, _state), do: {:error, :invalid_id}
+
+  defp choose_generated_id(sink, state) do
+    id = "sub_" <> Integer.to_string(state.seq + 1)
+    state = %{state | seq: state.seq + 1}
+
+    if Map.has_key?(state.subscriptions, {sink, id}),
+      do: choose_generated_id(sink, state),
+      else: {:ok, id, state}
+  end
 
   defp normalize_filter(filter) when is_map(filter) do
     keys = [
@@ -197,7 +217,7 @@ defmodule AttestoMCP.Server.Subscriptions do
       "resourceSubscriptions"
     ]
 
-    if Enum.any?(Map.keys(filter), fn key -> to_string(key) not in keys end) do
+    if Enum.any?(Map.keys(filter), &(not allowed_filter_key?(&1, keys))) do
       {:error, :unknown_filter}
     else
       with {:ok, tools} <- boolean_value(filter, "toolsListChanged"),
@@ -221,6 +241,10 @@ defmodule AttestoMCP.Server.Subscriptions do
   end
 
   defp normalize_filter(_), do: {:error, :invalid_filter}
+
+  defp allowed_filter_key?(key, keys) when is_binary(key), do: key in keys
+  defp allowed_filter_key?(key, keys) when is_atom(key), do: Atom.to_string(key) in keys
+  defp allowed_filter_key?(_key, _keys), do: false
 
   defp boolean_value(filter, key) do
     case Map.fetch(filter, key) do
@@ -247,8 +271,37 @@ defmodule AttestoMCP.Server.Subscriptions do
   defp resource_filter(filter) do
     value = Map.get(filter, "resourceSubscriptions", Map.get(filter, :resourceSubscriptions, []))
 
-    if is_list(value) and Enum.all?(value, &is_binary/1), do: {:ok, value}, else: :error
+    if is_list(value) do
+      case Enum.reduce_while(value, {[], %{}}, fn uri, {uris, seen} ->
+             cond do
+               not valid_resource_uri?(uri) ->
+                 {:halt, :error}
+
+               Map.has_key?(seen, uri) ->
+                 {:cont, {uris, seen}}
+
+               map_size(seen) >= @max_resource_uris ->
+                 {:halt, :error}
+
+               true ->
+                 uri = :binary.copy(uri)
+                 {:cont, {[uri | uris], Map.put(seen, uri, true)}}
+             end
+           end) do
+        {uris, _seen} -> {:ok, Enum.reverse(uris)}
+        :error -> :error
+      end
+    else
+      :error
+    end
   end
+
+  defp valid_resource_uri?(uri)
+       when is_binary(uri) and byte_size(uri) in 1..@max_resource_uri_bytes do
+    String.valid?(uri) and not String.contains?(uri, ["\u0000", "\r", "\n"])
+  end
+
+  defp valid_resource_uri?(_uri), do: false
 
   defp deliver(state, id, subscription, notification, opts) do
     event = event_for(notification, id)
@@ -337,23 +390,52 @@ defmodule AttestoMCP.Server.Subscriptions do
   defp category_for("notifications/resources/updated"), do: "resourceSubscriptions"
   defp category_for(_), do: nil
 
-  defp resource_uri(params) when is_map(params),
-    do: params["uri"] || get_in(params, ["resource", "uri"])
+  defp resource_uri(params) when is_map(params) do
+    if is_struct(params) do
+      nil
+    else
+      direct = Map.get(params, "uri") || Map.get(params, :uri)
+      resource = Map.get(params, "resource") || Map.get(params, :resource)
+
+      direct ||
+        if is_map(resource) and not is_struct(resource) do
+          Map.get(resource, "uri") || Map.get(resource, :uri)
+        end
+    end
+  end
 
   defp resource_uri(_), do: nil
 
-  defp event_for(%{"method" => method, "params" => params}, id) when is_binary(method) do
-    put_subscription_meta(%{"jsonrpc" => "2.0", "method" => method, "params" => params}, id)
+  defp event_for(%{"method" => method, "params" => params}, id)
+       when is_binary(method) and is_map(params) do
+    if valid_metadata_object?(params),
+      do:
+        put_subscription_meta(%{"jsonrpc" => "2.0", "method" => method, "params" => params}, id),
+      else: %{}
   end
 
-  defp event_for(%{method: method, params: params}, id) when is_binary(method),
-    do: event_for(%{"method" => method, "params" => params}, id)
+  defp event_for(%{"method" => method}, _id) when is_binary(method), do: %{}
+
+  defp event_for(%{method: method, params: params}, id)
+       when is_binary(method) and is_map(params) do
+    if valid_metadata_object?(params),
+      do: event_for(%{"method" => method, "params" => params}, id),
+      else: %{}
+  end
+
+  defp event_for(%{method: method}, _id) when is_binary(method), do: %{}
 
   defp event_for(notification, id) when is_map(notification) do
-    type = notification["type"] || notification[:type]
+    if valid_metadata_object?(notification),
+      do: event_for_type(notification, id),
+      else: %{}
+  end
 
+  defp event_for(_, _), do: %{}
+
+  defp event_for_type(notification, id) do
     {method, params} =
-      case to_string(type) do
+      case notification_type(notification) do
         "toolsListChanged" ->
           {"notifications/tools/list_changed", notification_meta(notification)}
 
@@ -364,13 +446,13 @@ defmodule AttestoMCP.Server.Subscriptions do
           {"notifications/resources/list_changed", notification_meta(notification)}
 
         "resourceSubscriptions" ->
-          {"notifications/resources/updated", Map.delete(notification, "type")}
+          {"notifications/resources/updated", notification_params(notification)}
 
         "resource" ->
-          {"notifications/resources/updated", Map.delete(notification, "type")}
+          {"notifications/resources/updated", notification_params(notification)}
 
         "resourceUpdated" ->
-          {"notifications/resources/updated", Map.delete(notification, "type")}
+          {"notifications/resources/updated", notification_params(notification)}
 
         _ ->
           {nil, %{}}
@@ -379,23 +461,52 @@ defmodule AttestoMCP.Server.Subscriptions do
     if method,
       do:
         put_subscription_meta(%{"jsonrpc" => "2.0", "method" => method, "params" => params}, id),
-      else: notification
+      else: %{}
   end
 
-  defp event_for(_, _), do: %{}
-
   defp put_subscription_meta(event, id) do
-    params = Map.get(event, "params", %{})
-    meta = Map.put(Map.get(params, "_meta", %{}), "io.modelcontextprotocol/subscriptionId", id)
+    params = plain_map(Map.get(event, "params"))
+    meta = plain_map(Map.get(params, "_meta") || Map.get(params, :_meta))
+    params = Map.delete(params, :_meta)
+    meta = Map.put(meta, "io.modelcontextprotocol/subscriptionId", id)
     Map.put(event, "params", Map.put(params, "_meta", meta))
   end
 
+  defp valid_metadata_object?(value) when is_map(value) do
+    not is_struct(value) and
+      Enum.all?([Map.fetch(value, "_meta"), Map.fetch(value, :_meta)], fn
+        :error -> true
+        {:ok, meta} -> is_map(meta) and not is_struct(meta)
+      end)
+  end
+
+  defp notification_type(notification) do
+    case Map.get(notification, "type") || Map.get(notification, :type) do
+      type when is_binary(type) -> type
+      type when is_atom(type) -> Atom.to_string(type)
+      _ -> nil
+    end
+  end
+
+  defp notification_params(notification) do
+    notification
+    |> Map.delete("type")
+    |> Map.delete(:type)
+    |> plain_map()
+  end
+
   defp notification_meta(notification) when is_map(notification) do
-    case notification["_meta"] || notification[:_meta] do
-      meta when is_map(meta) -> %{"_meta" => meta}
+    case Map.get(notification, "_meta") || Map.get(notification, :_meta) do
+      meta when is_map(meta) -> if(is_struct(meta), do: %{}, else: %{"_meta" => meta})
       _ -> %{}
     end
   end
+
+  defp plain_map(value) when is_map(value) do
+    if is_struct(value), do: %{}, else: value
+  end
+
+  defp plain_map(_value), do: %{}
 
   defp acknowledgement(id, filter) do
     %{
@@ -421,9 +532,5 @@ defmodule AttestoMCP.Server.Subscriptions do
 
   defp find_key(_state, id, owner) when is_pid(owner), do: {owner, id}
 
-  defp find_key(state, id, nil) do
-    Enum.find_value(state.subscriptions, fn {key, subscription} ->
-      if is_map(subscription) and subscription.id == id, do: key
-    end)
-  end
+  defp find_key(_state, _id, nil), do: nil
 end

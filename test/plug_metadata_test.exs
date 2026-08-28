@@ -148,17 +148,114 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
     assert conn.status == 503
   end
 
+  test "server-state exits are contained as service unavailable" do
+    server =
+      spawn(fn ->
+        receive do
+          {:"$gen_call", _from, :options} -> exit(:simulated_server_failure)
+        end
+      end)
+
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+      )
+
+    response = AttestoMCP.Server.Plug.call(conn(:get, "/mcp"), state)
+    assert response.status == 503
+    assert response.resp_body == "service unavailable"
+  end
+
+  test "throws and exits are contained with HTTP exception telemetry", %{server: server} do
+    handler_id = {__MODULE__, :http_failure, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:attesto_mcp_server, :http_request, :exception],
+        &__MODULE__.http_failure_event/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    for failure <- [:throw, :exit] do
+      config = fn ->
+        case failure do
+          :throw -> throw(:simulated_auth_config_failure)
+          :exit -> exit(:simulated_auth_config_failure)
+        end
+      end
+
+      state =
+        AttestoMCP.Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          auth: [config: config, resource: "http://www.example.com/mcp"]
+        )
+
+      response =
+        AttestoMCP.Server.Plug.call(
+          conn(:get, "/.well-known/oauth-protected-resource/mcp"),
+          state
+        )
+
+      assert response.status == 500
+      assert response.resp_body == "internal server error"
+
+      assert_receive {:http_failure, measurements,
+                      %{status: 500, outcome: :exception, transport: :http}}
+
+      assert is_integer(measurements.duration)
+      assert measurements.duration >= 0
+    end
+  end
+
+  test "failure containment preserves an already-sent connection", %{server: server} do
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [
+          config: fn -> throw(:simulated_auth_config_failure) end,
+          resource: "http://www.example.com/mcp"
+        ]
+      )
+
+    sent =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> send_resp(204, "already sent")
+
+    assert AttestoMCP.Server.Plug.call(sent, state) == sent
+  end
+
   test "Plug rejects unsafe paths and unknown options", %{server: server} do
     base = [
       server: server,
       auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
     ]
 
-    assert_raise ArgumentError, fn -> AttestoMCP.Server.Plug.init(base ++ [path: "/mcp/../x"]) end
-    assert_raise ArgumentError, fn -> AttestoMCP.Server.Plug.init(base ++ [path: "/mcp?x=1"]) end
+    for path <- [
+          "/mcp/../x",
+          "/mcp?x=1",
+          "/literal\\segment",
+          "/encoded%3Asegment",
+          "/:tenant/mcp",
+          "/mcp/*rest",
+          "/café",
+          "/mcp{unsafe}"
+        ] do
+      assert_raise ArgumentError, fn -> AttestoMCP.Server.Plug.init(base ++ [path: path]) end
+    end
 
     assert_raise ArgumentError, ~r/unknown Plug option/, fn ->
       AttestoMCP.Server.Plug.init(base ++ [unknown: true])
     end
+  end
+
+  def http_failure_event(_event, measurements, metadata, receiver) do
+    send(receiver, {:http_failure, measurements, metadata})
   end
 end

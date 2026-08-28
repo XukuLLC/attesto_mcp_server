@@ -35,6 +35,24 @@ defmodule AttestoMCP.Server.JSONRPCTest do
     assert JSONRPC.recover_id(Map.put(parsed, "id", nil)) == nil
   end
 
+  test "detaches bounded string IDs from a larger decoded request body" do
+    id = String.duplicate("i", 256)
+
+    payload =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "method" => "ping",
+        "params" => %{"padding" => String.duplicate("p", 800_000)}
+      })
+
+    assert {:ok, %{kind: :request, id: decoded_id}} =
+             JSONRPC.decode(payload, max_bytes: 900_000)
+
+    assert decoded_id == id
+    assert :binary.referenced_byte_size(decoded_id) == byte_size(decoded_id)
+  end
+
   test "preserves unknown extension members on every JSON-RPC message kind" do
     assert {:ok, %{kind: :request, extensions: %{"x-request" => %{"value" => 1}}}} =
              JSONRPC.decode(~s({"jsonrpc":"2.0","id":1,"method":"ping","x-request":{"value":1}}))

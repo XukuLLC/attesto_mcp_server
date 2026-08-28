@@ -17,6 +17,8 @@ jobs:
           elixir-version: "1.18.3"
           otp-version: "27.3"
           version-type: strict
+      - name: install pinned Phoenix project generator
+        run: mix archive.install hex phx_new 1.8.13 --force
       - run: scripts/check_installer_compat.sh
 
   verify:

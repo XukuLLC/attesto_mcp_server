@@ -124,13 +124,111 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     Server.publish(server, %{"type" => "resource", "uri" => "urn:other"})
     refute_receive {:mcp_legacy_event, ^stream, _, _}, 100
 
+    Server.publish(server, %{"type" => "resourceSubscriptions", "uri" => "urn:other"})
+    refute_receive {:mcp_legacy_event, ^stream, _, _}, 100
+
+    assert {:error, :invalid_notification} =
+             Server.publish(server, %{
+               "type" => "resource",
+               "uri" => "urn:one",
+               "_meta" => 5,
+               "unexpected" => true
+             })
+
+    refute_receive {:mcp_legacy_event, ^stream, _, _}, 100
+
+    Server.publish(server, %{"type" => "resourceSubscriptions", "uri" => "urn:one"})
+    assert_receive {:mcp_legacy_event, ^stream, alias_event_id, alias_event}, 1_000
+    assert alias_event_id == 1
+    assert alias_event["method"] == "notifications/resources/updated"
+
     Server.publish(server, %{"type" => "resource", "uri" => "urn:one"})
     assert_receive {:mcp_legacy_event, ^stream, event_id, event}, 1_000
-    assert event_id == 1
+    assert event_id == 2
     assert event["method"] == "notifications/resources/updated"
 
     Server.delete_session(server, session.id)
     assert_receive {:mcp_legacy_close, ^stream, :session_deleted}, 1_000
+  end
+
+  test "legacy resource subscriptions bound URI bytes and per-session entries" do
+    {:ok, server} = Server.start_link([])
+    {:ok, session} = Server.new_session(server, "bounded", nil)
+
+    assert :ok = Server.negotiate_session(server, session.id, "bounded", nil, @legacy, %{})
+    assert :ok = Server.mark_initialized(server, session.id)
+
+    assert {:error, :invalid_uri} =
+             Server.subscribe_resource(
+               server,
+               session.id,
+               "bounded",
+               nil,
+               "urn:" <> String.duplicate("x", 4_093)
+             )
+
+    for uri <- ["", <<255>>, "urn:bad\0", "urn:bad\r", "urn:bad\n"] do
+      assert {:error, :invalid_uri} =
+               Server.subscribe_resource(server, session.id, "bounded", nil, uri)
+    end
+
+    boundary_uri = "urn:" <> String.duplicate("x", 4_092)
+    assert byte_size(boundary_uri) == 4_096
+    assert :ok = Server.subscribe_resource(server, session.id, "bounded", nil, boundary_uri)
+    assert :ok = Server.unsubscribe_resource(server, session.id, "bounded", nil, boundary_uri)
+
+    backing =
+      String.duplicate("p", 100_000) <>
+        "urn:" <> String.duplicate("r", 4_092) <> String.duplicate("s", 100_000)
+
+    retained_uri = binary_part(backing, 100_000, 4_096)
+    assert :binary.referenced_byte_size(retained_uri) > byte_size(retained_uri)
+    assert :ok = Server.subscribe_resource(server, session.id, "bounded", nil, retained_uri)
+    assert {:ok, retained} = Server.get_session(server, session.id, "bounded", nil)
+    stored_uri = retained.resource_subscriptions |> Map.keys() |> List.first()
+    assert stored_uri == retained_uri
+    assert :binary.referenced_byte_size(stored_uri) == byte_size(stored_uri)
+    assert :ok = Server.unsubscribe_resource(server, session.id, "bounded", nil, retained_uri)
+
+    for index <- 1..128 do
+      assert :ok =
+               Server.subscribe_resource(
+                 server,
+                 session.id,
+                 "bounded",
+                 nil,
+                 "urn:bounded:#{index}"
+               )
+    end
+
+    assert :ok =
+             Server.subscribe_resource(server, session.id, "bounded", nil, "urn:bounded:1")
+
+    assert {:error, :limit_reached} =
+             Server.subscribe_resource(server, session.id, "bounded", nil, "urn:bounded:129")
+
+    assert {20, %{"error" => %{"code" => -32602, "data" => limit_data}}} =
+             Server.dispatch(
+               server,
+               %{
+                 kind: :request,
+                 id: 20,
+                 method: "resources/subscribe",
+                 params: %{"uri" => "urn:bounded:129"}
+               },
+               %{principal: "bounded", session_id: session.id},
+               version: @legacy
+             )
+
+    assert limit_data["reason"] == "resource_subscription_limit"
+    assert {:ok, current} = Server.get_session(server, session.id, "bounded", nil)
+    assert map_size(current.resource_subscriptions) == 128
+
+    assert :ok =
+             Server.unsubscribe_resource(server, session.id, "bounded", nil, "urn:bounded:1")
+
+    assert :ok =
+             Server.subscribe_resource(server, session.id, "bounded", nil, "urn:bounded:129")
   end
 
   test "2025-06-18 omits newer catalog icons and rejects newer client-request modes" do

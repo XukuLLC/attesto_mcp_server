@@ -1702,7 +1702,7 @@ defmodule AttestoMCP.Server.Schema do
         evaluated_indices_local(value, local, root, depth + 1)
 
       {:ref, target, siblings} ->
-        evaluated_indices(target, value, root, depth + 1)
+        evaluated_indices(value, target, root, depth + 1)
         |> MapSet.union(evaluated_indices_local(value, siblings, root, depth + 1))
 
       {:error, _} ->
