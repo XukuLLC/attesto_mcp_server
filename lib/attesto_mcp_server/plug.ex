@@ -9,6 +9,13 @@ defmodule AttestoMCP.Server.Plug do
   defined by RFC 9728. Hosts may select
   request-scoped tool streams with `stream_tools` or `stream_all_tools`; both
   options are validated during `init/1`.
+
+  `:auth` accepts either a keyword list or a zero-arity remote callback/MFA
+  returning one. Resolver-backed authentication is evaluated for every
+  applicable MCP or metadata request, so runtime authorization configuration
+  is not captured by router compilation. It requires a canonical resource or
+  origin in the Plug's top-level options and may not replace the boundary's
+  canonical assign keys; resolver failures fail the request closed.
   """
   import Plug.Conn
 
@@ -26,6 +33,13 @@ defmodule AttestoMCP.Server.Plug do
   @max_request_header_value_bytes 8_192
   @max_request_header_bytes 65_536
   @static_path_pattern ~r/\A\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\z/
+  @resolver_assign_keys %{
+    claims_key: :attesto_mcp_claims,
+    context_key: :attesto_context,
+    principal_key: :attesto_mcp_principal,
+    scopes_key: :attesto_mcp_scopes,
+    sender_key: :attesto_mcp_sender
+  }
   @allowed_plug_option_keys [
     :server,
     :path,
@@ -50,10 +64,15 @@ defmodule AttestoMCP.Server.Plug do
   ]
 
   @typedoc "Supported Plug boundary options."
+  @type auth_options_resolver ::
+          (-> keyword())
+          | {module(), atom()}
+          | {module(), atom(), [term()]}
+
   @type plug_option ::
           {:server, pid() | atom()}
           | {:path, String.t()}
-          | {:auth, keyword()}
+          | {:auth, keyword() | auth_options_resolver()}
           | {:scope_map, map()}
           | {:subscription_scopes, [String.t()]}
           | {:max_body_bytes, pos_integer()}
@@ -95,34 +114,19 @@ defmodule AttestoMCP.Server.Plug do
     validate_plug_options!(opts)
     validate_path!(path)
 
-    auth_opts =
-      normalize_auth_options(opts, path)
-      |> Keyword.put_new(:principal, &__MODULE__.default_principal/2)
-
-    if not pinned_resource?(auth_opts) do
-      raise ArgumentError,
-            "auth must pin :resource/:resource_audience or :base_url/:origin; " <>
-              "set :allow_dynamic_origin only for explicitly local development"
-    end
-
-    validate_resource_configuration!(auth_opts)
-
-    if not usable_auth_configuration?(auth_opts) do
-      raise ArgumentError,
-            "auth must configure an executable Attesto verifier (config or issuer)"
-    end
+    {auth_opts, auth_boundary, auth_resolver} = initialize_authentication(opts, path)
 
     validate_stream_options!(opts)
     validate_scope_map_option!(Keyword.get(opts, :scope_map))
     validate_subscription_scopes!(Keyword.get(opts, :subscription_scopes))
-
-    auth_boundary = prepare_protect_resource(auth_opts)
 
     %{
       server: server,
       path: path,
       auth_opts: auth_opts,
       auth_boundary: auth_boundary,
+      auth_resolver: auth_resolver,
+      auth_source_opts: opts,
       opts: opts
     }
   end
@@ -179,9 +183,21 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_subscription_scopes!(_),
     do: raise(ArgumentError, ":subscription_scopes must be a list of unique strings")
 
-  defp normalize_auth_options(opts, path) do
-    nested = Keyword.get(opts, :auth, [])
+  defp initialize_authentication(opts, path) do
+    case Keyword.get(opts, :auth, []) do
+      nested when is_list(nested) ->
+        auth_opts = normalize_auth_options(opts, path, nested)
+        validate_auth_options!(auth_opts)
+        {auth_opts, prepare_protect_resource(auth_opts), nil}
 
+      resolver ->
+        validate_auth_resolver!(resolver)
+        validate_resolver_resource_pin!(opts, path)
+        {nil, nil, resolver}
+    end
+  end
+
+  defp normalize_auth_options(opts, path, nested) do
     unless Keyword.keyword?(nested),
       do: raise(ArgumentError, ":auth must be a keyword list")
 
@@ -199,7 +215,133 @@ defmodule AttestoMCP.Server.Plug do
     [resource_path: path, bearer_methods: [:header]]
     |> Keyword.merge(nested)
     |> Keyword.merge(top)
+    |> Keyword.put_new(:principal, &__MODULE__.default_principal/2)
   end
+
+  defp validate_auth_options!(auth_opts) do
+    if not pinned_resource?(auth_opts) do
+      raise ArgumentError,
+            "auth must pin :resource/:resource_audience or :base_url/:origin; " <>
+              "set :allow_dynamic_origin only for explicitly local development"
+    end
+
+    validate_resource_configuration!(auth_opts)
+
+    if not usable_auth_configuration?(auth_opts) do
+      raise ArgumentError,
+            "auth must configure an executable Attesto verifier (config or issuer)"
+    end
+
+    :ok
+  end
+
+  defp validate_auth_resolver!(resolver) when is_function(resolver, 0) do
+    case Function.info(resolver, :type) do
+      {:type, :external} -> :ok
+      _ -> invalid_auth_resolver!()
+    end
+  end
+
+  defp validate_auth_resolver!({module, function})
+       when is_atom(module) and is_atom(function) do
+    validate_portable_mfa!({module, function})
+  end
+
+  defp validate_auth_resolver!({module, function, args})
+       when is_atom(module) and is_atom(function) and is_list(args) do
+    validate_portable_mfa!({module, function, args})
+  end
+
+  defp validate_auth_resolver!(_resolver), do: invalid_auth_resolver!()
+
+  defp invalid_auth_resolver! do
+    raise ArgumentError,
+          ":auth must be a keyword list or a zero-arity remote callback/MFA returning one"
+  end
+
+  defp validate_portable_mfa!(resolver) do
+    if resolver |> Macro.escape() |> Macro.quoted_literal?() do
+      :ok
+    else
+      raise ArgumentError,
+            ":auth resolver MFA arguments must be portable compile-time literals"
+    end
+  rescue
+    ArgumentError ->
+      raise ArgumentError,
+            ":auth resolver MFA arguments must be portable compile-time literals"
+  end
+
+  defp validate_resolver_resource_pin!(opts, path) do
+    top =
+      [resource_path: path]
+      |> Keyword.merge(Keyword.take(opts, [:resource, :resource_audience, :base_url, :origin]))
+
+    validate_resource_configuration!(top)
+
+    if not pinned_resource?(top) do
+      raise ArgumentError,
+            "resolver-backed auth requires a statically pinned top-level " <>
+              ":resource/:resource_audience or :base_url/:origin"
+    end
+
+    :ok
+  end
+
+  defp resolve_authentication!(%{auth_resolver: nil} = state), do: state
+
+  defp resolve_authentication!(%{auth_resolver: resolver} = state) do
+    nested = invoke_auth_resolver(resolver)
+    validate_resolver_boundary_options!(nested, state.path)
+    auth_opts = normalize_auth_options(state.auth_source_opts, state.path, nested)
+    validate_auth_options!(auth_opts)
+
+    %{
+      state
+      | auth_opts: auth_opts,
+        auth_boundary: prepare_protect_resource(auth_opts)
+    }
+  end
+
+  defp invoke_auth_resolver(resolver) when is_function(resolver, 0), do: resolver.()
+
+  defp invoke_auth_resolver({module, function})
+       when is_atom(module) and is_atom(function),
+       do: apply(module, function, [])
+
+  defp invoke_auth_resolver({module, function, args})
+       when is_atom(module) and is_atom(function) and is_list(args),
+       do: apply(module, function, args)
+
+  defp validate_resolver_boundary_options!(options, path) do
+    unless Keyword.keyword?(options),
+      do: raise(ArgumentError, ":auth resolver must return a keyword list")
+
+    Enum.each(@resolver_assign_keys, fn {key, expected} ->
+      if Enum.any?(Keyword.get_values(options, key), &(&1 != expected)) do
+        raise ArgumentError,
+              ":auth resolver cannot override #{inspect(key)}; expected #{inspect(expected)}"
+      end
+    end)
+
+    bearer_methods = Keyword.get_values(options, :bearer_methods)
+
+    if bearer_methods != [] and
+         not Enum.all?(bearer_methods, &resolver_header_bearer_methods?/1) do
+      raise ArgumentError,
+            ":auth resolver bearer_methods must contain only :header so protected-resource metadata remains exact"
+    end
+
+    if Enum.any?(Keyword.get_values(options, :resource_path), &(&1 != path)) do
+      raise ArgumentError,
+            ":auth resolver cannot override resource_path; expected #{inspect(path)}"
+    end
+  end
+
+  defp resolver_header_bearer_methods?(methods) when is_list(methods) and methods != [],
+    do: Enum.all?(methods, &(&1 in [:header, "header"]))
+
+  defp resolver_header_bearer_methods?(_methods), do: false
 
   @doc "Authenticates and serves one HTTP request through the MCP boundary."
   @spec call(Plug.Conn.t(), map()) :: Plug.Conn.t()
@@ -217,6 +359,7 @@ defmodule AttestoMCP.Server.Plug do
       result =
         cond do
           conn.method == "GET" and metadata_path?(conn, state.path) ->
+            state = resolve_authentication!(state)
             metadata(conn, state)
 
           conn.request_path != state.path ->
@@ -229,14 +372,15 @@ defmodule AttestoMCP.Server.Plug do
                   request_headers_over_budget?(conn) ->
                     send_resp(conn, 431, "request headers too large")
 
-                  invalid_origin?(conn, state) ->
-                    send_resp(conn, 403, "forbidden origin")
-
                   conn.method not in ["POST", "GET", "DELETE"] ->
                     send_resp(conn, 405, "method not allowed")
 
                   true ->
-                    protected(conn, state)
+                    state = resolve_authentication!(state)
+
+                    if invalid_origin?(conn, state),
+                      do: send_resp(conn, 403, "forbidden origin"),
+                      else: protected(conn, state)
                 end
 
               :unavailable ->

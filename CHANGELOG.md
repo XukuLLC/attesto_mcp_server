@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.5 - 2026-08-28
+
+- Carry the host's current AttestoPhoenix protected-resource adapter options
+  into generated MCP routes, including DPoP replay/nonce, canonical-request,
+  and mTLS certificate callbacks, instead of retaining only the core verifier.
+- Resolve automatic AttestoPhoenix authentication at request time while
+  keeping the canonical resource and public origin statically pinned. Resolver
+  failures fail closed; on protected MCP requests, unavailable servers,
+  oversized headers, and unsupported methods are rejected before runtime
+  configuration is requested.
+- Add a constrained runtime auth resolver contract for external zero-arity
+  callbacks and portable-literal MFA values. Generated routes remain safe for
+  Phoenix compile-time Plug initialization and cannot replace package-owned
+  assigns or advertise unsupported bearer-token locations.
+- Migrate only exact legacy installer-owned AttestoPhoenix forwards, including
+  interrupted mixed old/new installations, while preserving application tool
+  registrations, refusing near matches, and leaving nested quoted examples
+  untouched.
+
 ## 0.10.4 - 2026-08-28
 
 - Preserve Attesto's scheme-correct OAuth challenges and error details for

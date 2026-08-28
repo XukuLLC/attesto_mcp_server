@@ -4,6 +4,20 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
   import Plug.Test
   alias AttestoMCP.Server
 
+  defmodule RuntimeAuth do
+    @moduledoc false
+
+    def effective(counter) do
+      Agent.update(counter, &(&1 + 1))
+      [config: %{issuer: "https://runtime-issuer.example"}]
+    end
+
+    def unavailable(counter) do
+      Agent.update(counter, &(&1 + 1))
+      raise "runtime authorization configuration unavailable"
+    end
+  end
+
   setup do
     {:ok, server} =
       DynamicSupervisor.start_child(
@@ -51,6 +65,53 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
 
     assert %{"authorization_servers" => ["https://issuer.example"]} =
              Jason.decode!(conn.resp_body)
+  end
+
+  test "metadata uses one effective runtime auth snapshot and the pinned resource", %{
+    server: server
+  } do
+    counter = start_counter()
+
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: {RuntimeAuth, :effective, [counter]},
+        resource: "https://canonical-resource.example/mcp"
+      )
+
+    response =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(state)
+
+    assert response.status == 200
+    assert Agent.get(counter, & &1) == 1
+
+    assert %{
+             "resource" => "https://canonical-resource.example/mcp",
+             "authorization_servers" => ["https://runtime-issuer.example"],
+             "bearer_methods_supported" => ["header"]
+           } = Jason.decode!(response.resp_body)
+  end
+
+  test "runtime auth resolver failure makes metadata generically unavailable", %{server: server} do
+    counter = start_counter()
+
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: {RuntimeAuth, :unavailable, [counter]},
+        resource: "https://canonical-resource.example/mcp"
+      )
+
+    response =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(state)
+
+    assert response.status == 500
+    assert response.resp_body == "internal server error"
+    assert Agent.get(counter, & &1) == 1
   end
 
   test "top-level resource options normalize into the auth boundary", %{server: server} do
@@ -257,5 +318,11 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
 
   def http_failure_event(_event, measurements, metadata, receiver) do
     send(receiver, {:http_failure, measurements, metadata})
+  end
+
+  defp start_counter do
+    name = Module.concat(__MODULE__, "Counter#{System.unique_integer([:positive])}")
+    {:ok, _counter} = Agent.start_link(fn -> 0 end, name: name)
+    name
   end
 end

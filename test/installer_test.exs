@@ -34,7 +34,11 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert diff =~ metadata
     assert diff =~ endpoint
     assert diff =~ "Sample.MCP.MetadataPlug"
-    assert diff =~ "config: &Elixir.Sample.MCP.attesto_config/0"
+
+    assert diff =~
+             "auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:sample]}"
+
+    assert diff =~ ~s(resource: "/mcp")
     assert diff =~ ~s(base_url: "https://mcp.example.com")
     assert byte_offset(diff, metadata) < byte_offset(diff, endpoint)
   end
@@ -54,6 +58,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     diff = Igniter.Test.diff(installed)
 
     assert diff =~ "Sample.Attesto.config()"
+    assert diff =~ "config: &Elixir.Sample.MCP.attesto_config/0"
     refute diff =~ "client_id_metadata"
     refute diff =~ "loopback_include_localhost"
     refute diff =~ ~s({:req, ">= 0.6.1 and < 1.0.0"})
@@ -625,13 +630,32 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert Igniter.Test.diff(installed) == ""
   end
 
-  test "recognizes equivalent forwards that use router aliases" do
+  test "migrates exact v1 AttestoPhoenix forwards without changing managed registrations" do
     installed =
       true
-      |> project(router_source: aliased_installed_router_ex())
+      |> project(
+        router_source: aliased_installed_router_ex(),
+        extra_files: %{"lib/sample/mcp.ex" => legacy_managed_server_ex()}
+      )
       |> install(["--base-url", "https://mcp.example.com"])
 
     assert installed.issues == []
+    diff = Igniter.Test.diff(installed)
+
+    assert diff =~
+             "auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:sample]}"
+
+    assert length(:binary.matches(diff, ":protected_resource_options")) == 2
+    assert Igniter.Test.diff(installed, only: "lib/sample/mcp.ex") == ""
+
+    server_source =
+      installed
+      |> apply_igniter!()
+      |> Map.fetch!(:rewrite)
+      |> Rewrite.source!("lib/sample/mcp.ex")
+      |> Rewrite.Source.get(:content)
+
+    assert server_source =~ ~s(description: "Preserved host registration")
 
     rerun =
       installed
@@ -640,6 +664,64 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
 
     assert rerun.issues == []
     assert_unchanged(rerun)
+  end
+
+  test "refuses a near-match v1 AttestoPhoenix forward without partial edits" do
+    installed =
+      true
+      |> project(
+        router_source: near_match_legacy_router_ex(),
+        extra_files: %{"lib/sample/mcp.ex" => legacy_managed_server_ex()}
+      )
+      |> install(["--base-url", "https://mcp.example.com"])
+
+    assert Enum.any?(installed.issues, &String.contains?(&1, "different forwarding options"))
+    assert Igniter.Test.diff(installed) == ""
+  end
+
+  test "completes a mixed legacy and current AttestoPhoenix route migration" do
+    installed =
+      true
+      |> project(
+        router_source: mixed_installed_router_ex(),
+        extra_files: %{"lib/sample/mcp.ex" => legacy_managed_server_ex()}
+      )
+      |> install(["--base-url", "https://mcp.example.com"])
+
+    assert installed.issues == []
+
+    router_source =
+      installed
+      |> apply_igniter!()
+      |> Map.fetch!(:rewrite)
+      |> Rewrite.source!("lib/sample_web/router.ex")
+      |> Rewrite.Source.get(:content)
+
+    assert length(:binary.matches(router_source, ":protected_resource_options")) == 2
+    refute router_source =~ "config: &Elixir.Sample.MCP.attesto_config/0"
+  end
+
+  test "migrates direct routes without rewriting a quoted legacy example" do
+    installed =
+      true
+      |> project(
+        router_source: router_with_quoted_legacy_example_ex(),
+        extra_files: %{"lib/sample/mcp.ex" => legacy_managed_server_ex()}
+      )
+      |> install(["--base-url", "https://mcp.example.com"])
+
+    assert installed.issues == []
+
+    router_source =
+      installed
+      |> apply_igniter!()
+      |> Map.fetch!(:rewrite)
+      |> Rewrite.source!("lib/sample_web/router.ex")
+      |> Rewrite.Source.get(:content)
+
+    assert length(:binary.matches(router_source, ":protected_resource_options")) == 2
+    assert router_source =~ "defp legacy_example do"
+    assert router_source =~ "config: &Elixir.Sample.MCP.attesto_config/0"
   end
 
   test "does not accept an existing Attesto forward with different options" do
@@ -673,8 +755,6 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
 
     source = """
     defmodule #{root}.Server do
-      def attesto_config, do: :configured
-
       defmodule MetadataPlug do
         @behaviour Plug
         @impl Plug
@@ -687,23 +767,19 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     defmodule #{root}.Router do
       use Phoenix.Router
 
-      forward "/.well-known/oauth-protected-resource/mcp", #{root}.Server.MetadataPlug,
-        server: #{root}.Server,
+      Elixir.Phoenix.Router.forward "/.well-known/oauth-protected-resource/mcp", Elixir.#{root}.Server.MetadataPlug,
+        server: Elixir.#{root}.Server,
         path: "/mcp",
-        auth: [
-          config: &#{root}.Server.attesto_config/0,
-          resource: "/mcp",
-          base_url: "https://mcp.example.com"
-        ]
+        auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:sample]},
+        resource: "/mcp",
+        base_url: "https://mcp.example.com"
 
-      forward "/mcp", AttestoMCP.Server.Plug,
-        server: #{root}.Server,
+      Elixir.Phoenix.Router.forward "/mcp", Elixir.AttestoMCP.Server.Plug,
+        server: Elixir.#{root}.Server,
         path: "/mcp",
-        auth: [
-          config: &#{root}.Server.attesto_config/0,
-          resource: "/mcp",
-          base_url: "https://mcp.example.com"
-        ]
+        auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:sample]},
+        resource: "/mcp",
+        base_url: "https://mcp.example.com"
     end
     """
 
@@ -712,6 +788,19 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert Enum.any?(compiled, fn {module, _bytecode} ->
              module == Module.concat([root, "Router"])
            end)
+
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: :late_installer_compile_server,
+        path: "/mcp",
+        auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:sample]},
+        resource: "/mcp",
+        base_url: "https://mcp.example.com"
+      )
+
+    assert state.auth_opts == nil
+    assert state.auth_boundary == nil
+    assert is_tuple(Macro.escape(state))
   end
 
   defp install(igniter, args), do: Igniter.compose_task(igniter, @task, args)
@@ -728,6 +817,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       }
       |> maybe_put_router(router_source)
       |> maybe_put_config(Keyword.get(options, :config_source))
+      |> Map.merge(Keyword.get(options, :extra_files, %{}))
 
     Igniter.Test.test_project(app_name: :sample, files: files)
   end
@@ -912,6 +1002,186 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
           resource: "/mcp",
           base_url: "https://mcp.example.com"
         ]
+    end
+    """
+  end
+
+  defp mixed_installed_router_ex do
+    """
+    defmodule SampleWeb.Router do
+      use SampleWeb, :router
+
+      Elixir.Phoenix.Router.forward "/.well-known/oauth-protected-resource/mcp", Elixir.Sample.MCP.MetadataPlug,
+        server: Elixir.Sample.MCP,
+        path: "/mcp",
+        auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:sample]},
+        resource: "/mcp",
+        base_url: "https://mcp.example.com"
+
+      Elixir.Phoenix.Router.forward "/mcp", Elixir.AttestoMCP.Server.Plug,
+        server: Elixir.Sample.MCP,
+        path: "/mcp",
+        auth: [
+          config: &Elixir.Sample.MCP.attesto_config/0,
+          resource: "/mcp",
+          base_url: "https://mcp.example.com"
+        ]
+    end
+    """
+  end
+
+  defp router_with_quoted_legacy_example_ex do
+    """
+    defmodule SampleWeb.Router do
+      use SampleWeb, :router
+
+      Elixir.Phoenix.Router.forward "/.well-known/oauth-protected-resource/mcp", Elixir.Sample.MCP.MetadataPlug,
+        server: Elixir.Sample.MCP,
+        path: "/mcp",
+        auth: [
+          config: &Elixir.Sample.MCP.attesto_config/0,
+          resource: "/mcp",
+          base_url: "https://mcp.example.com"
+        ]
+
+      Elixir.Phoenix.Router.forward "/mcp", Elixir.AttestoMCP.Server.Plug,
+        server: Elixir.Sample.MCP,
+        path: "/mcp",
+        auth: [
+          config: &Elixir.Sample.MCP.attesto_config/0,
+          resource: "/mcp",
+          base_url: "https://mcp.example.com"
+        ]
+
+      defp legacy_example do
+        quote do
+          Elixir.Phoenix.Router.forward "/mcp", Elixir.AttestoMCP.Server.Plug,
+            server: Elixir.Sample.MCP,
+            path: "/mcp",
+            auth: [
+              config: &Elixir.Sample.MCP.attesto_config/0,
+              resource: "/mcp",
+              base_url: "https://mcp.example.com"
+            ]
+        end
+      end
+    end
+    """
+  end
+
+  defp near_match_legacy_router_ex do
+    """
+    defmodule SampleWeb.Router do
+      use SampleWeb, :router
+
+      forward "/.well-known/oauth-protected-resource/mcp", Sample.MCP.MetadataPlug,
+        server: Sample.MCP,
+        path: "/mcp",
+        auth: [
+          config: &Sample.MCP.attesto_config/0,
+          resource: "/mcp",
+          base_url: "https://mcp.example.com"
+        ]
+
+      forward "/mcp", AttestoMCP.Server.Plug,
+        server: Sample.MCP,
+        path: "/mcp",
+        auth: [
+          config: &Sample.MCP.attesto_config/0,
+          resource: "/mcp",
+          base_url: "https://mcp.example.com"
+        ],
+        log: false
+    end
+    """
+  end
+
+  defp legacy_managed_server_ex do
+    """
+    defmodule Sample.MCP do
+      @moduledoc "Application-owned MCP registrations and Attesto integration."
+
+      alias AttestoMCP.Server.API
+
+      @otp_app :sample
+
+      @doc false
+      def __attesto_mcp_server_installer__, do: :v1
+
+      defmodule MetadataPlug do
+        @moduledoc false
+        @behaviour Plug
+
+        @impl Plug
+        defdelegate init(options), to: AttestoMCP.Server.Plug
+
+        @impl Plug
+        defdelegate call(conn, options), to: AttestoMCP.Server.Plug
+      end
+
+      @spec child_spec(keyword()) :: Supervisor.child_spec()
+      def child_spec(options) do
+        %{
+          id: __MODULE__,
+          start: {__MODULE__, :start_link, [options]},
+          type: :worker
+        }
+      end
+
+      @spec start_link(keyword()) :: GenServer.on_start()
+      def start_link(options \\\\ []) do
+        configured =
+          @otp_app
+          |> Application.get_env(__MODULE__, [])
+          |> Keyword.get(:server_options, [])
+
+        options =
+          configured
+          |> Keyword.merge(options)
+          |> Keyword.put_new(:name, __MODULE__)
+          |> Keyword.put_new(:server_name, "sample-mcp")
+          |> Keyword.put_new_lazy(:server_version, &application_version/0)
+
+        case API.start_link(options) do
+          {:ok, server} ->
+            case register(server) do
+              :ok ->
+                {:ok, server}
+
+              {:error, reason} ->
+                GenServer.stop(server)
+                {:error, {:registration_failed, reason}}
+            end
+
+          other ->
+            other
+        end
+      end
+
+      @spec register(API.server()) :: :ok | {:error, term()}
+      def register(server) do
+        API.register_tool(server, "server_status", %{
+          description: "Preserved host registration",
+          input_schema: %{
+            "type" => "object",
+            "properties" => %{},
+            "additionalProperties" => false
+          },
+          handler: fn %{}, _context -> {:ok, "ok"} end
+        })
+      end
+
+      @spec attesto_config() :: term()
+      def attesto_config do
+        AttestoMCP.Server.Phoenix.attesto_config(:sample)
+      end
+
+      defp application_version do
+        case Application.spec(@otp_app, :vsn) do
+          nil -> "0.0.0"
+          version -> to_string(version)
+        end
+      end
     end
     """
   end

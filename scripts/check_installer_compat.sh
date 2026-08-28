@@ -85,6 +85,7 @@ digest_tree() {
 
   test -f lib/installer_host/mcp.ex
   grep -Fq 'children = [InstallerHost.MCP]' lib/installer_host/application.ex
+  grep -Fq ':protected_resource_options' lib/installer_host_web/router.ex
 
   first_digest=$(digest_tree)
 
@@ -96,6 +97,14 @@ digest_tree() {
 
     unless match?(%Attesto.Config{}, InstallerHost.MCP.attesto_config()) do
       raise("real attesto_phoenix integration did not derive Attesto.Config")
+    end
+
+    protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+    unless match?(%Attesto.Config{}, protected[:config]) and
+             is_function(protected[:replay_check], 2) and
+             is_function(protected[:htu], 1) do
+      raise("real attesto_phoenix integration omitted protected-resource callbacks")
     end
 
     unless AttestoPhoenix.Config.client_id_metadata_enabled?(host_config) do
@@ -164,6 +173,7 @@ mix phx.new "$generated_host_dir" \
 
   grep -Fq 'plug AttestoPhoenix.Plug.PutConfig' lib/installer_host_web/router.ex
   grep -Fq 'Elixir.Phoenix.Router.forward("/mcp", Elixir.AttestoMCP.Server.Plug' lib/installer_host_web/router.ex
+  grep -Fq ':protected_resource_options' lib/installer_host_web/router.ex
   grep -Fq 'client_id_metadata: [enabled: true]' config/config.exs
   grep -Fq 'native_apps: [loopback_include_localhost: true]' config/config.exs
   grep -Fq '{:req, ">= 0.6.1 and < 1.0.0"}' mix.exs
@@ -205,6 +215,14 @@ mix phx.new "$generated_host_dir" \
 
     unless match?(%Attesto.Config{}, InstallerHost.MCP.attesto_config()) do
       raise("generated Phoenix host did not derive Attesto.Config")
+    end
+
+    protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+    unless match?(%Attesto.Config{}, protected[:config]) and
+             is_function(protected[:replay_check], 2) and
+             is_function(protected[:htu], 1) do
+      raise("generated Phoenix host omitted protected-resource callbacks")
     end
 
     unless AttestoPhoenix.Config.client_id_metadata_enabled?(config) do

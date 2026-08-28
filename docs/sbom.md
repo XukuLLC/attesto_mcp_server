@@ -36,9 +36,11 @@ receives a direct compatible Req dependency because the enabled default CIMD
 fetcher needs an HTTP client at runtime. The reusable and generated-host
 compatibility checks accept public-Hex `attesto_phoenix` requirements
 overlapping `>= 2.14.0 and < 3.0.0` and Req requirements overlapping
-`>= 0.6.1 and < 1.0.0`; the generated host resolved `attesto_phoenix` 2.14.1
-and Req 0.7.4. The explicit-callback installer path does not add either
-dependency.
+`>= 0.6.1 and < 1.0.0`; the generated host resolved `attesto_phoenix` 2.14.2
+and Req 0.7.4. Automatic routes call the public AttestoPhoenix
+protected-resource adapter at request time so replay, nonce, canonical-request,
+and certificate policy remains host-owned. The explicit-callback installer
+path does not add either dependency.
 
 The declared package floor is Elixir 1.18 with OTP 27. `elixir --version`
 reported Elixir 1.18.3/OTP 27.3 for the local floor gate and Elixir 1.20.3/OTP

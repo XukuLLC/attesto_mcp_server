@@ -5,9 +5,11 @@
 `attesto_mcp_server` owns the protected-resource protocol boundary. In a host
 that also uses `attesto_phoenix`, the latter remains the authorization server:
 it owns issuer, consent, token, refresh, revocation, and sender-constrained
-credential behavior. The installer only reuses its validated core
-`Attesto.Config`; it does not duplicate or reconfigure those responsibilities.
-There is no hard dependency from this package to `attesto_phoenix`.
+credential behavior. The installer reuses both its validated core
+`Attesto.Config` and its public protected-resource adapter for DPoP
+replay/nonce, canonical-request, and mTLS certificate callbacks; it does not
+duplicate or reconfigure those responsibilities. There is no hard dependency
+from this package to `attesto_phoenix`.
 
 With `attesto_phoenix` already declared directly by the host, run:
 
@@ -73,7 +75,10 @@ It creates an application-owned `<App>.MCP` process, adds it to the application
 supervisor, adds conservative `server_options` in `config/config.exs`, creates
 a starter registration test, and mounts these top-level router forwards in
 order. The generated metadata wrapper keeps the two forwarded plug modules
-distinct for Phoenix 1.7 compatibility:
+distinct for Phoenix 1.7 compatibility. On the automatic AttestoPhoenix path,
+the exact protected-resource options are resolved after the server, request
+header budget, and HTTP method checks on every protected MCP request. Public
+metadata requests resolve the same current options independently:
 
 ```elixir
 Elixir.Phoenix.Router.forward(
@@ -81,11 +86,9 @@ Elixir.Phoenix.Router.forward(
   Elixir.MyApp.MCP.MetadataPlug,
   server: Elixir.MyApp.MCP,
   path: "/mcp",
-  auth: [
-    config: &Elixir.MyApp.MCP.attesto_config/0,
-    resource: "/mcp",
-    base_url: "https://mcp.example.com"
-  ]
+  auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+  resource: "/mcp",
+  base_url: "https://mcp.example.com"
 )
 
 Elixir.Phoenix.Router.forward(
@@ -93,13 +96,17 @@ Elixir.Phoenix.Router.forward(
   Elixir.AttestoMCP.Server.Plug,
   server: Elixir.MyApp.MCP,
   path: "/mcp",
-  auth: [
-    config: &Elixir.MyApp.MCP.attesto_config/0,
-    resource: "/mcp",
-    base_url: "https://mcp.example.com"
-  ]
+  auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+  resource: "/mcp",
+  base_url: "https://mcp.example.com"
 )
 ```
+
+The explicit `--attesto-config` path instead keeps the static
+`auth: [config: &Elixir.MyApp.MCP.attesto_config/0, resource: "/mcp",
+base_url: "https://mcp.example.com"]` form. Such hosts remain responsible for
+supplying every replay, nonce, canonical-request, and certificate callback
+their sender-constraint policy needs.
 
 Keep both forwards outside browser-session and CSRF pipelines. The metadata
 route is intentionally public; the MCP route authenticates every protected
@@ -174,6 +181,15 @@ issuer/resource verifier, `resource: "/mcp"` (or a canonical resource
 identifier), `resource_metadata_url` only when explicitly pinned, and DPoP
 replay/nonce plus mTLS DER callbacks when used by the deployment. The metadata
 endpoint is public; protected POST/GET/DELETE traffic is not.
+
+For advanced runtime integration, `:auth` may be an external zero-arity
+function or an MFA whose arguments are portable compile-time literals. The
+resolver must return a keyword list. Keep `:resource`/`:resource_audience` or
+`:base_url`/`:origin` pinned in the Plug's top-level options; runtime results
+cannot replace the mounted resource path or the boundary's canonical assign
+keys, and cannot enable non-header bearer-token locations. Resolution is
+deferred until an applicable request and failures return a generic 500
+response.
 
 The package requires `attesto_mcp ~> 1.2.1` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract

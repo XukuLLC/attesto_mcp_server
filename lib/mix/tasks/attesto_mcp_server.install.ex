@@ -131,7 +131,7 @@ if Code.ensure_loaded?(Igniter) do
            {:ok, auth_dependencies} <- authorization_dependencies(igniter, auth_source),
            {:ok, igniter, router} <- router(igniter, options[:router]),
            {:ok, igniter} <-
-             routes_available(igniter, router, server_module, path, base_url) do
+             routes_available(igniter, router, server_module, path, base_url, auth_source) do
         igniter = create_server_module(igniter, server_module, app, auth_source)
 
         if igniter.issues == [] do
@@ -139,7 +139,7 @@ if Code.ensure_loaded?(Igniter) do
           |> configure_authorization_server(app, auth_source, auth_dependencies)
           |> configure_server(app, server_module)
           |> Igniter.Project.Application.add_new_child(server_module)
-          |> add_routes(router, server_module, path, base_url)
+          |> add_routes(router, server_module, path, base_url, auth_source)
           |> create_starter_test(server_module)
           |> add_notices(auth_source, path, base_url)
         else
@@ -998,15 +998,15 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp routes_available(igniter, nil, _server_module, _path, _base_url),
+    defp routes_available(igniter, nil, _server_module, _path, _base_url, _auth_source),
       do: {:ok, igniter}
 
-    defp routes_available(igniter, router, server_module, path, base_url) do
+    defp routes_available(igniter, router, server_module, path, base_url, auth_source) do
       case Igniter.Project.Module.find_module(igniter, router) do
         {:ok, {igniter, _source, zipper}} ->
           with true <- isolated_module_source?(zipper),
                {:ok, body} <- Igniter.Code.Common.move_to_do_block(zipper) do
-            specs = route_specs(server_module, path, base_url)
+            specs = route_specs(server_module, path, base_url, auth_source)
 
             trusted_router_use = move_to_trusted_router_use(igniter, body, router)
             router_recognized? = match?({:ok, _location}, trusted_router_use)
@@ -1026,7 +1026,16 @@ if Code.ensure_loaded?(Igniter) do
             statuses =
               specs
               |> Map.new(fn {route, plug_module, _code} ->
-                {route, forward_status(body, route, plug_module, server_module, path, base_url)}
+                {route,
+                 forward_status(
+                   body,
+                   route,
+                   plug_module,
+                   server_module,
+                   path,
+                   base_url,
+                   auth_source
+                 )}
               end)
 
             conflicts = for {route, :conflict} <- statuses, do: route
@@ -1491,23 +1500,40 @@ if Code.ensure_loaded?(Igniter) do
          ),
          do: igniter
 
-    defp add_routes(igniter, nil, server_module, path, base_url) do
+    defp add_routes(igniter, nil, server_module, path, base_url, auth_source) do
       Igniter.add_warning(
         igniter,
         Igniter.Util.Warning.formatted_warning(
           "No Phoenix router was found. Add these forwards manually without a browser session or CSRF pipeline.",
-          forward_code(server_module, path, base_url)
+          forward_code(server_module, path, base_url, auth_source)
         )
       )
     end
 
-    defp add_routes(igniter, router, server_module, path, base_url) do
+    defp add_routes(igniter, router, server_module, path, base_url, auth_source) do
       Igniter.Project.Module.find_and_update_module!(igniter, router, fn zipper ->
+        zipper =
+          upgrade_legacy_phoenix_forwards(
+            zipper,
+            server_module,
+            path,
+            base_url,
+            auth_source
+          )
+
         missing =
           server_module
-          |> route_specs(path, base_url)
+          |> route_specs(path, base_url, auth_source)
           |> Enum.reject(fn {route, plug_module, _code} ->
-            forward_present?(zipper, route, plug_module, server_module, path, base_url)
+            forward_present?(
+              zipper,
+              route,
+              plug_module,
+              server_module,
+              path,
+              base_url,
+              auth_source
+            )
           end)
           |> Enum.map_join("\n\n", &elem(&1, 2))
 
@@ -1528,11 +1554,35 @@ if Code.ensure_loaded?(Igniter) do
       end)
     end
 
-    defp forward_present?(zipper, route, plug_module, server_module, path, base_url) do
-      forward_status(zipper, route, plug_module, server_module, path, base_url) == :present
+    defp forward_present?(
+           zipper,
+           route,
+           plug_module,
+           server_module,
+           path,
+           base_url,
+           auth_source
+         ) do
+      forward_status(
+        zipper,
+        route,
+        plug_module,
+        server_module,
+        path,
+        base_url,
+        auth_source
+      ) == :present
     end
 
-    defp forward_status(zipper, route, plug_module, server_module, path, base_url) do
+    defp forward_status(
+           zipper,
+           route,
+           plug_module,
+           server_module,
+           path,
+           base_url,
+           auth_source
+         ) do
       ast = Sourceror.Zipper.node(zipper)
 
       forwards =
@@ -1545,9 +1595,20 @@ if Code.ensure_loaded?(Igniter) do
 
       expected =
         route
-        |> forward_statement(plug_module, server_module, path, base_url)
+        |> forward_statement(plug_module, server_module, path, base_url, auth_source)
         |> Sourceror.parse_string!()
         |> canonical_forward_ast(%{})
+
+      legacy =
+        route
+        |> legacy_phoenix_forward_statement(
+          plug_module,
+          server_module,
+          path,
+          base_url,
+          auth_source
+        )
+        |> maybe_canonical_forward()
 
       case forwards do
         [] ->
@@ -1556,10 +1617,128 @@ if Code.ensure_loaded?(Igniter) do
         [^expected] ->
           :present
 
+        [^legacy] when not is_nil(legacy) ->
+          :legacy
+
         _ ->
           :conflict
       end
     end
+
+    defp maybe_canonical_forward(nil), do: nil
+
+    defp maybe_canonical_forward(statement) do
+      statement
+      |> Sourceror.parse_string!()
+      |> canonical_forward_ast(%{})
+    end
+
+    defp upgrade_legacy_phoenix_forwards(
+           zipper,
+           _server_module,
+           _path,
+           _base_url,
+           {:callback, _module, _function}
+         ),
+         do: zipper
+
+    defp upgrade_legacy_phoenix_forwards(
+           zipper,
+           server_module,
+           path,
+           base_url,
+           {:attesto_phoenix, _app} = auth_source
+         ) do
+      specs = route_specs(server_module, path, base_url, auth_source)
+
+      case Sourceror.Zipper.node(zipper) do
+        {:__block__, _meta, _expressions} ->
+          case Sourceror.Zipper.down(zipper) do
+            nil ->
+              zipper
+
+            first_expression ->
+              upgrade_direct_legacy_forwards(
+                first_expression,
+                %{},
+                specs,
+                server_module,
+                path,
+                base_url,
+                auth_source
+              )
+          end
+
+        _single_expression ->
+          zipper
+      end
+    end
+
+    # Walk only the router module body's direct expressions. A structurally
+    # identical forward inside a scope, function, or quoted form must never be
+    # rewritten as a side effect of migrating an installer-owned top-level
+    # route.
+    defp upgrade_direct_legacy_forwards(
+           candidate,
+           aliases,
+           specs,
+           server_module,
+           path,
+           base_url,
+           auth_source
+         ) do
+      expression = Sourceror.Zipper.node(candidate)
+
+      replacement =
+        Enum.find_value(specs, fn {route, plug_module, code} ->
+          legacy =
+            route
+            |> legacy_phoenix_forward_statement(
+              plug_module,
+              server_module,
+              path,
+              base_url,
+              auth_source
+            )
+            |> maybe_canonical_forward()
+
+          if direct_legacy_forward?(expression, aliases, route, legacy), do: code
+        end)
+
+      aliases = aliases_after_expression(expression, aliases)
+
+      candidate =
+        if replacement,
+          do: Igniter.Code.Common.replace_code(candidate, replacement),
+          else: candidate
+
+      case Sourceror.Zipper.right(candidate) do
+        nil ->
+          Sourceror.Zipper.up(candidate)
+
+        next ->
+          upgrade_direct_legacy_forwards(
+            next,
+            aliases,
+            specs,
+            server_module,
+            path,
+            base_url,
+            auth_source
+          )
+      end
+    end
+
+    defp direct_legacy_forward?(expression, aliases, route, legacy) when not is_nil(legacy) do
+      with {:ok, arguments} <- forward_call_args(expression, aliases),
+           ^route <- literal_string(List.first(arguments)) do
+        canonical_forward_ast(expression, aliases) == legacy
+      else
+        _not_exact_legacy_forward -> false
+      end
+    end
+
+    defp direct_legacy_forward?(_expression, _aliases, _route, _legacy), do: false
 
     defp scoped_forward_conflict?(zipper, specs) do
       ast = Sourceror.Zipper.node(zipper)
@@ -1963,6 +2142,28 @@ if Code.ensure_loaded?(Igniter) do
       List.flatten(contexts)
     end
 
+    defp collect_forward_contexts(
+           {container, _meta, _arguments},
+           _prefix,
+           _in_scope?,
+           _aliases,
+           _top_level?
+         )
+         when container in [
+                :def,
+                :defp,
+                :defmacro,
+                :defmacrop,
+                :defdelegate,
+                :defguard,
+                :defguardp,
+                :defmodule,
+                :defprotocol,
+                :defimpl,
+                :quote
+              ],
+         do: []
+
     defp collect_forward_contexts(node, prefix, in_scope?, aliases, top_level?) do
       case scope_call(node, aliases) do
         {:ok, arguments, body} ->
@@ -2300,26 +2501,103 @@ if Code.ensure_loaded?(Igniter) do
 
     defp canonical_forward_ast(call, aliases), do: canonical_ast(call, aliases)
 
-    defp forward_code(server_module, path, base_url) do
+    defp forward_code(server_module, path, base_url, auth_source) do
       server_module
-      |> route_specs(path, base_url)
+      |> route_specs(path, base_url, auth_source)
       |> Enum.map(&elem(&1, 2))
       |> Enum.join("\n\n")
     end
 
-    defp route_specs(server_module, path, base_url) do
+    defp route_specs(server_module, path, base_url, auth_source) do
       metadata_path = metadata_path(path)
       metadata_plug = Module.concat(server_module, MetadataPlug)
 
       [
         {metadata_path, metadata_plug,
-         forward_statement(metadata_path, metadata_plug, server_module, path, base_url)},
+         forward_statement(
+           metadata_path,
+           metadata_plug,
+           server_module,
+           path,
+           base_url,
+           auth_source
+         )},
         {path, AttestoMCP.Server.Plug,
-         forward_statement(path, AttestoMCP.Server.Plug, server_module, path, base_url)}
+         forward_statement(
+           path,
+           AttestoMCP.Server.Plug,
+           server_module,
+           path,
+           base_url,
+           auth_source
+         )}
       ]
     end
 
-    defp forward_statement(route, plug_module, server_module, path, base_url) do
+    defp forward_statement(
+           route,
+           plug_module,
+           server_module,
+           path,
+           base_url,
+           {:callback, _module, _function}
+         ) do
+      plug_module = absolute_module_name(plug_module)
+      server_module = absolute_module_name(server_module)
+
+      """
+      Elixir.Phoenix.Router.forward #{inspect(route)}, #{plug_module},
+        server: #{server_module},
+        path: #{inspect(path)},
+        auth: [
+          config: &#{server_module}.attesto_config/0,
+          resource: #{inspect(path)},
+          base_url: #{inspect(base_url)}
+        ]
+      """
+      |> String.trim()
+    end
+
+    defp forward_statement(
+           route,
+           plug_module,
+           server_module,
+           path,
+           base_url,
+           {:attesto_phoenix, app}
+         ) do
+      plug_module = absolute_module_name(plug_module)
+      server_module = absolute_module_name(server_module)
+
+      """
+      Elixir.Phoenix.Router.forward #{inspect(route)}, #{plug_module},
+        server: #{server_module},
+        path: #{inspect(path)},
+        auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [#{inspect(app)}]},
+        resource: #{inspect(path)},
+        base_url: #{inspect(base_url)}
+      """
+      |> String.trim()
+    end
+
+    defp legacy_phoenix_forward_statement(
+           _route,
+           _plug_module,
+           _server_module,
+           _path,
+           _base_url,
+           {:callback, _module, _function}
+         ),
+         do: nil
+
+    defp legacy_phoenix_forward_statement(
+           route,
+           plug_module,
+           server_module,
+           path,
+           base_url,
+           {:attesto_phoenix, _app}
+         ) do
       plug_module = absolute_module_name(plug_module)
       server_module = absolute_module_name(server_module)
 
@@ -2563,7 +2841,7 @@ if Code.ensure_loaded?(Igniter) do
       auth_notice =
         case auth_source do
           {:attesto_phoenix, _app} ->
-            "The generated server reuses the host's validated attesto_phoenix configuration, enables URL client metadata, and accepts ephemeral localhost callback ports for native clients."
+            "The generated routes reuse the host's validated attesto_phoenix verifier and sender-constraint callbacks, enable URL client metadata, and accept ephemeral localhost callback ports for native clients."
 
           {:callback, module, function} ->
             "The generated server uses #{inspect(module)}.#{function}/0 for Attesto verification."

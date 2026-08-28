@@ -57,13 +57,15 @@ Phoenix hosts can install the same boundary with the optional Igniter task:
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 ```
 
-When the host already depends on `attesto_phoenix`, the generated application
-module derives its verifier configuration from that package's validated OTP
-configuration. The installer also enables secure URL client metadata and
-ephemeral `localhost` callback ports for native desktop/CLI clients, adding the
-Req dependency used by the default fetcher. Existing host values win, so an
-application can keep a narrower metadata-host allowlist or stricter loopback
-policy.
+When the host already depends on `attesto_phoenix`, the generated routes derive
+the verifier and protected-resource callbacks from that package's validated
+OTP configuration on each applicable request. This carries the host's DPoP
+replay/nonce, canonical-request, and mTLS certificate policy into the MCP
+boundary without freezing callback closures at router compile time. The
+installer also enables secure URL client metadata and ephemeral `localhost`
+callback ports for native desktop/CLI clients, adding the Req dependency used
+by the default fetcher. Existing host values win, so an application can keep a
+narrower metadata-host allowlist or stricter loopback policy.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
 overlap `>= 2.14.0 and < 3.0.0` and Req requirements that overlap
