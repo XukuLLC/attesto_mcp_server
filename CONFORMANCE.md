@@ -29,6 +29,8 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
   in [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
 - `0.10.2` hosted official-interop job completed at: `2026-08-27T17:55:41Z`
   in [run 33100777065](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33100777065)
+- `0.10.3` hosted official-interop job completed at: `2026-08-28T14:30:51Z`
+  in [run 33180401361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33180401361)
 
 The runner was built and invoked with the following commands. `RUNNER_DIR` and
 `ARCHIVE` identify caller-owned locations outside the package so the record
@@ -54,9 +56,9 @@ scope enforcement, metadata handling, notification publication, retained
 request identifiers, and bounded legacy/modern resource subscriptions. Its
 local aggregate gate passed 312 checks (one doctest plus 311 tests), 81.54%
 coverage, zero-error/zero-skip Dialyzer, package construction, and the Hex
-advisory audit. Hosted
-official-runner and version-floor results are not claimed here until the
-candidate commit completes the hosted release gate.
+advisory audit. Hosted run 33180401361 passed all four jobs at
+`2026-08-28T14:35:44Z` against implementation commit
+`d6492bb8184702859bb0160343fd92de647fbdf8`.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |

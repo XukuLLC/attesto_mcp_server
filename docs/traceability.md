@@ -41,7 +41,7 @@ listed and is not treated as complete interoperability.
 | R27 | Deterministic lists/pagination: stable auth-visible order, opaque integrity/auth-bound cursors, fixed limits, and invalid/expired/cross-context rejection | PARTIAL | cache/cursor tests including catalog-bound cursor rejection; cluster and full mutation matrix remain partial |
 | R28 | Cache semantics: nonnegative TTL/cache scope, no MRTR caching, private auth-varying defaults, safe public proof, stable page scopes, and invalidation notifications | PARTIAL | cache and subscription tests plus atom cache-scope normalization and facade pagination/cache-option coverage; broad cross-connection matrix remains partial |
 | R29 | Security/resource controls: bounded inputs/output/schema/queues, rate limits, URI/origin safety, safe logs/telemetry, secure randomness, and fail-closed callbacks/config | PARTIAL | schema/resource, telemetry, P5, exact public-notification validation, direct Origin enforcement, four-way HTTP header-budget rejection, and bounded subscription tests; broad fuzz/stress remains partial |
-| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1 and 0.10.2 local and hosted release gates pass; the 0.10.3 local aggregate gate passes 312 checks at 81.54% coverage with zero-error/zero-skip Dialyzer; 9 not-scored Tasks failures and broad fuzz remain open |
+| R30 | Observability/release gates: safe lifecycle telemetry, documented deployment/configuration/examples, and formatter/warnings/static/local/official gates | PARTIAL | lifecycle start/system-time and exact-once terminal telemetry tests; authenticated pinned runner for 0.10.0 (2026: 50 selected, 37 scored passed, raw 161/30; 2025: 33 selected, 30 scored passed, raw 80/0); exact TS 2.0.0/Python 2.1.1 clients pass both eras; 0.10.1, 0.10.2, and 0.10.3 local and hosted release gates pass; the 0.10.3 aggregate gate passes 312 checks at 81.54% coverage with zero-error/zero-skip Dialyzer; 9 not-scored Tasks failures and broad fuzz remain open |
 
 ## Release additions beyond the baseline
 
@@ -59,7 +59,7 @@ listed and is not treated as complete interoperability.
 | ID | Status | Evidence |
 | --- | --- | --- |
 | T01 | PASS | API tests and `examples/consumer` compile/run |
-| T02 | PARTIAL | `test/conformance_fixture_test.exs`, `examples/conformance_server.exs`, `scripts/run_conformance_fixture.sh`, and prior hosted official-interop runs; the 0.10.3 hosted lane is pending |
+| T02 | PARTIAL | `test/conformance_fixture_test.exs`, `examples/conformance_server.exs`, `scripts/run_conformance_fixture.sh`, and the 0.10.3 hosted official-interop lane in run 33180401361 |
 | T03 | PARTIAL | primitive matrix |
 | T04 | PARTIAL | JSON-RPC and P4 tests |
 | T05 | PASS | core discovery test and pinned 2026 fixture |
@@ -133,8 +133,7 @@ Full-suite order-randomized runs for the 0.10.0 candidate passed at seeds 1,
 seeds 424242 and 99991. The 0.10.2 hosted Elixir 1.18.3/OTP 27.3 floor passed its
 244-check gate with 79.84% coverage, zero-error/zero-skip Dialyzer, package
 unpack, and Hex advisory audit. Hosted verification is recorded below for
-0.10.0, 0.10.1, and 0.10.2; the 0.10.3 hosted floor is not claimed until its
-candidate commit completes the release gate.
+0.10.0 through 0.10.3.
 
 The pinned runner `0.2.0-alpha.11` at commit
 `74edef34d674f563537be8c6587cebaa58e830ca` selected
@@ -147,7 +146,10 @@ in both eras. The 0.10.2 hosted source also passed formatting, documentation,
 package, version-floor, optional-installer, and disk-backed host checks. The
 0.10.3 candidate locally passed its 312-check aggregate gate and a
 combined-installer run in a fresh Phoenix 1.8.13 application using the public
-Hex dependency graph. The 0.10.1 patch adds Phoenix-style
+Hex dependency graph. Hosted
+[run 33180401361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33180401361)
+passed all four jobs at `2026-08-28T14:35:44Z` against implementation commit
+`d6492bb8184702859bb0160343fd92de647fbdf8`. The 0.10.1 patch adds Phoenix-style
 parser-pipeline and pass-through parser regressions while preserving encoded
 message-size and nesting bounds. Its independent read-only review returned GO
 at `2026-08-27T15:38:47Z`. Hosted
