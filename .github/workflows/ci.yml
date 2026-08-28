@@ -68,7 +68,7 @@ jobs:
           else
             echo "final forbidden-term scan is supplied by the orchestrator"
           fi
-      - run: test -s CONFORMANCE.md && test -s docs/provenance.md && test -s docs/sbom.md && test -s docs/traceability.md
+      - run: test -s CONFORMANCE.md && test -s docs/sbom.md
       - run: elixir examples/stdio.exs </dev/null
       - working-directory: examples/consumer
         run: mix deps.get && mix compile --warnings-as-errors && mix run -e '{:ok, server} = AttestoMCP.ExternalConsumer.build_server(); _plug = AttestoMCP.ExternalConsumer.plug(server); AttestoMCP.ExternalConsumer.stdio(server)'

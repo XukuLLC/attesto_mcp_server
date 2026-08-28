@@ -94,7 +94,7 @@ division of responsibilities between the packages.
 Custom `--mcp-path` values must be non-root ASCII paths made from
 slash-separated URI-unreserved segments (`A-Z`, `a-z`, digits, `.`, `_`, `~`,
 and `-`). The task stops before editing when dependency, router, route, or
-installer-owned module provenance cannot be established conservatively.
+installer ownership cannot be established conservatively.
 
 Bandit is the documented development/test adapter, while the production
 library depends only on Plug. For a local loopback example, see
@@ -138,5 +138,4 @@ Optional task profiles are disabled for this release; their
 incomplete in-memory implementation cannot be enabled. A future durable
 host-store contract is required before either profile can be advertised.
 
-See [docs/usage.md](docs/usage.md), [docs/provenance.md](docs/provenance.md),
-[docs/traceability.md](docs/traceability.md), and `SECURITY.md`.
+See [docs/usage.md](docs/usage.md) and `SECURITY.md`.

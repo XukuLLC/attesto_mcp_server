@@ -70,9 +70,7 @@ defmodule AttestoMCP.Server.MixProject do
         "CHANGELOG.md",
         "CONFORMANCE.md",
         "docs/conformance.md",
-        "docs/provenance.md",
         "docs/usage.md",
-        "docs/traceability.md",
         "docs/sbom.md"
       ]
     ]
