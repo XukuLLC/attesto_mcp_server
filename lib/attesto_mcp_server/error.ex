@@ -56,6 +56,11 @@ defmodule AttestoMCP.Server.Error do
   def session_not_found,
     do: new(-32600, "Session not found", %{"reason" => "session_not_found"}, 404)
 
+  def application(message, code \\ nil) when is_binary(message) do
+    data = if is_binary(code), do: %{"code" => code}, else: nil
+    new(-32_000, message, data, 200)
+  end
+
   def cancelled, do: new(-32800, "Request cancelled", nil, 499)
 
   defp new(code, message, data, http_status),

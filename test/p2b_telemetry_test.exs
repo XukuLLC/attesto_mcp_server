@@ -218,7 +218,12 @@ defmodule AttestoMCP.Server.P2BTelemetryTest do
         :correlation_id,
         :category,
         :reason,
-        :error
+        :error,
+        :kind,
+        :source,
+        :server,
+        :primitive_type,
+        :primitive_identity
       ])
 
     assert MapSet.subset?(MapSet.new(Map.keys(metadata)), allowed)

@@ -5,6 +5,11 @@ defmodule AttestoMCP.Server.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      %{
+        id: AttestoMCP.Server.SessionCluster,
+        start: {:pg, :start_link, [AttestoMCP.Server.SessionCluster]},
+        type: :worker
+      },
       {DynamicSupervisor, strategy: :one_for_one, name: AttestoMCP.Server.DynamicSupervisor}
     ]
 

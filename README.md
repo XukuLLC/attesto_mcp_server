@@ -29,6 +29,8 @@ not contain an OAuth authorization server or token issuer.
 plug AttestoMCP.Server.Plug,
   server: server,
   path: "/mcp",
+  scopes_supported: ["workspace.mcp"],
+  default_scopes: ["workspace.mcp"],
   auth: [
     config: &MyApp.Attesto.config/0,
     resource: "/mcp",
@@ -49,6 +51,20 @@ string keys; resource MRTR retries additionally carry string-keyed response
 entries at the top level. An arity-2 handler's second argument is the
 authenticated request context; arity-1 and MFA forms are also supported.
 
+`scopes_supported` controls the public RFC 9728 document for that mount, while
+`default_scopes` controls protected operations without a non-empty
+method-specific `scope_map` entry. Keep the two aligned with grants actually
+issued by the Attesto authorization server. If an AttestoPhoenix router owns
+the metadata route via `--reuse-metadata-route`, configure its protected
+resource metadata there; the MCP Plug cannot alter a route it does not serve.
+
+An optional `context_builder` function or MFA receives the authenticated
+`Plug.Conn` and contributes a map under `context.host_context`; it cannot
+replace the package-owned principal, scopes, claims, sender, or tenant fields.
+Return `{:error, AttestoMCP.Server.Result.error(message, code)}` for bounded
+business failures that are safe for a client. Other failure values and
+exceptions remain generic at the protocol boundary.
+
 ### Phoenix installer
 
 Phoenix hosts can install the same boundary with the optional Igniter task:
@@ -62,11 +78,13 @@ the verifier and protected-resource callbacks from that package's validated
 OTP configuration on each applicable request. This carries access-token JTI
 revocation, principal loading, DPoP replay/nonce, canonical-request, and mTLS
 certificate policy into the MCP boundary without freezing callback closures at
-router compile time. The installer also enables secure URL client metadata and
-ephemeral `localhost` callback ports for native desktop/CLI clients, adding the
-Req dependency used by the default fetcher. Existing host values win, so an
-application can keep a narrower metadata-host allowlist or stricter loopback
-policy.
+router compile time. The installer preserves its native `localhost` callback
+compatibility default, but the installer does not enable Client ID Metadata
+Documents (CIMD) by default, so an established host cannot accidentally select
+an Ecto-backed cache before running its `attesto_client_id_metadata` migration. Pass
+`--enable-cimd` only after verifying that storage; this adds the Req dependency
+used by the default fetcher. Existing host values win, including cache, repo,
+table-prefix, allowlist, and disabled settings.
 
 Automatic AttestoPhoenix integration requires every authenticated token
 subject to resolve through the host's `load_principal` callback. A revoked JTI,
@@ -92,9 +110,17 @@ mix igniter.install attesto_mcp_server \
 
 The idempotent installer adds a supervised MCP module, conservative runtime
 configuration, a starter registration test, and distinct top-level forwards
-for `/mcp` and its public RFC 9728 metadata URL. The metadata forward uses a
-generated application-owned wrapper, preserving compatibility with Phoenix
-1.7's one-forward-per-plug rule. It never creates an issuer, credentials,
+for `/mcp` and its public RFC 9728 metadata URL. Use
+`--reuse-metadata-route` to retain exactly one statically proven
+`use AttestoPhoenix.Router` plus
+`attesto_routes(protected_resource_paths: ["/mcp"])` metadata route and
+generate only the MCP forward; ambiguous or mismatched
+routes stop before editing with the manual wiring required. Otherwise the
+metadata forward uses a generated application-owned wrapper, preserving
+compatibility with Phoenix 1.7's one-forward-per-plug rule. A direct standard
+Phoenix endpoint parser is wrapped to bypass `/mcp` and route-equivalent
+trailing slashes before authentication; custom parser wrappers receive an
+actionable preflight warning while retaining host ownership. It never creates an issuer, credentials,
 consent policy, token storage, or dynamic-registration policy. See
 [Phoenix installation](docs/usage.md#phoenix-installation) for options and the
 division of responsibilities between the packages.
@@ -124,6 +150,40 @@ entry replaces the category default for both prompt and resource references;
 an absent or empty entry cannot disable those defaults. Every HTTP request is
 reauthenticated and handles or session IDs are never authorities by themselves.
 
+### Explicit definition-scoped HTTP policy
+
+Hosts that issue fine-grained definition scopes can opt into per-method policy
+without changing the secure defaults:
+
+```elixir
+scope_policy: %{
+  "tools/list" => :visible_definitions,
+  "tools/call" => :selected_definition,
+  "resources/list" => :visible_definitions,
+  "resources/templates/list" => :visible_definitions,
+  "resources/read" => :selected_definition
+}
+```
+
+The visible mode filters catalogs with each definition's `required_scopes` and
+`authorize` callback. The selected mode binds the requested tool, static
+resource, or URI template, then checks its scopes through the prepared Attesto
+boundary before retry-state consumption or handler invocation. Hidden and
+denied definitions use the same neutral unknown result. This option is
+explicitly opt-in; omitted policy preserves the generic method scopes, and an
+empty `scope_map` entry still restores that default. A policy method may not
+also appear in `scope_map`, including with an empty entry; an explicit Plug
+`scope_map` replaces the server map, and the effective map is revalidated at
+request time for named or restarted servers.
+Definitions with `required_scopes: []` are authenticated-only only on methods
+explicitly mapped to this policy; default and empty-map methods still require
+their generic scope.
+
+Subscription establishment and delivery are unchanged: opening a stream keeps
+its generic category scopes, while each delivery reauthorizes the captured
+principal and tenant with the matched definition scopes. `subscriptions/listen`
+is intentionally not a definition-policy method.
+
 ## Operational notes
 
 Pin the public origin behind a trusted proxy, use TLS in deployment, and keep
@@ -140,10 +200,37 @@ fields or malformed metadata are rejected before modern or legacy fanout.
 Legacy resource subscriptions per session and modern resource filters per
 subscription are fixed at 128 unique URIs and 4,096 bytes per URI; duplicates
 do not consume another entry.
+
+Use `register_all/2` or the startup `:registrations` option when a catalog must
+appear atomically. A failed batch changes neither the registry nor its catalog
+revision and emits no invalidation. One successful batch emits at most one
+invalidation per affected catalog.
+
+Legacy sessions use the private in-memory store by default. A durable host may
+provide `session_store: {Adapter, handle}` and an explicit
+`session_namespace`; the adapter implements
+`AttestoMCP.Server.SessionStore`. Set `session_clustered: true` only with a
+shared adapter and explicit namespace. Cluster peers then load the same session
+records and fan modern, legacy, and catalog notifications to the node holding
+each live stream. Live PIDs and sockets are never persisted, so clients reopen
+streams after node loss; session identity, negotiated revision, capabilities,
+subscriptions, and logging level survive. Store loss stops the server instead
+of silently falling back to local memory when the configured store handle is a
+monitored process; other adapters fail closed when an operation cannot reach
+their backend. Use a globally unique `session_namespace` when unrelated
+deployments share the same store or Erlang cluster. Cross-node notification
+delivery is asynchronous and does not provide replay or exactly-once delivery
+across a network partition.
+
+`telemetry_metadata` adds at most 16 bounded scalar host dimensions to emitted
+events without permitting reserved-key replacement. `handler_task_init` runs
+inside each request worker before its handler; `exception_reporter` receives
+trusted exception details while wire responses and Telemetry remain scrubbed.
+All three options accept documented function/MFA forms where applicable.
+
 Plug options override server defaults for that adapter, while its effective
 `scope_map` is the single HTTP policy source.
 Optional task profiles are disabled for this release; their
-incomplete in-memory implementation cannot be enabled. A future durable
-host-store contract is required before either profile can be advertised.
+incomplete implementation cannot be enabled.
 
 See [docs/usage.md](docs/usage.md) and `SECURITY.md`.

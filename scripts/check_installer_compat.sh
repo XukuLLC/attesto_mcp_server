@@ -22,8 +22,12 @@ trap cleanup EXIT HUP INT TERM
 cp -R "$repo_dir/fixtures/installer_host/." "$host_dir"
 cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_host_dir/mix.exs"
+cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_host_dir/lib/installer_host_web/router.ex"
+cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_host_dir/lib/installer_host_web/parsed_body_probe.ex"
 cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_floor_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_floor_host_dir/mix.exs"
+cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_floor_host_dir/lib/installer_host_web/router.ex"
+cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_floor_host_dir/lib/installer_host_web/parsed_body_probe.ex"
 
 digest_tree() {
   {
@@ -47,11 +51,80 @@ digest_tree() {
 
 installed_http_smoke() {
   mix run -e '
+    defmodule InstallerHost.InstallerSmokeKeystore do
+      @behaviour Attesto.Keystore
+
+      @impl Attesto.Keystore
+      def signing_pem, do: System.fetch_env!("INSTALLER_HOST_SIGNING_PEM")
+
+      @impl Attesto.Keystore
+      def verification_pems, do: [signing_pem()]
+    end
+
+    current = Application.fetch_env!(:installer_host, AttestoPhoenix.Config)
+
+    current =
+      current
+      |> Keyword.put(:keystore, InstallerHost.InstallerSmokeKeystore)
+      |> Keyword.put(:audience, "https://mcp.example.com/mcp")
+      |> Keyword.put(:principal_kinds, fn ->
+        [Attesto.PrincipalKind.new("installer_test", "installer_test_")]
+      end)
+      |> Keyword.put(:load_principal, fn subject -> {:ok, %{id: subject}} end)
+
+    Application.put_env(:installer_host, AttestoPhoenix.Config, current)
+
+    endpoint = &InstallerHostWeb.Endpoint.call(&1, InstallerHostWeb.Endpoint.init([]))
+
+    metadata =
+      Plug.Test.conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> endpoint.()
+
+    unless metadata.status == 200 and byte_size(metadata.resp_body) > 0 do
+      raise("protected-resource metadata route was not public and successful")
+    end
+
+    unauthenticated = fn body ->
+      Plug.Test.conn(:post, "/mcp", body)
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> endpoint.()
+    end
+
+    malformed = unauthenticated.("{")
+
+    unless malformed.status in [401, 403] do
+      raise("malformed unauthenticated MCP body reached the handler before authorization")
+    end
+
+    oversized = unauthenticated.(String.duplicate("x", 1_100_000))
+
+    unless oversized.status in [401, 403] do
+      raise("oversized unauthenticated MCP body reached the handler before authorization")
+    end
+
+    unrelated_json =
+      Plug.Test.conn(:post, "/unrelated-json", ~s({"ok":true}))
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> endpoint.()
+
+    unless unrelated_json.body_params == %{"ok" => true} do
+      raise("unrelated JSON request was not parsed by the endpoint")
+    end
+
+    unrelated_form =
+      Plug.Test.conn(:post, "/unrelated-form", "alpha=beta")
+      |> Plug.Conn.put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> endpoint.()
+
+    unless unrelated_form.body_params == %{"alpha" => "beta"} do
+      raise("unrelated form request was not parsed by the endpoint")
+    end
+
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
     principal = %{
-      kind: "service",
-      sub: "svc_installer",
+      kind: "installer_test",
+      sub: "installer_test_installer",
       scopes: [AttestoMCP.Scopes.tools_read()],
       claims: %{"client_id" => "installer"}
     }
@@ -78,7 +151,7 @@ installed_http_smoke() {
       |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
       |> Plug.Conn.put_req_header("mcp-protocol-version", "2026-07-28")
       |> Plug.Conn.put_req_header("mcp-method", "tools/list")
-      |> InstallerHostWeb.Router.call(InstallerHostWeb.Router.init([]))
+      |> endpoint.()
 
     unless conn.status == 200 and Jason.decode!(conn.resp_body)["result"]["tools"] != [] do
       raise("installed AttestoPhoenix MCP route rejected authenticated traffic")
@@ -125,11 +198,16 @@ installed_http_smoke() {
   mix deps.get
   mix attesto_mcp_server.install \
     --base-url https://mcp.example.com \
+    --enable-cimd \
+    --reuse-metadata-route \
     --yes
 
   test -f lib/installer_host/mcp.ex
   grep -Fq 'children = [InstallerHost.MCP]' lib/installer_host/application.ex
-  grep -Fq ':protected_resource_options' lib/installer_host_web/router.ex
+  grep -Fq 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex
+  test "$(grep -F -c 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex)" -eq 1
+  test "$(grep -F -c 'Elixir.Phoenix.Router.forward("/mcp"' lib/installer_host_web/router.ex)" -eq 1
+  ! grep -Fq 'oauth-protected-resource' lib/installer_host_web/router.ex
 
   first_digest=$(digest_tree)
 
@@ -173,10 +251,9 @@ installed_http_smoke() {
     end
   '
 
-  installed_http_smoke
-
   mix attesto_mcp_server.install \
     --base-url https://mcp.example.com \
+    --reuse-metadata-route \
     --yes
 
   second_digest=$(digest_tree)
@@ -202,7 +279,10 @@ installed_http_smoke() {
   '
 
   mix deps.get
-  mix attesto_mcp_server.install --base-url https://mcp.example.com --yes
+  mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
+  grep -Fq 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex
+  test "$(grep -F -c 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex)" -eq 1
+  test "$(grep -F -c 'Elixir.Phoenix.Router.forward("/mcp"' lib/installer_host_web/router.ex)" -eq 1
   mix format --check-formatted
   mix compile --warnings-as-errors
   mix run -e '
@@ -222,7 +302,6 @@ installed_http_smoke() {
     end
   '
 
-  installed_http_smoke
 )
 
 mix phx.new "$generated_host_dir" \
@@ -264,12 +343,17 @@ mix phx.new "$generated_host_dir" \
 
   mix deps.get
   mix attesto_phoenix.install --yes
-  mix attesto_mcp_server.install --base-url https://mcp.example.com --yes
+  cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" lib/installer_host_web/router.ex
+  cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" lib/installer_host_web/parsed_body_probe.ex
+  mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
   mix deps.get
 
-  grep -Fq 'plug AttestoPhoenix.Plug.PutConfig' lib/installer_host_web/router.ex
+  grep -Fq 'AttestoPhoenix.Plug.PutConfig' lib/installer_host_web/router.ex
   grep -Fq 'Elixir.Phoenix.Router.forward("/mcp", Elixir.AttestoMCP.Server.Plug' lib/installer_host_web/router.ex
-  grep -Fq ':protected_resource_options' lib/installer_host_web/router.ex
+  grep -Fq 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex
+  test "$(grep -F -c 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex)" -eq 1
+  test "$(grep -F -c 'Elixir.Phoenix.Router.forward("/mcp"' lib/installer_host_web/router.ex)" -eq 1
+  grep -Fq 'AttestoMCP.Server.PhoenixParser' lib/installer_host_web/endpoint.ex
   grep -Fq 'client_id_metadata: [enabled: true]' config/config.exs
   grep -Fq 'native_apps: [loopback_include_localhost: true]' config/config.exs
   grep -Fq '{:req, ">= 0.6.1 and < 1.0.0"}' mix.exs
@@ -340,8 +424,9 @@ mix phx.new "$generated_host_dir" \
     end
   '
 
-  mix attesto_phoenix.install --yes
-  mix attesto_mcp_server.install --base-url https://mcp.example.com --yes
+  installed_http_smoke
+
+  mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
 
   second_digest=$(digest_tree)
   test "$first_digest" = "$second_digest"

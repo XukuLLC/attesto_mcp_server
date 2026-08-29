@@ -27,8 +27,20 @@ With `attesto_phoenix` already declared directly by the host, run:
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 ```
 
-On this combined path the installer adds the compatible Req dependency and,
-when the corresponding keys are absent, configures:
+On this combined path the installer does not enable Client ID Metadata Documents
+(CIMD) by default. This avoids silently selecting AttestoPhoenix's default
+Ecto-backed CIMD cache when an established host has not run the required
+`attesto_client_id_metadata` migration. If the host has verified its CIMD
+storage, opt in explicitly:
+
+```sh
+mix igniter.install attesto_mcp_server \
+  --base-url https://mcp.example.com \
+  --enable-cimd
+```
+
+The explicit opt-in adds the compatible Req dependency and, when the
+corresponding keys are absent, configures:
 
 ```elixir
 config :my_app, AttestoPhoenix.Config,
@@ -42,7 +54,10 @@ an ephemeral port. The default AttestoPhoenix fetcher retains its HTTPS,
 DNS/IP, size, timeout, redirect, and cache validation. Deployments with a known
 client set should add a narrow `:allowed_hosts` list. Existing configuration is
 not replaced, and the installer does not enable dynamic registration or invent
-client persistence.
+client persistence. Existing cache, repo, table-prefix, allowlist, and disabled
+settings remain authoritative; a custom cache module does not require an Ecto
+table. Review the generated notice and host migration status before enabling
+CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
 overlap `>= 2.14.1 and < 3.0.0` and Req requirements that overlap
@@ -96,6 +111,7 @@ Elixir.Phoenix.Router.forward(
   Elixir.MyApp.MCP.MetadataPlug,
   server: Elixir.MyApp.MCP,
   path: "/mcp",
+  scopes_supported: ["workspace.mcp"],
   auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
   resource: "/mcp",
   base_url: "https://mcp.example.com"
@@ -106,6 +122,8 @@ Elixir.Phoenix.Router.forward(
   Elixir.AttestoMCP.Server.Plug,
   server: Elixir.MyApp.MCP,
   path: "/mcp",
+  scopes_supported: ["workspace.mcp"],
+  default_scopes: ["workspace.mcp"],
   auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
   resource: "/mcp",
   base_url: "https://mcp.example.com"
@@ -120,22 +138,42 @@ their sender-constraint policy needs, plus any application-specific
 `:principal` callback that performs principal availability or access-token
 revocation checks.
 
+The generated metadata wrapper and MCP forward may both receive
+`scopes_supported: ["..."]`; use the grants that the authorization server can
+actually issue for that resource. A reused `attesto_routes` metadata endpoint
+remains owned by AttestoPhoenix, so configure its protected-resource metadata
+there. `default_scopes: ["..."]` separately replaces generic MCP operation
+defaults unless a non-empty method entry in `scope_map` takes precedence.
+
 Keep both forwards outside browser-session and CSRF pipelines. The metadata
 route is intentionally public; the MCP route authenticates every protected
-leg. If the endpoint parses JSON before the router, configure that parser's
-body-length limit at least as strictly as the MCP Plug's `:max_body_bytes`;
-host parsing necessarily occurs before MCP authentication. Run the task again
-safely after an interrupted install: generated modules,
+leg. The installer inspects the selected Phoenix endpoint. For a direct,
+standard `Plug.Parsers` declaration it wraps that parser with
+`AttestoMCP.Server.PhoenixParser`, which bypasses the MCP route and its
+route-equivalent trailing slashes while leaving metadata, browser, JSON, and
+form routes unchanged. Custom or ambiguous parser wrappers receive an
+actionable warning and the installer skips the endpoint edit; follow that
+warning before deployment. If the endpoint parser remains host owned,
+configure its body-length limit at least as strictly as the MCP Plug's
+`:max_body_bytes`; host parsing otherwise occurs before MCP authentication. Run
+the task again safely after an interrupted install: generated modules,
 configuration, supervision, routes, and tests are idempotent. Use Igniter's
 global `--dry-run` option to inspect the edits first. If the router cannot be
 selected uniquely, pass `--router MyAppWeb.Router`; the task refuses ambiguous
 router selection and prints an exact manual snippet if no router exists.
 
-Additional options are `--mcp-path`, `--server-module`, `--router`, and
-`--attesto-config`. Run the task inside the Phoenix child application rather
+Additional options are `--mcp-path`, `--server-module`, `--router`,
+`--attesto-config`, `--enable-cimd`, and `--reuse-metadata-route`. Run the task inside the Phoenix child application rather
 than at an umbrella root. The generated `server_status` tool is deliberately a
 small starter; replace it with application-specific registrations and scopes.
-`--mcp-path` must be a non-root ASCII path whose nonempty segments use only
+When `--reuse-metadata-route` is selected, the task requires exactly one
+supported zero-option `use AttestoPhoenix.Router` followed by the literal
+`attesto_routes(protected_resource_paths: ["/mcp"])` invocation (with the
+selected path substituted). It preserves that invocation and inserts only the
+MCP forward immediately after it. It does not infer paths from dynamic,
+parameterized, glob, scoped, ambiguous, duplicate, or mismatched routes; if
+exact equivalence cannot be proven, it stops before editing and prints the
+exact manual MCP forward required. `--mcp-path` must be a non-root ASCII path whose nonempty segments use only
 URI-unreserved letters, digits, `.`, `_`, `~`, and `-`. The same canonical
 path grammar is enforced by the runtime Plug so an encoded client path cannot
 silently differ from the configured resource. The generated MCP module owns a
@@ -325,6 +363,30 @@ resource links, embedded resources, and structured tool output. Malformed
 handler output is converted to a safe protocol failure or `isError` tool
 result; business and upstream failures remain ordinary MCP error results.
 
+For deliberately client-visible business failures, return:
+
+```elixir
+{:error, AttestoMCP.Server.Result.error("account is read-only", "account_read_only")}
+```
+
+The message and optional code are length-bounded and validated as UTF-8. Tool
+calls receive an `isError` result, with a supplied code at
+`_meta["io.attesto/errorCode"]` so it cannot violate a declared output
+schema. Prompt and resource calls receive a JSON-RPC application error with
+HTTP 200. Arbitrary terms, oversized strings, callback failures, and exceptions
+remain generic.
+
+HTTP hosts may derive application context after authentication:
+
+```elixir
+context_builder: fn conn ->
+  %{request_id: Plug.Conn.get_req_header(conn, "x-request-id") |> List.first()}
+end
+```
+
+The map is exposed only as `context.host_context`. Returning anything else or
+raising prevents handler invocation.
+
 ### Limits and scope policy
 
 `max_concurrency`, `per_principal_concurrency`, `request_timeout`,
@@ -336,9 +398,44 @@ server option for that adapter. The server `scope_map` is the default policy;
 an explicit Plug `scope_map` replaces it for HTTP, and the effective map is
 used both by the prepared AttestoMCP authorization boundary and by protocol dispatch.
 There is no second implicit scope source. Non-empty entries override method
-defaults; absent or empty entries retain the fail-closed HTTP defaults. For
+defaults; absent or empty entries use `default_scopes` when configured and
+otherwise retain the fail-closed HTTP defaults. For
 `completion/complete`, one explicit method entry governs both prompt and
 resource references; without it, each reference uses its category read scope.
+
+For hosts that issue definition scopes instead of generic method grants, add an
+explicit Plug-only `scope_policy`:
+
+```elixir
+scope_policy: %{
+  "tools/list" => :visible_definitions,
+  "tools/call" => :selected_definition,
+  "resources/list" => :visible_definitions,
+  "resources/templates/list" => :visible_definitions,
+  "resources/read" => :selected_definition
+}
+```
+
+Visible-definition methods filter catalogs through each definition's required
+scopes and authorization callback. Selected-definition methods resolve the
+requested tool, exact static resource, or first matching URI template before
+authorizing that definition through the prepared Attesto boundary; denial is
+the normal neutral unknown result and cannot invoke a handler or consume an
+MRTR retry state. The policy is opt-in and only supports the five methods
+shown. Omitted policy retains generic method scopes, empty `scope_map` entries
+retain their documented defaults, and a policy method cannot overlap
+`scope_map` even with an empty list. An explicit Plug `scope_map` replaces the
+server map; the effective map is checked again at request time for named or
+restarted servers. A definition with `required_scopes: []` is authenticated-only
+only on an explicitly policy-mapped method; defaults and empty-map methods keep
+requiring their generic scope.
+
+Subscriptions are deliberately outside this policy map. Their opening
+authorization uses the configured host default in place of category defaults,
+unless an explicit `subscriptions/listen` method entry takes precedence. An
+explicit `subscription_scopes` list is always additive. Without a host default,
+opening retains the generic category scopes. Delivery reauthorizes
+the captured principal and tenant with generic plus matched definition scopes.
 Legacy resource subscriptions per session and modern resource filters per
 subscription have fixed defensive bounds of 128 unique URIs and 4,096 bytes
 per URI. Repeating an existing legacy subscription is idempotent,
@@ -353,6 +450,53 @@ the session idle deadline.
 `false` only when the host explicitly accepts unlimited traffic for that
 category; malformed settings fail closed. Rejections use HTTP 429 and
 JSON-RPC `-32029`, and are isolated by principal plus remote address.
+
+### Atomic startup, telemetry, and durable sessions
+
+`AttestoMCP.Server.register_all/2` validates at most 1,000 registrations before
+committing any of them. A successful batch emits one catalog invalidation per
+affected category; a failed batch emits none. Supply the same tuples in the
+server's `:registrations` option to make the complete catalog available before
+`start_link/1` returns. Named server child specs use the registered name as the
+supervision ID, allowing multiple independently named servers under one
+supervisor.
+
+`telemetry_metadata` is a map of at most 16 bounded scalar dimensions. Reserved
+protocol keys cannot be replaced. Handler spans include the registered
+primitive type and exact identity; unknown wire methods are reported as
+`:unknown`. `handler_task_init` runs in the request worker before the handler,
+and `exception_reporter` receives a trusted exception report without copying
+private details into protocol responses or Telemetry. Function, `{Module,
+:function}`, and `{Module, :function, prefix_args}` callback forms are
+supported.
+
+The default legacy-session store is private in-memory state. Durable hosts can
+implement `AttestoMCP.Server.SessionStore` and configure:
+
+```elixir
+session_store: {MyApp.MCPSessions, store_handle},
+session_namespace: "primary-mcp"
+```
+
+Records are bounded versioned maps produced by
+`AttestoMCP.Server.Session.to_record/1`; adapters preserve unknown fields and
+perform update/TTL/cleanup atomically. Principal and tenant bindings are opaque
+BEAM terms with defensive limits: pids, ports, references, functions, bindings
+deeper than 32 levels, bindings with more than 10,000 nodes, and encoded
+bindings larger than 64 KiB are rejected. The server stops if a monitored store
+process is lost; adapters with non-process handles fail closed when an operation
+cannot reach their backend.
+
+For multiple Erlang nodes, add `session_clustered: true` with a genuinely
+shared adapter and explicit namespace. Requests on any peer can load the same
+session, and publishes fan out asynchronously once to each live peer. Use a
+globally unique namespace when unrelated deployments share the store or Erlang
+cluster. Streams remain local processes and reopen after failover; event replay
+and exactly-once delivery across a network partition are not promised.
+Legacy notification delivery reloads each live stream's session and rechecks
+its authorization before enqueueing an event. Store latency and signature
+verification cost are therefore part of the legacy fanout path; size durable
+backends for the expected number of concurrent legacy streams.
 
 Plug-only streaming selection is explicit and validated at
 `AttestoMCP.Server.Plug.init/1`:

@@ -31,9 +31,10 @@ Mint; those are not part of the base consumer runtime and no Igniter or HTTP
 client module is used by the server or protected-resource boundary. A consumer
 does not pull this optional graph unless the host independently enables
 Igniter. `attesto_phoenix` is detected only when the host already declares it;
-it is not a root dependency of this package. On that installer path the host
-receives a direct compatible Req dependency because the enabled default CIMD
-fetcher needs an HTTP client at runtime. The reusable and generated-host
+it is not a root dependency of this package. The installer does not enable CIMD
+or add Req by default; with explicit `--enable-cimd`, the host receives a direct
+compatible Req dependency because the enabled default CIMD fetcher needs an
+HTTP client at runtime. The reusable and generated-host
 compatibility checks accept public-Hex `attesto_phoenix` requirements
 overlapping `>= 2.14.1 and < 3.0.0` and Req requirements overlapping
 `>= 0.6.1 and < 1.0.0`; the exact floor check resolved `attesto_phoenix`

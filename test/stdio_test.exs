@@ -6,6 +6,92 @@ defmodule AttestoMCP.Server.StdioTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Stdio
 
+  defmodule FailInitializationStore do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    alias AttestoMCP.Server.SessionStore.ETS
+
+    defdelegate save(store, key, record), to: ETS
+    defdelegate load(store, key), to: ETS
+    defdelegate delete(store, key), to: ETS
+    defdelegate list_active(store), to: ETS
+    defdelegate update_ttl(store, key, now), to: ETS
+    defdelegate cleanup_expired(store), to: ETS
+
+    def update(store, key, fun) do
+      ETS.update(store, key, fn record ->
+        case fun.(record) do
+          {:ok, %{"initialized" => true}} -> {:error, :write_failed}
+          result -> result
+        end
+      end)
+    end
+  end
+
+  test "legacy stdio accepts a structured principal" do
+    {:ok, server} = Server.start_link([])
+
+    input =
+      Jason.encode!(%{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: %{
+          "protocolVersion" => "2025-11-25",
+          "capabilities" => %{},
+          "clientInfo" => %{"name" => "structured-principal", "version" => "1.0"}
+        }
+      }) <> "\n"
+
+    principal = %URI{scheme: "https", host: "example.com", path: "/principal"}
+
+    output =
+      capture_io(input, fn ->
+        assert :ok = Stdio.run(server, context: %{principal: principal})
+      end)
+
+    assert get_in(Jason.decode!(String.trim(output)), ["result", "protocolVersion"]) ==
+             "2025-11-25"
+  end
+
+  test "legacy stdio stays uninitialized when durable initialization fails" do
+    {:ok, store} = start_supervised(AttestoMCP.Server.SessionStore.ETS)
+
+    {:ok, server} =
+      start_supervised(
+        {Server,
+         session_store: {FailInitializationStore, store},
+         session_namespace: "stdio-failed-initialization"}
+      )
+
+    input =
+      [
+        %{
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: %{
+            "protocolVersion" => "2025-11-25",
+            "capabilities" => %{},
+            "clientInfo" => %{"name" => "failed-initialization", "version" => "1.0"}
+          }
+        },
+        %{jsonrpc: "2.0", method: "notifications/initialized", params: %{}},
+        %{jsonrpc: "2.0", id: 2, method: "tools/list", params: %{}}
+      ]
+      |> Enum.map_join("\n", &Jason.encode!/1)
+      |> Kernel.<>("\n")
+
+    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-write-failure") end)
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.find(messages, &(&1["id"] == 1))["result"]["protocolVersion"] == "2025-11-25"
+
+    assert get_in(Enum.find(messages, &(&1["id"] == 2)), ["error", "data", "reason"]) ==
+             "initialized_notification_required"
+  end
+
   test "interleaves modern request IDs and drains workers at EOF" do
     {:ok, server} = Server.start_link(max_concurrency: 4)
 

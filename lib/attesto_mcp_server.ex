@@ -26,7 +26,9 @@ defmodule AttestoMCP.Server.API do
   `:attesto_context`) when the Plug boundary is used. A successful callback
   returns `{:ok, result}`, an application failure returns `{:error, reason}`,
   and an interactive callback returns `{:input_required, request_map}` with
-  typed MRTR request entries.
+  typed MRTR request entries. An HTTP `context_builder` contributes only the
+  nested `:host_context` map. Use `AttestoMCP.Server.Result.error/2` when an
+  error message and stable code are intentionally safe to disclose.
   """
 
   @typedoc "A supervised server pid or a registered server name."
@@ -34,6 +36,9 @@ defmodule AttestoMCP.Server.API do
 
   @typedoc "A cache scope; string values are restricted to `\"private\"` or `\"public\"`."
   @type cache_scope :: :private | :public | String.t()
+
+  @typedoc "One primitive registration accepted by the atomic batch and startup APIs."
+  @type registration :: {atom(), String.t(), map() | keyword()}
 
   @typedoc "A supported server startup option and its value."
   @type server_option ::
@@ -63,6 +68,14 @@ defmodule AttestoMCP.Server.API do
           | {:clustered, boolean()}
           | {:request_state_ttl, pos_integer()}
           | {:scope_map, map()}
+          | {:default_scopes, [String.t()]}
+          | {:registrations, [registration()]}
+          | {:session_store, AttestoMCP.Server.SessionStore.adapter()}
+          | {:session_namespace, String.t()}
+          | {:session_clustered, boolean()}
+          | {:telemetry_metadata, map()}
+          | {:exception_reporter, term()}
+          | {:handler_task_init, term()}
           | {:subscription_timeout, pos_integer()}
           | {:page_size, pos_integer()}
           | {:cache_ttl_ms, non_neg_integer()}
@@ -126,6 +139,10 @@ defmodule AttestoMCP.Server.API do
   @spec start_link(server_opts()) :: GenServer.on_start()
   defdelegate start_link(opts \\ []), to: AttestoMCP.Server
 
+  @doc "Returns a supervision child spec keyed by the optional registered server name."
+  @spec child_spec(server_opts()) :: Supervisor.child_spec()
+  defdelegate child_spec(opts \\ []), to: AttestoMCP.Server
+
   @doc "Registers a tool definition and publishes a modern catalog invalidation."
   @spec register_tool(server(), String.t(), definition()) :: :ok | {:error, term()}
   defdelegate register_tool(server, name, definition), to: AttestoMCP.Server
@@ -164,6 +181,10 @@ defmodule AttestoMCP.Server.API do
   def register(server, type, identity, definition),
     do: AttestoMCP.Server.register(server, type, identity, definition)
 
+  @doc "Atomically registers a bounded primitive batch with coalesced invalidations."
+  @spec register_all(server(), [registration()]) :: :ok | {:error, term()}
+  defdelegate register_all(server, registrations), to: AttestoMCP.Server
+
   @doc "Dispatches one decoded request through the shared protocol core."
   @spec dispatch(server(), request(), handler_context(), keyword()) :: term()
   def dispatch(server, request, context \\ %{}, opts \\ []),
@@ -195,7 +216,7 @@ defmodule AttestoMCP.Server.API do
   @spec delete_session(server(), String.t()) :: :ok | {:error, term()}
   defdelegate delete_session(server, id), to: AttestoMCP.Server
 
-  @doc "Publishes a filtered modern notification and legacy event."
+  @doc "Queues a filtered modern notification and publishes its legacy event."
   @spec publish(server(), map(), keyword()) :: :ok | {:error, term()}
   def publish(server, notification, opts \\ []),
     do: AttestoMCP.Server.publish(server, notification, opts)

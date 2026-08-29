@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0 - 2026-08-28
+
+- Add per-mount RFC 9728 `scopes_supported` configuration. Custom-scope
+  deployments no longer have to advertise the package's generic scopes and
+  cause clients to request grants the authorization server does not issue.
+- Add isolated host context builders, bounded server-wide telemetry dimensions,
+  exact primitive identity on handler spans, host exception reporting, and a
+  handler-task initialization callback with function and MFA forms.
+- Add explicit bounded client-safe handler failures with
+  `AttestoMCP.Server.Result.error/2`; arbitrary failure terms and exceptions
+  remain private.
+- Add host-wide `default_scopes` with explicit method-map precedence and
+  additive subscription delivery scopes.
+- Add atomic bounded `register_all/2`, startup `:registrations`, coalesced
+  catalog invalidations, exact registry recovery, and stable named child specs.
+- Add a durable legacy-session adapter contract, versioned bounded records,
+  fail-closed store monitoring, and an in-memory default adapter with bounded
+  fair cleanup, including immediate cleanup bookkeeping removal on explicit
+  deletion. Optional clustered session mode uses one explicit shared store and
+  namespace and fans notifications out to live peers; process-backed streams
+  reconnect after failover, and transient store reads do not mislabel live
+  streams as expired.
+- Add opt-in HTTP definition-scope policies for filtered tools/resource
+  catalogs and selected tool/resource calls. Selected definitions are bound
+  before MRTR retry-state consumption and authorized through the prepared
+  Attesto boundary; hidden and denied definitions remain neutral, while the
+  existing generic scope defaults and subscription generic-plus-definition
+  reauthorization remain unchanged.
+- Make AttestoPhoenix Client ID Metadata Documents an explicit installer opt-in;
+  existing cache, repository, prefix, allowlist, and disabled settings remain
+  authoritative, and Req is required only for that opt-in.
+- Reuse only one statically proven published
+  `attesto_routes(protected_resource_paths: [path])` metadata route for the
+  selected MCP path, preserving it byte-for-byte and adding only MCP wiring.
+- Preflight Phoenix endpoint parser provenance and add a literal static-route
+  bypass, including route-equivalent trailing slashes, only for a direct
+  standard `Plug.Parsers` declaration; custom or ambiguous body readers receive
+  an actionable refusal.
+- Require header-only bearer presentation for both static and resolved auth,
+  require successful tools with `outputSchema` to return conforming structured
+  content even under permissive schemas, reject ungrantable definition scopes,
+  redact private server options from crash status, and ignore unrelated calls,
+  casts, and mailbox messages without terminating the server.
+
 ## 0.10.6 - 2026-08-28
 
 - Apply the automatic AttestoPhoenix access-token JTI revocation check and

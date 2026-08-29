@@ -72,6 +72,9 @@ defmodule AttestoMCP.Server.P2AMatrixTest do
 
                  %{"mode" => "mismatch"}, _ ->
                    {:ok, %{"structuredContent" => %{"ok" => "no"}, "content" => []}}
+
+                 %{"mode" => "missing-structured"}, _ ->
+                   {:ok, %{"content" => [%{"type" => "text", "text" => "missing"}]}}
                end
              })
 
@@ -79,6 +82,30 @@ defmodule AttestoMCP.Server.P2AMatrixTest do
              Server.register_tool(server, "filtered", %{
                required_scopes: ["matrix:private"],
                handler: fn _, _ -> {:ok, "secret"} end
+             })
+
+    assert :ok =
+             Server.register_tool(server, "permissive-output-schema", %{
+               output_schema: %{},
+               handler: fn _, _ -> {:ok, "missing structured content"} end
+             })
+
+    assert :ok =
+             Server.register_tool(server, "permissive-null-output-schema", %{
+               output_schema: %{},
+               handler: fn _, _ -> {:ok, nil} end
+             })
+
+    assert :ok =
+             Server.register_tool(server, "reject-all-output-schema", %{
+               output_schema: false,
+               handler: fn _, _ -> {:ok, %{"accepted" => false}} end
+             })
+
+    assert {:error, {:invalid_definition, :required_scopes}} =
+             Server.register_tool(server, "invalid-scope", %{
+               required_scopes: ["contains a space"],
+               handler: fn _, _ -> {:ok, "unreachable"} end
              })
 
     assert {1, %{"result" => %{"resultType" => "complete", "isError" => false}}} =
@@ -92,6 +119,30 @@ defmodule AttestoMCP.Server.P2AMatrixTest do
 
     assert {4, %{"result" => %{"isError" => true}}} =
              call(server, 4, %{"name" => "variants", "arguments" => %{"mode" => "mismatch"}})
+
+    assert {10, %{"result" => %{"isError" => true}}} =
+             call(server, 10, %{
+               "name" => "variants",
+               "arguments" => %{"mode" => "missing-structured"}
+             })
+
+    assert {11, %{"result" => %{"isError" => true}}} =
+             call(server, 11, %{
+               "name" => "permissive-output-schema",
+               "arguments" => %{}
+             })
+
+    assert {12, %{"result" => %{"isError" => true}}} =
+             call(server, 12, %{
+               "name" => "permissive-null-output-schema",
+               "arguments" => %{}
+             })
+
+    assert {13, %{"result" => %{"isError" => true}}} =
+             call(server, 13, %{
+               "name" => "reject-all-output-schema",
+               "arguments" => %{}
+             })
 
     assert {5, %{"error" => %{"code" => -32602}}} =
              call(server, 5, %{"name" => "variants", "arguments" => %{}}, @modern)

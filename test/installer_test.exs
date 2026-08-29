@@ -19,8 +19,8 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert diff =~ "def __attesto_mcp_server_installer__, do: :v1"
     assert diff =~ "defmodule MetadataPlug do"
     assert diff =~ "AttestoMCP.Server.Phoenix.attesto_config(:sample)"
-    assert diff =~ ~s({:req, ">= 0.6.1 and < 1.0.0"})
-    assert diff =~ "client_id_metadata: [enabled: true]"
+    refute diff =~ ~s({:req, ">= 0.6.1 and < 1.0.0"})
+    refute diff =~ "client_id_metadata: [enabled: true]"
     assert diff =~ "native_apps: [loopback_include_localhost: true]"
     assert diff =~ "Keyword.put_new_lazy(:server_version, &application_version/0)"
     refute diff =~ "server_version: \""
@@ -333,8 +333,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       |> Rewrite.source!("config/config.exs")
       |> Rewrite.Source.get(:content)
 
-    assert content =~
-             ~s(client_id_metadata: [allowed_hosts: ["clients.example"], enabled: true])
+    assert content =~ ~s(client_id_metadata: [allowed_hosts: ["clients.example"]])
 
     assert content =~
              "native_apps: [reject_embedded_user_agents: true, loopback_include_localhost: true]"
@@ -347,7 +346,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
         req_dependency:
           ~s({:req, "~> 0.5", override: true, runtime: true, optional: false, app: true, hex: :req, manager: :mix, env: :prod})
       )
-      |> install(["--base-url", "https://mcp.example.com"])
+      |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
     assert installed.issues == []
     diff = Igniter.Test.diff(installed)
@@ -372,7 +371,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     partial =
       true
       |> project(req_dependency: ~s({:req, ">= 0.6.0 and < 0.8.0"}))
-      |> install(["--base-url", "https://mcp.example.com"])
+      |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
     assert partial.issues == []
 
@@ -382,7 +381,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     narrower =
       true
       |> project(req_dependency: ~s({:req, "~> 0.7"}))
-      |> install(["--base-url", "https://mcp.example.com"])
+      |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
     assert narrower.issues == []
     assert Igniter.Test.diff(narrower) =~ ~s({:req, "~> 0.7"})
@@ -390,7 +389,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     redundant =
       true
       |> project(req_dependency: ~s({:req, ">= 0.6.1 and < 1.0.0 and >= 0.7.0"}))
-      |> install(["--base-url", "https://mcp.example.com"])
+      |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
     assert redundant.issues == []
 
@@ -442,7 +441,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       installed =
         true
         |> project(options)
-        |> install(["--base-url", "https://mcp.example.com"])
+        |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
       assert installed.issues != []
       assert Igniter.Test.diff(installed) == ""
@@ -455,7 +454,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       |> project(
         req_dependency: "{:req, (send(self(), :installer_dependency_evaluated); \"~> 0.6\")}"
       )
-      |> install(["--base-url", "https://mcp.example.com"])
+      |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
     assert Enum.any?(installed.issues, &String.contains?(&1, "dynamic"))
     assert Igniter.Test.diff(installed) == ""
@@ -481,7 +480,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       installed =
         true
         |> project(options)
-        |> install(["--base-url", "https://mcp.example.com"])
+        |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
       assert installed.issues != []
       assert Igniter.Test.diff(installed) == ""
@@ -492,7 +491,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     installed =
       true
       |> project(req_dependency: ~s({:req, "0.7.0+private"}))
-      |> install(["--base-url", "https://mcp.example.com"])
+      |> install(["--base-url", "https://mcp.example.com", "--enable-cimd"])
 
     assert installed.issues == []
 

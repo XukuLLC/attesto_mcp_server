@@ -12,6 +12,15 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       [config: %{issuer: "https://runtime-issuer.example"}]
     end
 
+    def custom_scopes(counter) do
+      Agent.update(counter, &(&1 + 1))
+
+      [
+        config: %{issuer: "https://runtime-issuer.example"},
+        scopes_supported: ["workspace.documents.read", "workspace.documents.write"]
+      ]
+    end
+
     def unavailable(counter) do
       Agent.update(counter, &(&1 + 1))
       raise "runtime authorization configuration unavailable"
@@ -45,6 +54,74 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
     conn = AttestoMCP.Server.Plug.call(conn, opts)
     assert conn.status == 200
     assert %{"resource" => "http://www.example.com/mcp"} = Jason.decode!(conn.resp_body)
+  end
+
+  test "each mount advertises only its configured authorization scopes", %{server: server} do
+    documents =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/documents",
+        scopes_supported: ["documents.read"],
+        auth: [issuer: "https://issuer.example", resource: "https://api.example/documents"]
+      )
+
+    reports =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/reports",
+        auth: [
+          issuer: "https://issuer.example",
+          resource: "https://api.example/reports",
+          scopes_supported: ["reports.read"]
+        ]
+      )
+
+    documents_response =
+      conn(:get, "/.well-known/oauth-protected-resource/documents")
+      |> AttestoMCP.Server.Plug.call(documents)
+      |> Map.fetch!(:resp_body)
+      |> Jason.decode!()
+
+    reports_response =
+      conn(:get, "/.well-known/oauth-protected-resource/reports")
+      |> AttestoMCP.Server.Plug.call(reports)
+      |> Map.fetch!(:resp_body)
+      |> Jason.decode!()
+
+    assert documents_response["scopes_supported"] == ["documents.read"]
+    assert reports_response["scopes_supported"] == ["reports.read"]
+  end
+
+  test "metadata keeps the generic default and rejects conflicting scope declarations", %{
+    server: server
+  } do
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [issuer: "https://issuer.example", resource: "https://api.example/mcp"]
+      )
+
+    response =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(state)
+      |> Map.fetch!(:resp_body)
+      |> Jason.decode!()
+
+    assert response["scopes_supported"] == AttestoMCP.Scopes.all()
+
+    assert_raise ArgumentError, ~r/conflicting top-level and auth option/, fn ->
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        scopes_supported: ["documents.read"],
+        auth: [
+          issuer: "https://issuer.example",
+          resource: "https://api.example/mcp",
+          scopes_supported: ["reports.read"]
+        ]
+      )
+    end
   end
 
   test "metadata resolves a documented config callback", %{server: server} do
@@ -94,6 +171,32 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
            } = Jason.decode!(response.resp_body)
   end
 
+  test "metadata advertises custom scopes from the effective runtime auth snapshot", %{
+    server: server
+  } do
+    counter = start_counter()
+
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: {RuntimeAuth, :custom_scopes, [counter]},
+        resource: "https://canonical-resource.example/mcp"
+      )
+
+    response =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(state)
+
+    assert response.status == 200
+    assert Agent.get(counter, & &1) == 1
+
+    assert Jason.decode!(response.resp_body)["scopes_supported"] == [
+             "workspace.documents.read",
+             "workspace.documents.write"
+           ]
+  end
+
   test "runtime auth resolver failure makes metadata generically unavailable", %{server: server} do
     counter = start_counter()
 
@@ -134,6 +237,18 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
         path: "/mcp",
         resource: "http://one.example/mcp",
         auth: [issuer: "https://issuer.example", resource: "http://two.example/mcp"]
+      )
+    end
+
+    assert_raise ArgumentError, ~r/bearer_methods.*only :header/, fn ->
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [
+          issuer: "https://issuer.example",
+          resource: "http://www.example.com/mcp",
+          bearer_methods: [:body]
+        ]
       )
     end
   end

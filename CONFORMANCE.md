@@ -23,6 +23,10 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
   `c39c0cd59444d08ed1d356d836b05490caf13ec9bc0c511a43523fc98a7878c4`
 - `0.10.4` patch-candidate source fingerprint:
   `4e40ffedc43508c726dccf9d67008dec9768fc304b830bb845c9806a349a70bb`
+- `0.11.0` release-candidate source fingerprint:
+  `b6b9e074aa1d3351650b16bdf434cdb0f50556bcbbe974f093648dd753505962`
+- `0.11.0` 2026 runner completed at: `2026-08-29T06:50:48Z`
+- `0.11.0` 2025 runner completed at: `2026-08-29T06:50:50Z`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
@@ -72,6 +76,17 @@ doctest plus 311 tests), 81.59% coverage, zero-error/zero-skip Dialyzer,
 package construction, and the Hex advisory audit. Hosted run 33190111361
 passed all four jobs at `2026-08-28T16:34:28Z` against implementation commit
 `e7d19a02ad9b73ccdd19b9b7a583590bfa5fcf56`.
+The `0.11.0` release candidate adds host callbacks, explicit client-visible
+application errors, durable legacy-session storage, clustered publication,
+subscription reauthorization, trusted telemetry metadata, and a conservative
+Phoenix installer path. Its local aggregate gate passed 400 checks (one
+doctest plus 399 tests), 82.21% coverage, zero-error/zero-skip Dialyzer,
+package construction, and the Hex advisory audit. The full installer matrix
+also passed against released dependencies, the pinned `attesto_phoenix` floor,
+a freshly generated Phoenix 1.8.13 host, installer reruns, authenticated MCP
+traffic, and the no-Igniter fallback. The frozen official runner was repeated
+at the candidate fingerprint above with the same scored and raw totals shown
+in the table.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |

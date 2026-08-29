@@ -89,7 +89,7 @@ defmodule AttestoMCP.Server.Subscriptions do
       }
 
       send(sink, {:mcp_subscription, tag, id, acknowledgement(id, filter)})
-      Telemetry.execute([:subscription, :open], %{count: 1}, %{transport: :core})
+      telemetry(state, [:subscription, :open], %{count: 1}, %{transport: :core})
       {:reply, {:ok, id}, put_in(state, [:subscriptions, {sink, id}], subscription)}
     else
       _ -> {:reply, {:error, :invalid_filter}, state}
@@ -107,7 +107,7 @@ defmodule AttestoMCP.Server.Subscriptions do
   end
 
   def handle_call({:close, id, owner}, {caller, _tag}, state) do
-    Telemetry.execute([:subscription, :close], %{count: 1}, %{transport: :core})
+    telemetry(state, [:subscription, :close], %{count: 1}, %{transport: :core})
 
     key = find_key(state, id, owner)
 
@@ -324,7 +324,7 @@ defmodule AttestoMCP.Server.Subscriptions do
       not allowed ->
         if matches?(subscription.filter, event),
           do:
-            Telemetry.execute([:subscription, :suppressed], %{count: 1}, %{
+            telemetry(state, [:subscription, :suppressed], %{count: 1}, %{
               reason: :authorization,
               transport: :core
             })
@@ -336,7 +336,7 @@ defmodule AttestoMCP.Server.Subscriptions do
           send(subscription.sink, {:mcp_subscription_backpressure, id})
         end
 
-        Telemetry.execute([:subscription, :backpressure], %{count: 1}, %{transport: :core})
+        telemetry(state, [:subscription, :backpressure], %{count: 1}, %{transport: :core})
         put_in(state, [:subscriptions, {subscription.sink, id}, :overflowed], true)
 
       true ->
@@ -354,6 +354,14 @@ defmodule AttestoMCP.Server.Subscriptions do
     Enum.reduce(state.subscriptions, state, fn {_key, subscription}, acc ->
       deliver(acc, subscription.id, subscription, notification, opts)
     end)
+  end
+
+  defp telemetry(state, event, measurements, metadata) do
+    Telemetry.execute(
+      event,
+      measurements,
+      Map.put(metadata, :telemetry_metadata, state.opts[:telemetry_metadata])
+    )
   end
 
   defp authorized?(authorized, context) when is_function(authorized, 1) do

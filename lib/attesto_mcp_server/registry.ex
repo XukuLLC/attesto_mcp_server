@@ -6,6 +6,8 @@ defmodule AttestoMCP.Server.Registry do
 
   @typedoc "A normalized JSON-compatible primitive definition."
   @type definition :: map()
+  @typedoc "One primitive registration supplied to the atomic batch API."
+  @type registration :: {primitive(), String.t(), map() | keyword()}
   use GenServer
 
   alias AttestoMCP.Server.Schema
@@ -14,6 +16,7 @@ defmodule AttestoMCP.Server.Registry do
   @max_identity_bytes 256
   @max_name_bytes 64
   @max_definition_depth 64
+  @max_batch_size 1_000
   @definition_key_aliases %{
     "name" => :name,
     "description" => :description,
@@ -51,6 +54,22 @@ defmodule AttestoMCP.Server.Registry do
   end
 
   def register(_pid, _type, _identity, _definition), do: {:error, :invalid_definition}
+
+  @doc "Validates and registers a batch atomically, returning its normalized definitions."
+  @spec register_all(pid(), [registration()]) ::
+          {:ok, [{primitive(), String.t(), definition()}]} | {:error, term()}
+  def register_all(pid, registrations)
+      when is_pid(pid) and is_list(registrations) and length(registrations) <= @max_batch_size do
+    with {:ok, normalized} <- normalize_registrations(registrations) do
+      GenServer.call(pid, {:register_all, normalized})
+    end
+  end
+
+  def register_all(_pid, registrations) when is_list(registrations),
+    do: {:error, :too_many_registrations}
+
+  def register_all(_pid, _registrations), do: {:error, :invalid_registrations}
+
   @doc "Returns all normalized definitions grouped by primitive category."
   @spec snapshot(pid()) :: %{primitive() => %{optional(term()) => definition()}}
   def snapshot(pid), do: GenServer.call(pid, :snapshot)
@@ -68,27 +87,35 @@ defmodule AttestoMCP.Server.Registry do
 
   @impl true
   def handle_call({:register, type, identity, definition}, _from, state) do
-    items = state.items[type]
+    case put_registration(state.items, {type, identity, definition}) do
+      {:ok, items} ->
+        {:reply, :ok, %{state | items: items, revision: state.revision + 1}}
 
-    ref = definition[:ref] || definition["ref"]
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
 
-    duplicate_ref =
-      if type == :completion do
-        Enum.find_value(items, fn {_key, item} ->
-          item[:ref] == ref and not is_nil(ref)
-        end)
-      end
+  def handle_call({:register_all, registrations}, _from, state) do
+    result =
+      Enum.reduce_while(registrations, {:ok, state.items}, fn registration, {:ok, items} ->
+        case put_registration(items, registration) do
+          {:ok, items} -> {:cont, {:ok, items}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
 
-    cond do
-      Map.has_key?(items, identity) ->
-        {:reply, {:error, {:duplicate, type, identity}}, state}
+    case result do
+      {:ok, items} ->
+        {:reply, {:ok, registrations},
+         %{
+           state
+           | items: items,
+             revision: state.revision + length(registrations)
+         }}
 
-      duplicate_ref != nil ->
-        {:reply, {:error, {:duplicate, :completion_ref, ref}}, state}
-
-      true ->
-        state = put_in(state, [:items, type, identity], definition)
-        {:reply, :ok, %{state | revision: state.revision + 1}}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -97,6 +124,51 @@ defmodule AttestoMCP.Server.Registry do
 
   def handle_call({:list, type}, _from, state) do
     {:reply, state.items[type] |> Map.values() |> Enum.sort_by(& &1.identity), state}
+  end
+
+  defp normalize_registrations(registrations) do
+    Enum.reduce_while(registrations, {:ok, []}, fn
+      {type, identity, definition}, {:ok, normalized} when type in @types ->
+        case normalize(type, identity, definition) do
+          {:ok, definition} ->
+            {:cont, {:ok, [{type, identity, definition} | normalized]}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+
+      _registration, _acc ->
+        {:halt, {:error, :invalid_registration}}
+    end)
+    |> case do
+      {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp put_registration(items, {type, identity, definition}) do
+    type_items = items[type]
+    ref = definition[:ref] || definition["ref"]
+
+    duplicate_ref =
+      if type == :completion do
+        Enum.any?(type_items, fn {_key, item} ->
+          item[:ref] == ref and not is_nil(ref)
+        end)
+      else
+        false
+      end
+
+    cond do
+      Map.has_key?(type_items, identity) ->
+        {:error, {:duplicate, type, identity}}
+
+      duplicate_ref ->
+        {:error, {:duplicate, :completion_ref, ref}}
+
+      true ->
+        {:ok, put_in(items, [type, identity], definition)}
+    end
   end
 
   defp normalize(type, identity, definition) do
@@ -703,7 +775,7 @@ defmodule AttestoMCP.Server.Registry do
   defp valid_text(_, field), do: {:error, {:invalid_definition, field}}
 
   defp valid_scopes(scopes) when is_list(scopes) do
-    if Enum.uniq(scopes) == scopes and Enum.all?(scopes, &(is_binary(&1) and &1 != "")),
+    if Enum.uniq(scopes) == scopes and Attesto.Scope.valid_list?(scopes, allow_empty?: true),
       do: :ok,
       else: {:error, {:invalid_definition, :required_scopes}}
   end

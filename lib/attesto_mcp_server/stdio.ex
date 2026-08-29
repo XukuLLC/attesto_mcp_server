@@ -499,18 +499,22 @@ defmodule AttestoMCP.Server.Stdio do
            Map.get(context, :tenant) || Map.get(context, "tenant")
          ) do
       {:ok, %{version: version}} when version in @legacy_versions ->
-        :ok = AttestoMCP.Server.mark_initialized(server, session_id)
+        case AttestoMCP.Server.mark_initialized(server, session_id) do
+          :ok ->
+            _ =
+              AttestoMCP.Server.open_legacy_stream(
+                server,
+                session_id,
+                context_principal(context),
+                Map.get(context, :tenant) || Map.get(context, "tenant"),
+                self()
+              )
 
-        _ =
-          AttestoMCP.Server.open_legacy_stream(
-            server,
-            session_id,
-            context_principal(context),
-            Map.get(context, :tenant) || Map.get(context, "tenant"),
-            self()
-          )
+            true
 
-        true
+          {:error, _reason} ->
+            false
+        end
 
       {:ok, %{version: nil}} ->
         if System.monotonic_time(:millisecond) < deadline do
