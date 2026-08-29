@@ -119,8 +119,12 @@ routes stop before editing with the manual wiring required. Otherwise the
 metadata forward uses a generated application-owned wrapper, preserving
 compatibility with Phoenix 1.7's one-forward-per-plug rule. A direct standard
 Phoenix endpoint parser is wrapped to bypass `/mcp` and route-equivalent
-trailing slashes before authentication; custom parser wrappers receive an
-actionable preflight warning while retaining host ownership. It never creates an issuer, credentials,
+trailing slashes before authentication; custom or ambiguous parser setups make
+the installer stop before any edit and report the required remediation while
+retaining host ownership. If the endpoint cannot be inferred or its source is
+unavailable, installation proceeds with a warning and leaves manual pipeline
+verification to the host. A proven simple endpoint with no parser produces an
+informational warning but needs no endpoint edit. It never creates an issuer, credentials,
 consent policy, token storage, or dynamic-registration policy. See
 [Phoenix installation](docs/usage.md#phoenix-installation) for options and the
 division of responsibilities between the packages.

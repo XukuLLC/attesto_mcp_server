@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.11.0 - 2026-08-28
+## 0.11.0 - 2026-08-29
 
 - Add per-mount RFC 9728 `scopes_supported` configuration. Custom-scope
   deployments no longer have to advertise the package's generic scopes and
@@ -8,6 +8,10 @@
 - Add isolated host context builders, bounded server-wide telemetry dimensions,
   exact primitive identity on handler spans, host exception reporting, and a
   handler-task initialization callback with function and MFA forms.
+- Document the existing per-definition `authorize` contract, including callback
+  forms, host context, evaluation order, and neutral denial behavior. Refuse
+  non-isolated or uninspectable endpoint sources before editing, and distinguish
+  those failures from the installer warnings that safely continue.
 - Add explicit bounded client-safe handler failures with
   `AttestoMCP.Server.Result.error/2`; arbitrary failure terms and exceptions
   remain private.

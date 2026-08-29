@@ -1915,7 +1915,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
         igniter
 
       {:error, message} ->
-        Igniter.add_warning(igniter, message)
+        Igniter.add_issue(igniter, message)
 
       {:ok, :present} ->
         igniter
@@ -1929,22 +1929,32 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
     end
   end
 
-  defp endpoint_parser_preflight(_igniter, nil, _path),
-    do:
-      {:warning,
-       "Phoenix endpoint could not be inferred; see the generated MCP installer notice for the required parser bypass."}
-
   defp endpoint_parser_preflight(igniter, router, path) do
     endpoint = inferred_endpoint_module(router)
 
-    case endpoint && Igniter.Project.Module.find_module(igniter, endpoint) do
+    case endpoint do
+      nil ->
+        {:warning,
+         "Phoenix endpoint could not be inferred from router #{inspect(router)}; " <>
+           "installation will continue without an endpoint edit. Verify the selected host " <>
+           "endpoint manually; a direct standard `Plug.Parsers` declaration must be wrapped " <>
+           "with `plug Elixir.AttestoMCP.Server.PhoenixParser, mcp_path: #{inspect(path)}, ...` " <>
+           "while preserving its options."}
+
+      endpoint ->
+        endpoint_parser_preflight(igniter, router, path, endpoint)
+    end
+  end
+
+  defp endpoint_parser_preflight(igniter, router, path, endpoint) do
+    case Igniter.Project.Module.find_module(igniter, endpoint) do
       {:ok, {_igniter, _source, zipper}} ->
         with true <- isolated_module_source?(zipper),
              {:ok, body} <- Igniter.Code.Common.move_to_do_block(zipper) do
           endpoint_parser_status(Sourceror.Zipper.node(body), path, endpoint, router)
         else
           false ->
-            {:warning,
+            {:error,
              endpoint_parser_warning(
                endpoint,
                path,
@@ -1952,7 +1962,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
              )}
 
           :error ->
-            {:warning,
+            {:error,
              endpoint_parser_warning(endpoint, path, "the endpoint body could not be inspected")}
         end
 
@@ -1972,12 +1982,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
 
     cond do
       parser_calls == [] and endpoint_no_parser_pipeline_safe?(body, router) ->
-        {:warning,
-         endpoint_parser_warning(
-           endpoint,
-           path,
-           "no direct Plug.Parsers declaration was found; the MCP plug must remain responsible for its own bounded body decoding"
-         )}
+        {:warning, endpoint_no_parser_warning(endpoint, path)}
 
       parser_calls == [] ->
         {:error,
@@ -2668,6 +2673,14 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
       "path or be reordered/removed; do not assume a wrapper makes custom behavior safe. " <>
       "Then test malformed and oversized unauthenticated MCP bodies are refused by " <>
       "authentication before JSON decoding; metadata and unrelated routes must remain parsed."
+  end
+
+  defp endpoint_no_parser_warning(endpoint, path) do
+    "Phoenix endpoint #{inspect(endpoint)} has a statically proven simple pipeline with no " <>
+      "direct `Plug.Parsers` declaration for the exact MCP path #{inspect(path)}. No endpoint " <>
+      "edit is required; the MCP Plug remains responsible for bounded body decoding. If a " <>
+      "host parser is added later, it must skip the exact MCP path and use a body-length limit " <>
+      "at least as strict as the MCP Plug's `:max_body_bytes`."
   end
 
   defp forward_status(
@@ -3982,8 +3995,8 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
         not ordinary_metadata? and invalid_attesto_routes == [] ->
         :ok
 
-      length(exact) > 1 or length(attesto_routes) > 1 or metadata_forwards != [] or
-          ordinary_metadata? ->
+      length(exact) > 1 or length(attesto_routes) > 1 or length(metadata_forwards) > 1 or
+        (exact != [] and metadata_forwards != []) or ordinary_metadata? ->
         {:error,
          "--reuse-metadata-route found duplicate or ambiguous protected-resource metadata routes for #{inspect(metadata_path)}; remove the ambiguity or wire the routes manually"}
 
@@ -3991,6 +4004,10 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
           Enum.any?(forward_contexts, &(&1.route == :unknown)) ->
         {:error,
          "--reuse-metadata-route cannot prove the supported literal `attesto_routes(protected_resource_paths: [#{inspect(path)}])` invocation; dynamic, scoped, mismatched, or locally defined router macros require manual wiring"}
+
+      Enum.any?(metadata_forwards, &(&1.route == metadata_path)) ->
+        {:error,
+         "--reuse-metadata-route found an ordinary metadata forward at the exact canonical path #{inspect(metadata_path)}; reuse requires the supported literal `attesto_routes(protected_resource_paths: [#{inspect(path)}])` invocation, otherwise wire the routes manually"}
 
       metadata_forwards != [] ->
         {:error,

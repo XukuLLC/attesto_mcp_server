@@ -210,6 +210,31 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
     end
   end
 
+  test "reports one ordinary metadata forward specifically during reuse preflight" do
+    for {route, message} <- [
+          {"/.well-known/oauth-protected-resource/mcp",
+           "ordinary metadata forward at the exact canonical path"},
+          {"/.well-known/oauth-protected-resource/other",
+           "mismatched protected-resource metadata path"}
+        ] do
+      installed =
+        project(
+          router_source: """
+          defmodule SampleWeb.Router do
+            use Phoenix.Router
+            use AttestoPhoenix.Router
+
+            forward #{inspect(route)}, Sample.MetadataPlug
+          end
+          """
+        )
+        |> install(@args ++ ["--reuse-metadata-route"])
+
+      assert Enum.any?(installed.issues, &String.contains?(&1, message))
+      assert Igniter.Test.diff(installed) == ""
+    end
+  end
+
   test "default generation refuses any selected or ambiguous Attesto route" do
     router_bodies = [
       "use AttestoPhoenix.Router\n  attesto_routes(protected_resource_paths: [\"/mcp\"])\n  attesto_routes(protected_resource_paths: [\"/other\"])",
@@ -377,6 +402,12 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
       |> install(@args)
 
     assert installed.issues != []
+
+    assert Enum.any?(
+             installed.issues,
+             &String.contains?(&1, "custom or ambiguous endpoint plug")
+           )
+
     assert Igniter.Test.diff(installed) == ""
   end
 
@@ -397,6 +428,55 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
 
     assert installed.issues != []
     assert Igniter.Test.diff(installed) == ""
+  end
+
+  test "refuses a non-isolated endpoint source before editing" do
+    installed =
+      project(
+        extra_files: %{
+          "lib/sample_web/endpoint.ex" => """
+          defmodule SampleWeb.Endpoint do
+            use Phoenix.Endpoint, otp_app: :sample
+            plug Plug.Parsers, parsers: [:json]
+            plug SampleWeb.Router
+          end
+
+          defmodule SampleWeb.EndpointHelper do
+          end
+          """
+        }
+      )
+      |> install(@args)
+
+    assert installed.issues != []
+    assert Enum.any?(installed.issues, &String.contains?(&1, "not an isolated module"))
+    assert Igniter.Test.diff(installed) == ""
+  end
+
+  test "warns and proceeds for a proven endpoint without a direct parser" do
+    installed =
+      project(
+        extra_files: %{
+          "lib/sample_web/endpoint.ex" => """
+          defmodule SampleWeb.Endpoint do
+            use Phoenix.Endpoint, otp_app: :sample
+            plug SampleWeb.Router
+          end
+          """
+        }
+      )
+      |> install(@args)
+
+    assert installed.issues == []
+
+    assert Enum.any?(
+             installed.warnings,
+             &String.contains?(&1, "statically proven simple pipeline")
+           )
+
+    assert Enum.any?(installed.warnings, &String.contains?(&1, "No endpoint edit is required"))
+    assert Igniter.Test.diff(installed) != ""
+    refute Igniter.Test.diff(installed) =~ "AttestoMCP.Server.PhoenixParser"
   end
 
   test "refuses unsafe or ambiguous direct parser declarations before editing" do
@@ -434,6 +514,12 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
         |> install(@args)
 
       assert installed.issues != [], inspect(endpoint_body)
+
+      assert Enum.any?(
+               installed.issues,
+               &String.contains?(&1, "parser preflight could not establish")
+             )
+
       assert Igniter.Test.diff(installed) == ""
     end
   end

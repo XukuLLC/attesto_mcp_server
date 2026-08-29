@@ -98,12 +98,15 @@ mix attesto_mcp_server.install \
 
 It creates an application-owned `<App>.MCP` process, adds it to the application
 supervisor, adds conservative `server_options` in `config/config.exs`, creates
-a starter registration test, and mounts these top-level router forwards in
-order. The generated metadata wrapper keeps the two forwarded plug modules
-distinct for Phoenix 1.7 compatibility. On the automatic AttestoPhoenix path,
-the exact protected-resource options are resolved after the server, request
-header budget, and HTTP method checks on every protected MCP request. Public
-metadata requests resolve the same current options independently:
+a starter registration test, and mounts two top-level router forwards in this
+order. The generated forwards contain `server`, `path`, `auth`, `resource`, and
+`base_url`. A host that issues `workspace.mcp` can then add the
+`scopes_supported` and `default_scopes` lines shown below. The generated
+metadata wrapper keeps the two forwarded plug modules distinct for Phoenix 1.7
+compatibility. On the automatic AttestoPhoenix path, the exact
+protected-resource options are resolved after the server, request header
+budget, and HTTP method checks on every protected MCP request. Public metadata
+requests resolve the same current options independently:
 
 ```elixir
 Elixir.Phoenix.Router.forward(
@@ -151,13 +154,20 @@ leg. The installer inspects the selected Phoenix endpoint. For a direct,
 standard `Plug.Parsers` declaration it wraps that parser with
 `AttestoMCP.Server.PhoenixParser`, which bypasses the MCP route and its
 route-equivalent trailing slashes while leaving metadata, browser, JSON, and
-form routes unchanged. Custom or ambiguous parser wrappers receive an
-actionable warning and the installer skips the endpoint edit; follow that
-warning before deployment. If the endpoint parser remains host owned,
-configure its body-length limit at least as strictly as the MCP Plug's
-`:max_body_bytes`; host parsing otherwise occurs before MCP authentication. Run
-the task again safely after an interrupted install: generated modules,
-configuration, supervision, routes, and tests are idempotent. Use Igniter's
+form routes unchanged. Custom or ambiguous parser setups make the installer
+stop before editing any project file and report the required remediation. Fix
+the ambiguity or wire the parser and routes manually before deployment, then
+rerun the installer if appropriate. When the endpoint cannot be inferred from
+the selected router, or its source cannot be found, the installer warns and
+continues without an endpoint edit; the host must then verify the parser
+pipeline manually. A statically proven simple endpoint with no direct parser
+also produces an informational warning and continues, leaving bounded body
+decoding to the MCP Plug; that case needs no immediate endpoint edit. Any
+host-owned parser added or discovered later must skip the exact MCP path and
+use a body-length limit at least as strict as the MCP Plug's `:max_body_bytes`,
+because host parsing otherwise occurs before MCP authentication. Run the task
+again safely after an interrupted install: generated modules, configuration,
+supervision, routes, and tests are idempotent. Use Igniter's
 global `--dry-run` option to inspect the edits first. If the router cannot be
 selected uniquely, pass `--router MyAppWeb.Router`; the task refuses ambiguous
 router selection and prints an exact manual snippet if no router exists.
@@ -386,6 +396,52 @@ end
 
 The map is exposed only as `context.host_context`. Returning anything else or
 raising prevents handler invocation.
+
+### Per-definition authorization
+
+Every tool, resource, resource template, prompt, and completion definition may
+include an `authorize` callback. It accepts any of these forms:
+
+```elixir
+authorize: fn context -> context.principal == "operator" end
+authorize: {MyApp.MCPPolicy, :allowed?}
+authorize: {MyApp.MCPPolicy, :allowed?, [:reports]}
+```
+
+The callback receives the authenticated base context from which the handler
+context is built. Handlers additionally receive `primitive_type` and
+`primitive_identity`; `authorize` does not, so encode definition-specific input
+in the MFA prefix arguments when a shared policy module needs it. For the MFA
+forms, the base context is appended after those prefix arguments. On HTTP, it
+includes the package-owned principal, tenant, scopes, claims, and sender data;
+when `context_builder` is configured, its result is available as
+`context.host_context` too.
+
+This callback controls all catalog results (`tools/list`, `resources/list`,
+`resources/templates/list`, and `prompts/list`) and all definition lookups
+(`tools/call`, `resources/read`, `prompts/get`, and
+`completion/complete`). A literal `true` permits the definition. `false`, any
+other return value, or a raise, throw, or exit denies it. Catalog methods omit
+a denied definition. Lookup methods return the same method-specific unknown
+result as an unregistered definition, including across modern and legacy
+protocol revisions, and never invoke its handler. Callback failures are
+intentionally converted to denial and are not sent to `exception_reporter`.
+
+For HTTP, authentication and the effective transport scope check occur before
+protocol dispatch. Definition `required_scopes` are then checked before
+`authorize`; if those scopes are missing, the callback is not invoked. For the
+five methods explicitly mapped by an opt-in `scope_policy`, that policy also
+has to permit the definition and runs before the local `required_scopes` and
+`authorize` checks. Use `required_scopes` and `scope_policy` for grantable
+Attesto scopes. Use `authorize` for host business rules that need the
+authenticated context or `context.host_context`. When they are combined, every
+applicable check must permit access.
+
+Subscriptions are outside this callback contract. Establishment does not
+consult a resource definition's `authorize`, and delivery reauthorization
+checks the captured identity, sender binding, and required scopes rather than
+re-running host business policy. Apply changed host policy on the next request
+or reconnect, and do not rely on `authorize` to suppress subscription updates.
 
 ### Limits and scope policy
 

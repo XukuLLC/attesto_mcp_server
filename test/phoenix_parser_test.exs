@@ -22,6 +22,13 @@ defmodule AttestoMCP.Server.PhoenixParserTest do
     assert AttestoMCP.Server.PhoenixParser.call(trailing_slash, parser).body_params ==
              %Plug.Conn.Unfetched{aspect: :body_params}
 
+    repeated_trailing_slash =
+      Plug.Test.conn(:post, "/mcp//", ~s({"ok":true}))
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+
+    assert AttestoMCP.Server.PhoenixParser.call(repeated_trailing_slash, parser).body_params ==
+             %Plug.Conn.Unfetched{aspect: :body_params}
+
     nested =
       Plug.Test.conn(:post, "/mcp/admin", ~s({"ok":true}))
       |> Plug.Conn.put_req_header("content-type", "application/json")

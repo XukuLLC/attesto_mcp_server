@@ -16,6 +16,10 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
 
     def context(prefix, conn), do: %{source: prefix, request_path: conn.request_path}
 
+    def allow_operator(context), do: context.host_context == %{group: "operators"}
+
+    def allow_group(group, context), do: context.host_context == %{group: group}
+
     def task_init(parent, caller, context) do
       send(parent, {:task_init, self(), caller, context.method})
       :ok
@@ -77,6 +81,65 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
 
     assert modern_tool_call(mfa_state, token, "inspect-context").status == 200
     assert_receive {:handler_context, %{host_context: %{source: :mfa, request_path: "/mcp"}}}
+  end
+
+  test "definition authorization receives isolated host context and denies neutrally" do
+    parent = self()
+    {:ok, server} = start_server()
+
+    assert :ok =
+             Server.register_tool(server, "host-authorized", %{
+               authorize: fn context ->
+                 send(parent, {:authorize_context, context})
+                 context.host_context == %{group: "operators"}
+               end,
+               handler: fn _arguments, _context ->
+                 send(parent, :host_authorized_handler)
+                 {:ok, "ok"}
+               end
+             })
+
+    config = AttestoMCP.Test.Factory.config()
+    scope = AttestoMCP.Scopes.tools_call()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [scope])
+
+    state = fn group ->
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource],
+        scope_map: %{"tools/call" => [scope]},
+        context_builder: fn _conn -> %{group: group} end
+      )
+    end
+
+    assert modern_tool_call(state.("operators"), token, "host-authorized").status == 200
+
+    assert_receive {:authorize_context, %{host_context: %{group: "operators"}}}
+    assert_receive :host_authorized_handler
+
+    denied = modern_tool_call(state.("auditors"), token, "host-authorized")
+    assert denied.status == 200
+    assert Jason.decode!(denied.resp_body)["error"]["code"] == -32602
+    assert_receive {:authorize_context, %{host_context: %{group: "auditors"}}}
+    refute_received :host_authorized_handler
+
+    for {name, authorize} <- [
+          {"mfa-authorized", {Callbacks, :allow_operator}},
+          {"prefixed-mfa-authorized", {Callbacks, :allow_group, ["operators"]}}
+        ] do
+      assert :ok =
+               Server.register_tool(server, name, %{
+                 authorize: authorize,
+                 handler: fn _arguments, _context -> {:ok, "ok"} end
+               })
+
+      assert modern_tool_call(state.("operators"), token, name).status == 200
+
+      denied = modern_tool_call(state.("auditors"), token, name)
+      assert denied.status == 200
+      assert Jason.decode!(denied.resp_body)["error"]["code"] == -32602
+    end
   end
 
   test "invalid or raising context builders fail closed and never invoke handlers" do
