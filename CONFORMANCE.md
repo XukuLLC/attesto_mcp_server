@@ -24,11 +24,15 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - `0.10.4` patch-candidate source fingerprint:
   `4e40ffedc43508c726dccf9d67008dec9768fc304b830bb845c9806a349a70bb`
 - `0.11.0` release-candidate source fingerprint:
-  `a829092bee88d7e1bf7295f3a99014347cc3aa2b9f123c6458ab8140c4baee17`
-- `0.11.0` 2026 runner completed at: `2026-08-29T19:40:31Z`
-- `0.11.0` 2025 runner completed at: `2026-08-29T19:40:33Z`
-- `0.11.0` TypeScript SDK smoke gates completed at: `2026-08-29T19:40:36Z`
-- `0.11.0` Python SDK smoke gates completed at: `2026-08-29T19:40:39Z`
+  `0538b3fe409f75b58c03cfb3901b940d849303300c93c71c1f4f2db2b456e4d7`
+- `0.11.0` 2026 runner completed at: `2026-08-29T06:57:30Z`
+- `0.11.0` 2025 runner completed at: `2026-08-29T06:57:32Z`
+- `0.11.1` release-candidate source fingerprint:
+  `95e4d4c8266505544b6e88ef2635938efe0425a0caf8f6736f10483b55776b78`
+- `0.11.1` 2026 runner completed at: `2026-08-29T20:12:10Z`
+- `0.11.1` 2025 runner completed at: `2026-08-29T20:12:19Z`
+- `0.11.1` TypeScript SDK smoke gates completed at: `2026-08-29T20:12:36Z`
+- `0.11.1` Python SDK smoke gates completed at: `2026-08-29T20:12:54Z`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`
@@ -81,16 +85,23 @@ passed all four jobs at `2026-08-28T16:34:28Z` against implementation commit
 The `0.11.0` release candidate adds host callbacks, explicit client-visible
 application errors, durable legacy-session storage, clustered publication,
 subscription reauthorization, trusted telemetry metadata, and a conservative
-Phoenix installer path. Its local aggregate gate at ExUnit seed `595882`
-passed 404 checks (one doctest plus 403 tests), reported 82.48% coverage, and
-completed with zero-error/zero-skip Dialyzer, package construction, and the Hex
-advisory audit.
-The full installer matrix
+Phoenix installer path. Its local aggregate gate passed 400 checks (one
+doctest plus 399 tests), 82.21% coverage, zero-error/zero-skip Dialyzer,
+package construction, and the Hex advisory audit. The full installer matrix
 also passed against released dependencies, the pinned `attesto_phoenix` floor,
 a freshly generated Phoenix 1.8.13 host, installer reruns, authenticated MCP
 traffic, and the no-Igniter fallback. The frozen official runner was repeated
-at the candidate fingerprint above with the same scored and raw totals shown
-in the table.
+at the `0.11.0` fingerprint above with the same scored and raw totals shown in
+the table.
+The `0.11.1` patch candidate documents per-definition authorization, hardens
+Phoenix parser preflight and metadata-route diagnostics, clarifies host-owned
+custom-scope configuration, and adds focused regressions. Its isolated local
+suite at ExUnit seed `442413` passed 404 checks (one doctest plus 403 tests) and
+reported 82.48% coverage. Warnings-as-errors compilation, zero-error/zero-skip
+Dialyzer, package construction, and the Hex advisory audit also passed in that
+isolated environment. The frozen official runner and exact SDK client smokes
+were repeated at the `0.11.1` fingerprint above with the same scored and raw
+totals shown in the table.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |
@@ -142,7 +153,7 @@ converted to an expected failure.
 The package-owned authenticated fixture was also exercised with exact released
 official clients. Each gate negotiated the named era, listed tools, called
 `test_simple_text`, validated its text response, and closed the connection.
-These four gates were rerun against the fingerprinted `0.11.0` candidate at its
+These four gates were rerun against the fingerprinted `0.11.1` candidate at its
 recorded completion times. The package fixture wrapper inserts its own bearer
 token into each client transport. These gates therefore validate authenticated
 server protocol interoperability, not SDK OAuth discovery or token acquisition.

@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.11.0 - 2026-08-29
+## 0.11.1 - 2026-08-29
+
+- Document the existing per-definition `authorize` contract, including callback
+  forms, host context, evaluation order, neutral denial behavior, and the
+  subscription boundary; test function and MFA callbacks on both allow and
+  deny paths.
+- Refuse non-isolated or uninspectable Phoenix endpoint sources before editing,
+  distinguish those failures from safe installer warnings, and make metadata
+  route reuse diagnostics specific without relaxing preflight.
+- Clarify host-owned custom-scope configuration and pin parser bypass behavior
+  for route-equivalent repeated trailing slashes.
+
+## 0.11.0 - 2026-08-28
 
 - Add per-mount RFC 9728 `scopes_supported` configuration. Custom-scope
   deployments no longer have to advertise the package's generic scopes and
@@ -8,10 +20,6 @@
 - Add isolated host context builders, bounded server-wide telemetry dimensions,
   exact primitive identity on handler spans, host exception reporting, and a
   handler-task initialization callback with function and MFA forms.
-- Document the existing per-definition `authorize` contract, including callback
-  forms, host context, evaluation order, and neutral denial behavior. Refuse
-  non-isolated or uninspectable endpoint sources before editing, and distinguish
-  those failures from the installer warnings that safely continue.
 - Add explicit bounded client-safe handler failures with
   `AttestoMCP.Server.Result.error/2`; arbitrary failure terms and exceptions
   remain private.
