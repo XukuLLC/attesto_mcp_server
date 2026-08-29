@@ -24,9 +24,9 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - `0.10.4` patch-candidate source fingerprint:
   `4e40ffedc43508c726dccf9d67008dec9768fc304b830bb845c9806a349a70bb`
 - `0.11.0` release-candidate source fingerprint:
-  `b6b9e074aa1d3351650b16bdf434cdb0f50556bcbbe974f093648dd753505962`
-- `0.11.0` 2026 runner completed at: `2026-08-29T06:50:48Z`
-- `0.11.0` 2025 runner completed at: `2026-08-29T06:50:50Z`
+  `0538b3fe409f75b58c03cfb3901b940d849303300c93c71c1f4f2db2b456e4d7`
+- `0.11.0` 2026 runner completed at: `2026-08-29T06:57:30Z`
+- `0.11.0` 2025 runner completed at: `2026-08-29T06:57:32Z`
 - 2026 runner completed at: `2026-08-27T10:04:29Z`
 - 2025 runner completed at: `2026-08-27T10:04:31Z`
 - TypeScript SDK smoke gates completed at: `2026-08-27T10:04:34Z`

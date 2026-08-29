@@ -603,7 +603,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
   end
 
   test "each legacy HTTP leg authenticates and binds the negotiated session" do
-    {:ok, server} = Server.start_link(session_idle_timeout: 100)
+    {:ok, server} = Server.start_link(session_idle_timeout: 60_000)
     config = AttestoMCP.Test.Factory.config()
     token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
     plug = plug(server, config)
