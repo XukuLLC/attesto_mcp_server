@@ -1,0 +1,224 @@
+# Run an authenticated MCP server locally
+
+This notebook exercises the complete local request path: it creates an
+ephemeral Attesto signing key, starts an authenticated MCP endpoint on a free
+loopback port, registers a tool, mints a short-lived access token, and calls the
+tool over HTTP.
+
+> This is a local demonstration. The signing key and access token exist only in
+> this Livebook runtime. In a production Phoenix application, use the
+> `attesto_mcp_server` installer to reuse the issuer, keys, revocation, principal
+> loading, DPoP, and mTLS policy already owned by `attesto_phoenix`.
+
+## Install the dependencies
+
+```elixir
+Mix.install([
+  {:attesto_mcp_server, "~> 0.12.1"},
+  {:bandit, "~> 1.6"},
+  {:jason, "~> 1.4"},
+  {:jose, "~> 1.11"}
+], verbose: false)
+```
+
+## Create a local Attesto issuer and access token
+
+The endpoint uses a free loopback port. The EC signing key is generated in
+memory and removed from application configuration by the cleanup cell at the
+end.
+
+```elixir
+{:ok, _bandit_apps} = Application.ensure_all_started(:bandit)
+{:ok, _inets_apps} = Application.ensure_all_started(:inets)
+
+{:ok, reservation} =
+  :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}, reuseaddr: true])
+
+{:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(reservation)
+:ok = :gen_tcp.close(reservation)
+
+mcp_url = "http://127.0.0.1:#{port}/mcp"
+
+signing_pem =
+  {:ec, "P-256"}
+  |> JOSE.JWK.generate_key()
+  |> JOSE.JWK.to_pem()
+  |> elem(1)
+
+Application.put_env(:attesto, Attesto.Keystore.Static, signing_pem: signing_pem)
+
+auth_config =
+  Attesto.Config.new(
+    issuer: "https://auth.example.test",
+    audience: mcp_url,
+    keystore: Attesto.Keystore.Static,
+    principal_kinds: [
+      Attesto.PrincipalKind.new("user", "usr_",
+        required_claims: [{"client_id", :non_empty_string}]
+      )
+    ]
+  )
+
+scopes = AttestoMCP.Scopes.all()
+
+{:ok, issued_token} =
+  Attesto.Token.mint(auth_config, %{
+    kind: "user",
+    sub: "usr_livebook",
+    scopes: scopes,
+    claims: %{"client_id" => "livebook-client"}
+  })
+
+access_token = issued_token.access_token
+
+%{issuer: auth_config.issuer, resource: mcp_url, granted_scopes: scopes}
+```
+
+## Register a tool and start Bandit
+
+The in-memory customer map stands in for application code. A real handler can
+use its authenticated context to apply tenant and business policy before
+reading application data.
+
+```elixir
+customers = %{
+  "cus_123" => %{"id" => "cus_123", "name" => "Ada Lovelace"},
+  "cus_456" => %{"id" => "cus_456", "name" => "Grace Hopper"}
+}
+
+alias AttestoMCP.Server.API
+
+{:ok, server} = API.start_link()
+
+:ok =
+  API.register_tool(server, "customer_lookup", %{
+    description: "Look up a customer by ID",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{
+        "id" => %{"type" => "string", "minLength" => 1}
+      },
+      "required" => ["id"],
+      "additionalProperties" => false
+    },
+    handler: fn %{"id" => id}, _context ->
+      {:ok, Map.get(customers, id, %{"id" => id, "found" => false})}
+    end
+  })
+
+plug =
+  {AttestoMCP.Server.Plug,
+   server: server,
+   path: "/mcp",
+   auth: [config: auth_config, resource: mcp_url]}
+
+{:ok, bandit} =
+  Bandit.start_link(
+    plug: plug,
+    scheme: :http,
+    ip: {127, 0, 0, 1},
+    port: port,
+    startup_log: false
+  )
+
+%{endpoint: mcp_url, server: server, bandit: bandit}
+```
+
+## Make authenticated MCP requests
+
+MCP `2026-07-28` requests carry their protocol version and client capabilities
+in `_meta`. The transport also receives routing headers so it can authorize the
+request before decoding its body.
+
+```elixir
+protocol_version = "2026-07-28"
+
+post_mcp = fn id, method, params, name ->
+  meta = %{
+    "io.modelcontextprotocol/protocolVersion" => protocol_version,
+    "io.modelcontextprotocol/clientCapabilities" => %{}
+  }
+
+  body =
+    Jason.encode!(%{
+      "jsonrpc" => "2.0",
+      "id" => id,
+      "method" => method,
+      "params" => Map.put(params, "_meta", meta)
+    })
+
+  headers = [
+    {~c"authorization", String.to_charlist("Bearer " <> access_token)},
+    {~c"accept", ~c"application/json, text/event-stream"},
+    {~c"mcp-protocol-version", String.to_charlist(protocol_version)},
+    {~c"mcp-method", String.to_charlist(method)}
+  ]
+
+  headers =
+    if is_binary(name) do
+      [{~c"mcp-name", String.to_charlist(name)} | headers]
+    else
+      headers
+    end
+
+  {:ok, {{_http_version, status, _reason}, _response_headers, response_body}} =
+    :httpc.request(
+      :post,
+      {String.to_charlist(mcp_url), headers, ~c"application/json", body},
+      [timeout: 5_000],
+      body_format: :binary
+    )
+
+  {status, Jason.decode!(response_body)}
+end
+```
+
+List the catalog visible to this token:
+
+```elixir
+{200, list_response} = post_mcp.(1, "tools/list", %{}, nil)
+
+tool_names = Enum.map(list_response["result"]["tools"], & &1["name"])
+true = "customer_lookup" in tool_names
+tool_names
+```
+
+Call the registered tool:
+
+```elixir
+{200, call_response} =
+  post_mcp.(
+    2,
+    "tools/call",
+    %{"name" => "customer_lookup", "arguments" => %{"id" => "cus_123"}},
+    "customer_lookup"
+  )
+
+result = call_response["result"]
+%{"resultType" => "complete", "structuredContent" => %{"id" => "cus_123"}} = result
+result
+```
+
+## Move this into a SaaS application
+
+In a Phoenix application that already uses `attesto_phoenix`, install the
+server with:
+
+```text
+mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
+```
+
+The generated application-owned server, routes, supervision, authorization
+integration, starter tool, and test replace the notebook setup. Put real tools
+behind application services and enforce tenant-specific policy using the
+authenticated handler context.
+
+## Stop the local server
+
+Run this cell before closing or rerunning the notebook.
+
+```elixir
+:ok = ThousandIsland.stop(bandit)
+:ok = GenServer.stop(server)
+:ok = Application.delete_env(:attesto, Attesto.Keystore.Static)
+```

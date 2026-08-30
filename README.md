@@ -11,6 +11,11 @@ batteries-included setup is one Igniter command. It reuses the application's
 existing issuer, token verification, revocation, principal loading, DPoP, and
 mTLS policy; it does not create a second authentication system.
 
+Want to exercise the full request path before changing an application? The
+[runnable Livebook walkthrough](https://github.com/XukuLLC/attesto_mcp_server/blob/main/examples/attesto_mcp_server.livemd)
+creates an ephemeral local issuer, starts Bandit, registers a tool, and makes
+authenticated MCP requests against it.
+
 ## Install in a Phoenix application
 
 Run this inside the Phoenix child application—not an umbrella root—with

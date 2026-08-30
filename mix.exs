@@ -57,7 +57,7 @@ defmodule AttestoMCP.Server.MixProject do
       # Keep generated consumer dependencies/build output and local coverage
       # artifacts out of the archive while retaining the runnable example.
       files:
-        ~w(lib config test fixtures examples/bandit.exs examples/stdio.exs examples/conformance_server.exs scripts examples/consumer/mix.exs examples/consumer/lib examples/consumer/README.md docs .github LICENSE README.md CONFORMANCE.md CHANGELOG.md SECURITY.md .formatter.exs mix.exs)
+        ~w(lib config test fixtures examples/bandit.exs examples/stdio.exs examples/conformance_server.exs examples/attesto_mcp_server.livemd scripts examples/consumer/mix.exs examples/consumer/lib examples/consumer/README.md docs .github LICENSE README.md CONFORMANCE.md CHANGELOG.md SECURITY.md .formatter.exs mix.exs)
     ]
   end
 
@@ -68,6 +68,7 @@ defmodule AttestoMCP.Server.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
+        "examples/attesto_mcp_server.livemd",
         "CHANGELOG.md",
         "SECURITY.md",
         "CONFORMANCE.md",
