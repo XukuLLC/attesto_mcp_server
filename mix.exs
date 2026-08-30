@@ -12,7 +12,7 @@ defmodule AttestoMCP.Server.MixProject do
       start_permanent: Mix.env() == :prod,
       build_embedded: true,
       deps: deps(),
-      description: "Attesto-native MCP server with modern and legacy transports",
+      description: "Authenticated Attesto-native MCP server with HTTP and stdio transports",
       source_url: @source_url,
       homepage_url: @source_url,
       package: package(),

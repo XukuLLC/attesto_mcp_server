@@ -283,7 +283,7 @@ directly. There is no sibling-path or pre-1.2 authentication fallback.
 Per-delivery subscription reauthorization requires an executable
 `%Attesto.Config{}` through `auth: [config: ...]`. It re-verifies the captured
 access token's validity, audience, sender binding, applicable scopes, and any
-matched resource definition scopes before modern or legacy
+matched resource definition scopes before modern or session-bound
 subscription-notification delivery.
 Comparisons with the opening token actor, principal, and tenant preserve the
 authenticated stream's ownership snapshot; they do not re-run host policy.
@@ -317,7 +317,7 @@ suppressed.
 Modern requests may include `_meta["io.modelcontextprotocol/logLevel"]` with a
 recognized syslog severity. `notifications/message` is suppressed when that
 metadata is absent and is delivered only at or above the requested threshold
-on the owning response stream. Legacy sessions start with a conservative
+on the owning response stream. Sessions for earlier revisions start with a conservative
 no-log policy and `logging/setLevel` changes that threshold for that session
 only. Logging notifications contain a recognized level, optional bounded
 logger, and bounded JSON data; arbitrary protocol envelopes, secrets, and
@@ -409,7 +409,7 @@ remain supported for extensions.
 The server rechecks the complete result after adding `resultType`, cache
 metadata, and server identity. A constructor value at the standalone ceiling
 can therefore be refused when server-owned fields would make the final result
-too large. Legacy results receive the same final aggregate check.
+too large. Results for session-bound revisions receive the same final aggregate check.
 
 `AttestoMCP.Server.Schema.validate/2` treats JSON Schema `default` as an
 annotation and never changes the original request. A handler may explicitly
@@ -488,7 +488,7 @@ This callback controls all catalog results (`tools/list`, `resources/list`,
 `completion/complete`). A literal `true` permits the definition. `false`, any
 other return value, or a raise, throw, or exit denies it. Catalog methods omit
 a denied definition. Lookup methods return the same method-specific unknown
-result as an unregistered definition, including across modern and legacy
+result as an unregistered definition, including across modern and session-bound
 protocol revisions, and never invoke its handler. Callback failures are
 intentionally converted to denial and are not sent to `exception_reporter`.
 
@@ -605,14 +605,14 @@ generic category scopes when no non-empty method entry exists. A non-empty
 scopes, and `subscription_scopes` are always additive. Modern delivery
 reauthorizes the captured principal and tenant with that opening union plus its
 notification requirements; resource updates also require the generic resource
-scope and any matched definition scopes. Legacy subscription-notification
+scope and any matched definition scopes. Session-bound subscription-notification
 delivery reauthorizes catalog events with their generic category scope;
 resource-update notifications also require any matched definition scopes.
-Legacy resource subscriptions per session and modern resource filters per
+Resource subscriptions for session-bound revisions and modern resource filters per
 subscription have fixed defensive bounds of 128 unique URIs and 4,096 bytes
-per URI. Repeating an existing legacy subscription is idempotent,
+per URI. Repeating an existing session-bound subscription is idempotent,
 unsubscribing releases its entry, and modern filters preserve the first
-occurrence of each URI. Invalid or over-limit legacy changes do not refresh
+occurrence of each URI. Invalid or over-limit session-bound changes do not refresh
 the session idle deadline.
 
 `rate_limits` is an optional map of bounded token buckets for `calls`,
@@ -662,7 +662,7 @@ private details into protocol responses or Telemetry. Function, `{Module,
 :function}`, and `{Module, :function, prefix_args}` callback forms are
 supported.
 
-The default legacy-session store is private in-memory state. Durable hosts can
+The default session store is private in-memory state. Durable hosts can
 implement `AttestoMCP.Server.SessionStore` and configure:
 
 ```elixir
@@ -687,10 +687,10 @@ old/new clusters rather than rely on them for resource notifications. Use a
 globally unique namespace when unrelated deployments share the store or Erlang
 cluster. Streams remain local processes and reopen after failover; event replay
 and exactly-once delivery across a network partition are not promised.
-Legacy notification delivery reloads each live stream's session and rechecks
+Session-bound notification delivery reloads each live stream's session and rechecks
 its authorization before enqueueing an event. Store latency and signature
-verification cost are therefore part of the legacy fanout path; size durable
-backends for the expected number of concurrent legacy streams.
+verification cost are therefore part of the session-bound fanout path; size durable
+backends for the expected number of concurrent session-bound streams.
 
 Plug-only streaming selection is explicit and validated at
 `AttestoMCP.Server.Plug.init/1`:
@@ -701,7 +701,102 @@ at startup rather than during a request. These options are intended for hosts
 whose tools produce progress or server notifications. Subscriptions and calls
 with a caller progress token remain streaming regardless of this selection.
 
-### HTTP mirror declarations
+### Modern HTTP mirror headers
+
+The session-free `2026-07-28` transport mirrors routing fields into bounded
+HTTP headers and requires them to agree with the decoded JSON-RPC request.
+Header names are case-insensitive, but each required header must occur exactly
+once.
+
+| Header | `2026-07-28` | `2025-11-25` and `2025-06-18` |
+| --- | --- | --- |
+| `Mcp-Protocol-Version` | Required on every POST and equal to `params._meta["io.modelcontextprotocol/protocolVersion"]`. | During initialization it may be omitted; when present, it must be an enabled session-bound revision. After negotiation the protocol requires it on POST, GET, and DELETE, and it must match the session revision. The server accepts omission only for backward compatibility. |
+| `Mcp-Method` | Required on every POST and equal to the JSON-RPC `method`. | Not required. |
+| `Mcp-Name` | Required for the selected values listed below and equal to the corresponding body value. | Not required by the mirror contract. |
+
+`Mcp-Name` carries:
+
+- `params.name` for `tools/call` and `prompts/get`;
+- `params.uri` for `resources/read`; and
+- `params.taskId` for `tasks/get`, `tasks/update`, and `tasks/cancel`. Tasks are
+  hard-disabled in this release, but malformed task mirrors are still rejected
+  before the method-not-found response.
+
+Other methods omit `Mcp-Name`, including catalog-list methods,
+`completion/complete`, and `subscriptions/listen`. Literal ASCII values can be
+sent directly. A value needing a header-safe representation can use the strict
+`=?base64?...?=` sentinel described under tool argument mirrors below.
+
+A missing, duplicate, or mismatched required mirror returns HTTP 400 and the
+same neutral JSON-RPC error; the response does not identify which mirror
+failed:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32020,
+    "message": "Invalid MCP metadata or header",
+    "data": {"reason": "body_header_mismatch"}
+  }
+}
+~~~
+
+The following complete `tools/call` request selects the `customer_lookup`
+tool. Replace the URL and bearer token with values issued for the deployed
+Attesto resource:
+
+~~~sh
+curl https://mcp.example.com/mcp \
+  --request POST \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --header "Content-Type: application/json" \
+  --header "Accept: application/json, text/event-stream" \
+  --header "Mcp-Protocol-Version: 2026-07-28" \
+  --header "Mcp-Method: tools/call" \
+  --header "Mcp-Name: customer_lookup" \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "customer_lookup",
+      "arguments": {"id": "cus_123"},
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }'
+~~~
+
+For `resources/read`, `Mcp-Name` mirrors the complete `params.uri` value:
+
+~~~sh
+curl https://mcp.example.com/mcp \
+  --request POST \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --header "Content-Type: application/json" \
+  --header "Accept: application/json, text/event-stream" \
+  --header "Mcp-Protocol-Version: 2026-07-28" \
+  --header "Mcp-Method: resources/read" \
+  --header "Mcp-Name: urn:customer:cus_123" \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "resources/read",
+    "params": {
+      "uri": "urn:customer:cus_123",
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }'
+~~~
+
+### Tool argument mirror declarations
 
 Modern tools/call mirror headers are declared by the registered tool's
 input_schema property, never by request metadata. A property can require a
@@ -774,16 +869,16 @@ Host-published catalog notifications accept only `type` and optional object
 `_meta`; resource-update notifications additionally require a valid `uri`.
 Unknown fields and malformed metadata are rejected before either delivery
 path.
-Legacy `2025-11-25` and `2025-06-18` start with `initialize`, then
-`notifications/initialized`, and may use an expiring principal-bound
+The earlier, session-bound `2025-11-25` and `2025-06-18` revisions start with
+`initialize`, then `notifications/initialized`, and may use an expiring principal-bound
 `Mcp-Session-Id`. The server echoes and retains the exact accepted revision;
-modern requests never use a legacy session.
+modern requests never use one of these sessions.
 
-Legacy GET is a standing incremental SSE stream with bounded keepalive and
+Session-bound GET is a standing incremental SSE stream with bounded keepalive and
 session-owner delivery. DELETE closes the authenticated session and its
 streams. This release does not advertise cross-process replication or
 Last-Event-ID resumption; a Last-Event-ID GET is rejected rather than replayed.
-Legacy initialization advertises the server's `resources.subscribe` capability;
+Session-bound initialization advertises the server's `resources.subscribe` capability;
 clients do not need to self-declare that server capability. After
 `notifications/initialized`, negotiated `sampling`, `elicitation`, and `roots`
 client capabilities permit corresponding server-originated requests on the
@@ -794,16 +889,16 @@ client-request timeout, whichever is shorter; it then fails closed as not
 ready.
 
 Hosts may provide `initialize_callback: fn context, params -> :ok end` to
-reject legacy initialization before negotiated state is committed. Callback
+reject session-bound initialization before negotiated state is committed. Callback
 exceptions and arbitrary rejection terms are converted to a generic correlated
 JSON-RPC internal error; no callback reason is sent to clients, and the Plug
 endpoint remains available for later requests.
 
 ### Task profiles
 
-The optional modern and legacy task profiles are disabled in this release. No
+The optional modern and session-bound task profiles are disabled in this release. No
 task capability is advertised, modern `tasks/*` methods return
-method-not-found, legacy task opt-in is ignored, and the supervised task
+method-not-found, the `legacy_tasks` opt-in is ignored, and the supervised task
 boundary fails closed. The `modern_tasks` and `legacy_tasks` options cannot
 enable the incomplete in-memory implementation; a future release must provide
 a durable store contract before advertising either profile.
@@ -852,7 +947,7 @@ stdout
 contains protocol frames only. The preferred modern 2026 flow uses discovery and
 per-request `_meta` protocol-version/capability metadata; it does not send an
 `initialize` request. The adapter also accepts the `2025-11-25` and
-`2025-06-18` legacy initialize/initialized flows on stdin, writes only compact
+`2025-06-18` session-bound initialize/initialized flows on stdin, writes only compact
 JSON-RPC messages to stdout, and exits on EOF. Its default bounded frame limit
 is 64,000 bytes; larger limits must be explicit. A host may instead call
 `AttestoMCP.Server.Stdio.run/2` with its own supervised server and context.
@@ -863,11 +958,11 @@ the owned server so core unknown-option validation stays strict.
 ## Protocol version compatibility
 
 Only three frozen versions are accepted: `2026-07-28` for modern discovery and
-per-request metadata, plus `2025-11-25` and `2025-06-18` for the negotiated
-legacy lifecycle.
+per-request metadata, plus `2025-11-25` and `2025-06-18` for the negotiated,
+session-bound lifecycle.
 
 Hosts may narrow that set with the server `protocol_versions` option. It must
-be a non-empty subset of those revisions. A legacy HTTP session is bound to the
+be a non-empty subset of those revisions. An HTTP session is bound to the
 revision selected by `initialize`. Clients must send that revision in the
 `Mcp-Protocol-Version` header on later POST, GET, and DELETE requests. For
 backward compatibility, the server uses its authenticated session binding when
@@ -875,8 +970,8 @@ the header is absent; an invalid or changed value fails closed.
 
 Modern discovery reports every revision the server supports. A client choosing
 `2026-07-28` continues with per-request metadata. A client choosing either
-legacy revision must open the dated `initialize`/`notifications/initialized`
-flow; a modern metadata envelope cannot carry a legacy revision.
+earlier revision must open the dated `initialize`/`notifications/initialized`
+flow; a modern metadata envelope cannot carry a session-bound revision.
 
 Revision-specific output is filtered before it reaches the client.
 `2025-06-18` catalogs and resource content omit the later `icons` field. That
@@ -885,7 +980,7 @@ revision cannot send an explicit elicitation `mode` or sampling
 `mode`. A server-side attempt to use one of those later fields returns
 `{:error, :unsupported}`.
 
-For legacy requests, handler context exposes the session's exact negotiated
+For session-bound requests, handler context exposes the session's exact negotiated
 revision as `context.protocol_version`. This is `2025-11-25` or `2025-06-18`,
-not a generic legacy marker, so handlers can make revision-aware decisions
+not a generic marker, so handlers can make revision-aware decisions
 without re-reading transport headers.

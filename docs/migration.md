@@ -243,12 +243,12 @@ require reauthentication: compatible existing tokens remain usable while the
 issuer, client registration, canonical resource/audience, accepted scopes,
 signing configuration, and revocation state remain compatible.
 
-Modern `2026-07-28` requests are session-free. Legacy `2025-11-25` and
-`2025-06-18` clients negotiate a server session. The default legacy store is
+Modern `2026-07-28` requests are session-free. The earlier `2025-11-25` and
+`2025-06-18` clients negotiate a server session. The default session store is
 in-memory, so a server restart or deploy removes those sessions and clients
 must initialize again. It does not invalidate their OAuth credentials.
 
-When legacy sessions must survive a rolling deploy, implement
+When sessions for earlier revisions must survive a rolling deploy, implement
 `AttestoMCP.Server.SessionStore`, configure a stable `session_namespace`, and
 use the same durable backend on every eligible node. Enable
 `session_clustered: true` only with that shared store. Streams are still
@@ -292,8 +292,8 @@ Replace affected handwritten values with `Content.embedded_resource/2`,
 - Confirm `scopes_supported`, token audience, Plug path, and public origin use
   the same canonical resource.
 - Verify authentication runs before every component that can read the MCP body.
-- Decide whether legacy sessions may reset or require a durable store.
-- Test one modern client flow and every legacy protocol revision kept enabled.
+- Decide whether sessions for earlier revisions may reset or require a durable store.
+- Test one modern client flow and every earlier protocol revision kept enabled.
 - Replace the catalog atomically, and verify removals, resource/template
   coalescing, and no list-changed notification for completion-only changes.
 - Confirm client-visible failures and binary resource content use the public

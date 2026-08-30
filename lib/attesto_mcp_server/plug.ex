@@ -2447,20 +2447,30 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp era_for(%{method: method}, conn) when method in ["ping", "notifications/initialized"] do
-    case get_req_header(conn, "mcp-protocol-version") do
-      [@modern] -> @modern
-      _ -> @legacy
+  defp era_for(%{method: method} = request, conn)
+       when method in ["ping", "notifications/initialized"] do
+    headers = get_req_header(conn, "mcp-protocol-version")
+
+    if @modern in headers or modern_body?(request),
+      do: @modern,
+      else: @legacy
+  end
+
+  defp era_for(request, conn) do
+    headers = get_req_header(conn, "mcp-protocol-version")
+
+    cond do
+      @modern in headers or modern_body?(request) -> @modern
+      match?([version] when version in @legacy_versions, headers) -> @legacy
+      session_header(conn) -> @legacy
+      true -> @modern
     end
   end
 
-  defp era_for(_request, conn) do
-    case get_req_header(conn, "mcp-protocol-version") do
-      [@modern] -> @modern
-      [version] when version in @legacy_versions -> @legacy
-      _ -> if session_header(conn), do: @legacy, else: @modern
-    end
-  end
+  defp modern_body?(%{params: params}),
+    do: metadata_value(params, "io.modelcontextprotocol/protocolVersion") == @modern
+
+  defp modern_body?(_request), do: false
 
   defp modern_request_header?(conn), do: get_req_header(conn, "mcp-protocol-version") == [@modern]
 

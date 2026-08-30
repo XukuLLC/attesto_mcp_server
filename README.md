@@ -41,10 +41,8 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
-Review every installer notice. A custom or ambiguous parser setup stops the
-installation before any edit. When endpoint source is unavailable but the
-remaining setup is safe to generate, the installer reports the exact manual
-verification instead of guessing. After a successful install, run the
+Review every installer notice, including any exact manual verification emitted
+when endpoint source is unavailable. After a successful install, run the
 generated starter test before editing the sample:
 
 ```sh
@@ -92,9 +90,15 @@ same Attesto authorization server as the rest of the application.
 
 ### Connect a client
 
-For a client already registered with the application's Attesto authorization
-server, point it at the `/mcp` URL. The generated endpoint uses secure generic
-MCP scope defaults: `mcp:tools:read`, `mcp:tools:call`,
+First make the client known to the application's Attesto authorization server:
+pre-register a known client in the host's client store, or enable Client ID
+Metadata Documents (CIMD) when the client identifies itself with an HTTPS
+metadata URL. See AttestoPhoenix's
+[CIMD guidance](https://hexdocs.pm/attesto_phoenix/readme.html#url-client-metadata-for-native-clients).
+Then point the client at the `/mcp` URL.
+
+The generated endpoint uses secure generic MCP scope defaults:
+`mcp:tools:read`, `mcp:tools:call`,
 `mcp:resources:read`, and `mcp:prompts:read`. Make sure the authorization
 server grants those scopes, or set the mount's `scopes_supported` and
 `default_scopes` to scopes the application already issues.
@@ -130,7 +134,7 @@ The public API supports:
 - static resources and bounded multi-expression URI templates;
 - prompts and completions;
 - catalog replacement for generated or reloaded catalogs; and
-- modern and legacy notifications and subscriptions.
+- notifications and subscriptions across the supported MCP revisions.
 
 Handler inputs are specific to each primitive. An arity-2 handler receives the
 decoded input followed by an authenticated context containing the principal,
@@ -247,8 +251,16 @@ guessing. All installer options and recovery steps are in
 
 ## Other hosts and transports
 
-Non-Phoenix Plug hosts can supervise `AttestoMCP.Server.API` and mount
-`AttestoMCP.Server.Plug` directly. The
+Non-Phoenix Plug hosts can add the package directly:
+
+```elixir
+def deps do
+  [{:attesto_mcp_server, "~> 0.12.1"}]
+end
+```
+
+Supervise `AttestoMCP.Server`, register definitions through
+`AttestoMCP.Server.API`, and mount `AttestoMCP.Server.Plug` directly. The
 [`examples/bandit.exs`](examples/bandit.exs) program demonstrates direct server
 startup, registration, and the protected Plug; the [usage guide](docs/usage.md)
 documents the transport and authentication options. Router and supervision
@@ -272,6 +284,13 @@ exception reporting are documented in the [usage guide](docs/usage.md).
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
 `2025-06-18`. Exact runner and SDK evidence is recorded in
 [`CONFORMANCE.md`](CONFORMANCE.md).
+
+At this package's protected HTTP boundary, clients sending a `2026-07-28` POST
+must include the required version, method, and selected-definition mirror
+headers. Missing, duplicate, or mismatched mirrors return a neutral HTTP 400.
+See [modern HTTP mirror headers](docs/usage.md#modern-http-mirror-headers) for
+the complete contract and request examples. The earlier session-bound MCP
+revisions use their negotiated session rules instead.
 
 ## Package boundaries
 

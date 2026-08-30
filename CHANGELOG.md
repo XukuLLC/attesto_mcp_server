@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Reject `2026-07-28` request metadata paired with missing, duplicate, or
+  mismatched HTTP mirror headers before session-bound routing, preserving one
+  neutral `body_header_mismatch` response across methods and stale session IDs.
+- Document the complete modern mirror-header contract and streamline the
+  README around the batteries-included Phoenix path, client onboarding, and a
+  concrete non-Phoenix dependency setup.
+
 ## 0.12.1 - 2026-08-30
 
 - Support bounded resource URI templates containing up to 16 separated simple
