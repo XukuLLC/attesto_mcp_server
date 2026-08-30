@@ -239,7 +239,7 @@ defmodule AttestoMCP.Server.P5BanditTest do
                input_schema: %{"type" => "object"},
                handler: fn _arguments, _context ->
                  send(parent, :disconnect_handler_started)
-                 Process.sleep(300)
+                 Process.sleep(5_000)
                  send(parent, :disconnect_handler_late)
                  {:ok, "late"}
                end

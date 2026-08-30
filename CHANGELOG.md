@@ -1,10 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.12.2 - 2026-08-30
 
 - Reject `2026-07-28` request metadata paired with missing, duplicate, or
   mismatched HTTP mirror headers before session-bound routing, preserving one
   neutral `body_header_mismatch` response across methods and stale session IDs.
+- Add a runnable Livebook walkthrough for an authenticated local server,
+  including discovery, initialization, tool listing, and a tool call.
+- Add regression coverage proving late-bound named-server transport limits use
+  the active server JSON budget, including absent-server startup and server
+  restarts above the secure 2 MB default.
+- Make the real Bandit disconnect and stdio interleaving regressions
+  independent of peer-request and EOF-drain timing on loaded test hosts.
 - Document the complete modern mirror-header contract and streamline the
   README around the batteries-included Phoenix path, client onboarding, and a
   concrete non-Phoenix dependency setup.

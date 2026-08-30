@@ -424,7 +424,11 @@ defmodule AttestoMCP.Server.StdioTest do
     # targeted cancellation so the subscription remains live while the call runs.
     output =
       capture_io(fn ->
-        Stdio.run(server, principal: "stdio-subscription", input: input)
+        Stdio.run(server,
+          principal: "stdio-subscription",
+          input: input,
+          eof_grace_ms: 1_000
+        )
       end)
 
     messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
