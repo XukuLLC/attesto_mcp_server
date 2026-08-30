@@ -566,6 +566,86 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     end
   end
 
+  test "late-bound named Plug revalidates transport limits across server restarts", %{
+    config: config
+  } do
+    name = __MODULE__.LateBoundBudgetServer
+
+    on_exit(fn ->
+      if Process.whereis(name), do: GenServer.stop(name)
+    end)
+
+    plug =
+      Server.Plug.init(
+        server: name,
+        path: "/mcp",
+        max_body_bytes: @large_budget,
+        max_message_bytes: @large_budget,
+        auth: [config: config, resource: @resource]
+      )
+
+    unavailable = conn(:get, "/mcp") |> Server.Plug.call(plug)
+    assert unavailable.status == 503
+    assert unavailable.resp_body == "service unavailable"
+
+    {:ok, large_server} =
+      Server.start_link(
+        name: name,
+        max_json_bytes: @large_budget
+      )
+
+    large_output = String.duplicate("o", Schema.max_instance_bytes() + 100_000)
+
+    assert :ok =
+             Server.register_tool(large_server, "late-large-output", %{
+               handler: fn _arguments, _context -> {:ok, large_output} end
+             })
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()],
+        audience: @resource
+      )
+
+    request_body =
+      "late-large-output"
+      |> payload_for("")
+      |> Jason.encode!()
+
+    response =
+      request_body
+      |> request(token, "tools/call", "late-large-output")
+      |> Server.Plug.call(plug)
+
+    assert response.status == 200
+    assert byte_size(response.resp_body) > Schema.max_instance_bytes()
+
+    assert get_in(Jason.decode!(response.resp_body), ["result", "content"]) == [
+             %{"type" => "text", "text" => large_output}
+           ]
+
+    :ok = GenServer.stop(large_server)
+    {:ok, _default_server} = Server.start_link(name: name)
+
+    stale_state_response =
+      request_body
+      |> request(token, "tools/call", "late-large-output")
+      |> Server.Plug.call(plug)
+
+    assert stale_state_response.status == 503
+    assert stale_state_response.resp_body == "service unavailable"
+
+    assert_raise ArgumentError, ~r/JSON value budget/, fn ->
+      Server.Plug.init(
+        server: name,
+        path: "/mcp",
+        max_body_bytes: @large_budget,
+        max_message_bytes: @large_budget,
+        auth: [config: config, resource: @resource]
+      )
+    end
+  end
+
   test "public notifications use the configured server value budget", %{server: default_server} do
     large_server = start_server(max_json_bytes: @large_budget)
     padding = String.duplicate("p", Schema.max_instance_bytes() + 100_000)
