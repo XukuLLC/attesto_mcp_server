@@ -240,6 +240,54 @@ defmodule AttestoMCP.Server.ScopePolicyAcceptanceTest do
     refute_receive {:scope_policy_handler, :ordered_second}
   end
 
+  test "authenticated selected-definition policy resolves multi-expression templates", %{
+    server: server,
+    config: config
+  } do
+    parent = self()
+
+    assert :ok =
+             Server.register_resource_template(
+               server,
+               "urn:scoped-records/{record_id}/versions/{version_id}",
+               %{
+                 required_scopes: [@reports],
+                 handler: fn %{params: params, uri: uri}, _context ->
+                   send(parent, {:scope_policy_handler, {:multi_expression, params}})
+
+                   {:ok,
+                    %{
+                      "contents" => [
+                        %{
+                          "uri" => uri,
+                          "text" => params["record_id"] <> ":" <> params["version_id"]
+                        }
+                      ]
+                    }}
+                 end
+               }
+             )
+
+    plug = plug(server, config)
+    uri = "urn:scoped-records/r%207/versions/v%2D2"
+
+    denied =
+      http_call(plug, token(config, [@documents]), @modern, "resources/read", %{"uri" => uri})
+
+    assert denied.status == 200
+    assert Jason.decode!(denied.resp_body)["error"]["code"] == -32602
+    refute_receive {:scope_policy_handler, {:multi_expression, _}}
+
+    allowed =
+      http_call(plug, token(config, [@reports]), @modern, "resources/read", %{"uri" => uri})
+
+    assert allowed.status == 200
+    assert Jason.decode!(allowed.resp_body)["result"]["contents"] != []
+
+    assert_receive {:scope_policy_handler,
+                    {:multi_expression, %{"record_id" => "r 7", "version_id" => "v-2"}}}
+  end
+
   test "legacy sessions apply the same catalog and selected-definition decisions", %{
     server: server,
     config: config
@@ -993,7 +1041,7 @@ defmodule AttestoMCP.Server.ScopePolicyAcceptanceTest do
        %{
          config: config
        } do
-    name = String.to_atom("scope_policy_server_#{System.unique_integer([:positive])}")
+    name = __MODULE__.PolicyServer
 
     plug =
       Server.Plug.init(

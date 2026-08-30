@@ -5,18 +5,22 @@ defmodule AttestoMCP.Server.Content do
   Constructors emit canonical string-key maps and raise `ArgumentError` for
   invalid programmer input. Image, audio, and blob arguments are already
   Base64-encoded wire values; only canonical padded Base64 is accepted.
+  Constructors use the secure 2,000,000-byte default; pass
+  `max_json_bytes: server_budget` when the supervised server explicitly uses a
+  larger finite JSON budget.
 
   Raw maps remain supported by `AttestoMCP.Server` for hosts that need custom
   extension members.
   """
 
-  alias AttestoMCP.Server.Output
+  alias AttestoMCP.Server.{Output, Schema}
 
   @type t :: %{required(String.t()) => term()}
   @type resource_content :: %{required(String.t()) => term()}
   @type prompt_message :: %{required(String.t()) => term()}
   @type role :: :user | :assistant | String.t()
-  @type common_option :: {:annotations, map()} | {:meta, map()}
+  @type budget_option :: {:max_json_bytes, pos_integer()}
+  @type common_option :: {:annotations, map()} | {:meta, map()} | budget_option()
   @type resource_link_option ::
           common_option()
           | {:title, String.t()}
@@ -25,36 +29,40 @@ defmodule AttestoMCP.Server.Content do
           | {:size, non_neg_integer()}
           | {:icons, [map()]}
   @type resource_content_option ::
-          {:mime_type, String.t()} | {:meta, map()} | {:annotations, map()} | {:icons, [map()]}
+          {:mime_type, String.t()}
+          | {:meta, map()}
+          | {:annotations, map()}
+          | {:icons, [map()]}
+          | budget_option()
 
   @doc "Builds a text content block."
   @spec text(String.t(), [common_option()]) :: t()
   def text(text, opts \\ []) do
-    opts = options!(opts, [:annotations, :meta])
+    opts = options!(opts, [:annotations, :meta, :max_json_bytes])
 
     %{"type" => "text", "text" => text}
     |> put_options(opts, annotations: "annotations", meta: "_meta")
-    |> content!()
+    |> content!(opts)
   end
 
   @doc "Builds an image content block from canonical padded Base64 data."
   @spec image(String.t(), String.t(), [common_option()]) :: t()
   def image(data, mime_type, opts \\ []) do
-    opts = options!(opts, [:annotations, :meta])
+    opts = options!(opts, [:annotations, :meta, :max_json_bytes])
 
     %{"type" => "image", "data" => data, "mimeType" => mime_type}
     |> put_options(opts, annotations: "annotations", meta: "_meta")
-    |> content!()
+    |> content!(opts)
   end
 
   @doc "Builds an audio content block from canonical padded Base64 data."
   @spec audio(String.t(), String.t(), [common_option()]) :: t()
   def audio(data, mime_type, opts \\ []) do
-    opts = options!(opts, [:annotations, :meta])
+    opts = options!(opts, [:annotations, :meta, :max_json_bytes])
 
     %{"type" => "audio", "data" => data, "mimeType" => mime_type}
     |> put_options(opts, annotations: "annotations", meta: "_meta")
-    |> content!()
+    |> content!(opts)
   end
 
   @doc "Builds a resource-link content block."
@@ -68,7 +76,8 @@ defmodule AttestoMCP.Server.Content do
         :size,
         :icons,
         :annotations,
-        :meta
+        :meta,
+        :max_json_bytes
       ])
 
     %{"type" => "resource_link", "uri" => uri, "name" => name}
@@ -82,23 +91,23 @@ defmodule AttestoMCP.Server.Content do
       annotations: "annotations",
       meta: "_meta"
     )
-    |> content!()
+    |> content!(opts)
   end
 
   @doc "Builds an embedded-resource content block from one resource content entry."
   @spec embedded_resource(resource_content(), [common_option()]) :: t()
   def embedded_resource(resource, opts \\ []) do
-    opts = options!(opts, [:annotations, :meta])
+    opts = options!(opts, [:annotations, :meta, :max_json_bytes])
 
     %{"type" => "resource", "resource" => resource}
     |> put_options(opts, annotations: "annotations", meta: "_meta")
-    |> content!()
+    |> content!(opts)
   end
 
   @doc "Builds a text resource-content entry."
   @spec resource_text(String.t(), String.t(), [resource_content_option()]) :: resource_content()
   def resource_text(uri, text, opts \\ []) do
-    opts = options!(opts, [:mime_type, :meta, :annotations, :icons])
+    opts = options!(opts, [:mime_type, :meta, :annotations, :icons, :max_json_bytes])
 
     %{"uri" => uri, "text" => text}
     |> put_options(
@@ -108,13 +117,13 @@ defmodule AttestoMCP.Server.Content do
       annotations: "annotations",
       icons: "icons"
     )
-    |> resource_content!()
+    |> resource_content!(opts)
   end
 
   @doc "Builds a blob resource-content entry from canonical padded Base64 data."
   @spec resource_blob(String.t(), String.t(), [resource_content_option()]) :: resource_content()
   def resource_blob(uri, blob, opts \\ []) do
-    opts = options!(opts, [:mime_type, :meta, :annotations, :icons])
+    opts = options!(opts, [:mime_type, :meta, :annotations, :icons, :max_json_bytes])
 
     %{"uri" => uri, "blob" => blob}
     |> put_options(
@@ -124,29 +133,33 @@ defmodule AttestoMCP.Server.Content do
       annotations: "annotations",
       icons: "icons"
     )
-    |> resource_content!()
+    |> resource_content!(opts)
   end
 
   @doc "Builds one user or assistant prompt message."
-  @spec prompt_message(role(), t()) :: prompt_message()
-  def prompt_message(role, content) do
+  @spec prompt_message(role(), t(), [budget_option()]) :: prompt_message()
+  def prompt_message(role, content, opts \\ []) do
+    opts = options!(opts, [:max_json_bytes])
     role = normalize_role(role)
 
-    case Output.normalize_prompt_message(%{"role" => role, "content" => content}) do
+    case Output.normalize_prompt_message(
+           %{"role" => role, "content" => content},
+           budget_opts(opts)
+         ) do
       {:ok, message} -> message
       {:error, _reason} -> raise ArgumentError, "invalid MCP prompt message"
     end
   end
 
-  defp content!(value) do
-    case Output.normalize_content_item(value) do
+  defp content!(value, opts) do
+    case Output.normalize_content_item(value, budget_opts(opts)) do
       {:ok, content} -> content
       {:error, _reason} -> raise ArgumentError, "invalid MCP content"
     end
   end
 
-  defp resource_content!(value) do
-    case Output.normalize_resource_content(value) do
+  defp resource_content!(value, opts) do
+    case Output.normalize_resource_content(value, budget_opts(opts)) do
       {:ok, content} -> content
       {:error, _reason} -> raise ArgumentError, "invalid MCP resource content"
     end
@@ -160,6 +173,18 @@ defmodule AttestoMCP.Server.Content do
     case Output.normalize_options(opts, allowed) do
       {:ok, opts} -> opts
       {:error, :invalid_options} -> raise ArgumentError, "invalid or duplicate MCP content option"
+    end
+  end
+
+  defp budget_opts(opts) do
+    max_bytes = Keyword.get(opts, :max_json_bytes, Schema.default_instance_bytes())
+
+    if is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
+         max_bytes <= Schema.max_allowed_instance_bytes() do
+      [max_bytes: max_bytes]
+    else
+      raise ArgumentError,
+            ":max_json_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{Schema.max_allowed_instance_bytes()} bytes"
     end
   end
 

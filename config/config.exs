@@ -2,8 +2,7 @@ import Config
 
 config :attesto_mcp_server,
   protocol_versions: ["2026-07-28", "2025-11-25", "2025-06-18"],
-  max_body_bytes: 2_000_000,
-  max_message_bytes: 1_000_000,
+  max_json_bytes: 2_000_000,
   max_concurrency: 64,
   per_principal_concurrency: 16,
   request_timeout: 30_000,

@@ -35,6 +35,22 @@ defmodule AttestoMCP.Server.JSONRPCTest do
     assert JSONRPC.recover_id(Map.put(parsed, "id", nil)) == nil
   end
 
+  test "invalid max_bytes values fail closed" do
+    payload = ~s({"jsonrpc":"2.0","id":1,"method":"ping"})
+    parsed = Jason.decode!(payload)
+
+    for invalid <- [nil, true, "bad", 2.5, %{}] do
+      assert {:error, %Error{code: -32700, data: %{"reason" => "message_too_large"}}} =
+               JSONRPC.decode(payload, max_bytes: invalid)
+
+      assert {:error, %Error{code: -32700, data: %{"reason" => "message_too_large"}}} =
+               JSONRPC.decode(parsed, max_bytes: invalid)
+
+      assert JSONRPC.recover_id(payload, max_bytes: invalid) == nil
+      assert JSONRPC.recover_id(parsed, max_bytes: invalid) == nil
+    end
+  end
+
   test "detaches bounded string IDs from a larger decoded request body" do
     id = String.duplicate("i", 256)
 

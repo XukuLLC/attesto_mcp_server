@@ -15,8 +15,12 @@ defmodule AttestoMCP.Server.Registry do
   @types [:tool, :resource, :template, :prompt, :completion]
   @max_identity_bytes 256
   @max_name_bytes 64
+  @max_template_expressions 16
+  @max_template_variables 32
+  @max_template_expression_bytes 128
   @max_definition_depth 64
-  @max_batch_size 1_000
+  @max_catalog_size 1_000
+  @max_batch_size @max_catalog_size
   @max_alternative_scope_sets 7
   @max_alternative_scope_memberships 128
   @max_alternative_scope_bytes 8_192
@@ -54,7 +58,9 @@ defmodule AttestoMCP.Server.Registry do
   @doc "Validates and registers one primitive, rejecting duplicate identities."
   @spec register(pid(), primitive(), String.t(), map() | keyword()) :: :ok | {:error, term()}
   def register(pid, type, identity, definition) when type in @types do
-    with {:ok, normalized} <- normalize(type, identity, definition) do
+    max_bytes = max_json_bytes(pid)
+
+    with {:ok, normalized} <- normalize(type, identity, definition, max_bytes) do
       GenServer.call(pid, {:register, type, identity, normalized})
     end
   end
@@ -66,7 +72,9 @@ defmodule AttestoMCP.Server.Registry do
           {:ok, [{primitive(), String.t(), definition()}]} | {:error, term()}
   def register_all(pid, registrations)
       when is_pid(pid) and is_list(registrations) and length(registrations) <= @max_batch_size do
-    with {:ok, normalized} <- normalize_registrations(registrations) do
+    max_bytes = max_json_bytes(pid)
+
+    with {:ok, normalized} <- normalize_registrations(registrations, max_bytes) do
       GenServer.call(pid, {:register_all, normalized})
     end
   end
@@ -82,7 +90,9 @@ defmodule AttestoMCP.Server.Registry do
           | {:error, term()}
   def replace_all(pid, registrations)
       when is_pid(pid) and is_list(registrations) and length(registrations) <= @max_batch_size do
-    with {:ok, normalized} <- normalize_registrations(registrations) do
+    max_bytes = max_json_bytes(pid)
+
+    with {:ok, normalized} <- normalize_registrations(registrations, max_bytes) do
       GenServer.call(pid, {:replace_all, normalized})
     end
   end
@@ -95,11 +105,19 @@ defmodule AttestoMCP.Server.Registry do
   @doc false
   @spec restore_all(pid(), [registration()], non_neg_integer()) :: :ok | {:error, term()}
   def restore_all(pid, registrations, revision)
-      when is_pid(pid) and is_list(registrations) and is_integer(revision) and revision >= 0 do
-    with {:ok, normalized} <- normalize_registrations(registrations) do
+      when is_pid(pid) and is_list(registrations) and
+             length(registrations) <= @max_catalog_size and is_integer(revision) and
+             revision >= 0 do
+    max_bytes = max_json_bytes(pid)
+
+    with {:ok, normalized} <- normalize_registrations(registrations, max_bytes) do
       GenServer.call(pid, {:restore_all, normalized, revision})
     end
   end
+
+  def restore_all(_pid, registrations, _revision)
+      when is_list(registrations) and length(registrations) > @max_catalog_size,
+      do: {:error, :too_many_registrations}
 
   def restore_all(_pid, _registrations, _revision), do: {:error, :invalid_restore}
 
@@ -128,8 +146,26 @@ defmodule AttestoMCP.Server.Registry do
 
   def scope_sets(_definition), do: []
 
+  defp max_json_bytes(pid), do: GenServer.call(pid, :max_json_bytes)
+
   @impl true
-  def init(opts), do: {:ok, %{items: Map.new(@types, &{&1, %{}}), revision: 0, opts: opts}}
+  def init(opts) do
+    max_bytes = Keyword.get(opts, :max_json_bytes, Schema.default_instance_bytes())
+
+    unless is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
+             max_bytes <= Schema.max_allowed_instance_bytes() do
+      raise ArgumentError,
+            ":max_json_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{Schema.max_allowed_instance_bytes()} bytes"
+    end
+
+    {:ok,
+     %{
+       items: Map.new(@types, &{&1, %{}}),
+       revision: 0,
+       opts: opts,
+       max_json_bytes: max_bytes
+     }}
+  end
 
   @impl true
   def handle_call({:register, type, identity, definition}, _from, state) do
@@ -196,15 +232,16 @@ defmodule AttestoMCP.Server.Registry do
 
   def handle_call(:snapshot, _from, state), do: {:reply, state.items, state}
   def handle_call(:revision, _from, state), do: {:reply, state.revision, state}
+  def handle_call(:max_json_bytes, _from, state), do: {:reply, state.max_json_bytes, state}
 
   def handle_call({:list, type}, _from, state) do
     {:reply, state.items[type] |> Map.values() |> Enum.sort_by(& &1.identity), state}
   end
 
-  defp normalize_registrations(registrations) do
+  defp normalize_registrations(registrations, max_bytes) do
     Enum.reduce_while(registrations, {:ok, []}, fn
       {type, identity, definition}, {:ok, normalized} when type in @types ->
-        case normalize(type, identity, definition) do
+        case normalize(type, identity, definition, max_bytes) do
           {:ok, definition} ->
             {:cont, {:ok, [{type, identity, definition} | normalized]}}
 
@@ -251,19 +288,26 @@ defmodule AttestoMCP.Server.Registry do
       duplicate_ref ->
         {:error, {:duplicate, :completion_ref, ref}}
 
+      catalog_size(items) >= @max_catalog_size ->
+        {:error, :too_many_registrations}
+
       true ->
         {:ok, put_in(items, [type, identity], definition)}
     end
   end
 
-  defp normalize(type, identity, definition) do
+  defp catalog_size(items) when is_map(items) do
+    Enum.reduce(@types, 0, fn type, count -> count + map_size(Map.get(items, type, %{})) end)
+  end
+
+  defp normalize(type, identity, definition, max_bytes) do
     with :ok <- valid_identity(type, identity),
          {:ok, definition} <- map_definition(definition),
          {:ok, value} <- defaults(type, identity, definition),
          {:ok, value} <- normalize_definition_values(value),
          {:ok, value} <- normalize_nested(type, value),
-         :ok <- validate_common(value),
-         :ok <- validate_type(type, value) do
+         :ok <- validate_common(value, max_bytes),
+         :ok <- validate_type(type, value, max_bytes) do
       {:ok, value}
     end
   end
@@ -554,15 +598,15 @@ defmodule AttestoMCP.Server.Registry do
      )}
   end
 
-  defp validate_common(value) do
+  defp validate_common(value, max_bytes) do
     with :ok <- valid_text(value[:name], :name),
          :ok <-
            valid_scope_requirements(
              value[:required_scopes],
              value[:alternative_scope_sets]
            ),
-         :ok <- valid_annotations(value[:annotations]),
-         :ok <- valid_metadata(value),
+         :ok <- valid_annotations(value[:annotations], max_bytes),
+         :ok <- valid_metadata(value, max_bytes),
          :ok <- valid_authorize(value[:authorize]),
          :ok <- valid_handler(value[:handler]) do
       :ok
@@ -579,16 +623,16 @@ defmodule AttestoMCP.Server.Registry do
 
   defp valid_description(_), do: {:error, {:invalid_definition, :description}}
 
-  defp valid_annotations(value) when is_map(value) do
-    case Schema.json_value(value) do
+  defp valid_annotations(value, max_bytes) when is_map(value) do
+    case Schema.json_value(value, max_bytes: max_bytes) do
       :ok -> valid_annotation_fields(value)
       _ -> {:error, {:invalid_definition, :annotations}}
     end
   end
 
-  defp valid_annotations(_), do: {:error, {:invalid_definition, :annotations}}
+  defp valid_annotations(_, _max_bytes), do: {:error, {:invalid_definition, :annotations}}
 
-  defp valid_metadata(value) do
+  defp valid_metadata(value, max_bytes) do
     title = value[:title] || value["title"]
     icons = value[:icons] || value["icons"]
     meta = value[:_meta] || value["_meta"]
@@ -596,7 +640,7 @@ defmodule AttestoMCP.Server.Registry do
 
     with :ok <- optional_metadata_string(title, :title),
          :ok <- optional_icons(icons),
-         :ok <- optional_json_metadata(meta),
+         :ok <- optional_json_metadata(meta, max_bytes),
          :ok <- optional_size(size) do
       :ok
     end
@@ -625,10 +669,10 @@ defmodule AttestoMCP.Server.Registry do
 
   defp optional_icons(_), do: {:error, {:invalid_definition, :icons}}
 
-  defp optional_json_metadata(nil), do: :ok
+  defp optional_json_metadata(nil, _max_bytes), do: :ok
 
-  defp optional_json_metadata(value) do
-    if Schema.json_value(value) == :ok,
+  defp optional_json_metadata(value, max_bytes) do
+    if Schema.json_value(value, max_bytes: max_bytes) == :ok,
       do: :ok,
       else: {:error, {:invalid_definition, :_meta}}
   end
@@ -660,25 +704,25 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
-  defp validate_type(:tool, value) do
+  defp validate_type(:tool, value, max_bytes) do
     with :ok <- valid_name(value[:name], :name),
          :ok <- valid_description(value[:description]),
-         :ok <- valid_tool_input_schema(value[:input_schema]),
-         :ok <- optional_schema(value[:output_schema]) do
+         :ok <- valid_tool_input_schema(value[:input_schema], max_bytes),
+         :ok <- optional_schema(value[:output_schema], max_bytes) do
       :ok
     else
       {:error, reason} -> {:error, {:invalid_schema, reason}}
     end
   end
 
-  defp validate_type(:resource, value) do
+  defp validate_type(:resource, value, _max_bytes) do
     with :ok <- valid_uri(value[:uri]),
          :ok <- valid_optional_mime(value[:mime_type]) do
       :ok
     end
   end
 
-  defp validate_type(:template, value) do
+  defp validate_type(:template, value, _max_bytes) do
     with true <- valid_template(value[:uri_template]),
          :ok <- valid_optional_mime(value[:mime_type]) do
       :ok
@@ -687,11 +731,11 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
-  defp validate_type(:prompt, value) do
+  defp validate_type(:prompt, value, _max_bytes) do
     with :ok <- valid_name(value[:name], :name), do: valid_arguments(value[:arguments])
   end
 
-  defp validate_type(:completion, value) do
+  defp validate_type(:completion, value, _max_bytes) do
     with :ok <- valid_name(value[:name], :name) do
       ref = value[:ref] || value["ref"] || value[:reference] || value["reference"]
 
@@ -701,11 +745,13 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
-  defp optional_schema(nil), do: :ok
-  defp optional_schema(schema), do: Schema.validate_schema(schema)
+  defp optional_schema(nil, _max_bytes), do: :ok
 
-  defp valid_tool_input_schema(schema) when is_map(schema) do
-    with :ok <- Schema.validate_schema(schema) do
+  defp optional_schema(schema, max_bytes),
+    do: Schema.validate_schema(schema, max_bytes: max_bytes)
+
+  defp valid_tool_input_schema(schema, max_bytes) when is_map(schema) do
+    with :ok <- Schema.validate_schema(schema, max_bytes: max_bytes) do
       cond do
         schema["type"] != "object" -> {:error, :root_type}
         validate_header_declarations(schema) != :ok -> {:error, :x_mcp_header}
@@ -714,7 +760,7 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
-  defp valid_tool_input_schema(_), do: {:error, :root_type}
+  defp valid_tool_input_schema(_, _max_bytes), do: {:error, :root_type}
 
   defp validate_header_declarations(schema) when is_map(schema) do
     with false <- Map.has_key?(schema, "x-mcp-header"),
@@ -976,18 +1022,22 @@ defmodule AttestoMCP.Server.Registry do
 
   defp valid_template(template) when is_binary(template) do
     placeholders = Regex.scan(~r/\{([^{}]*)\}/, template, capture: :all_but_first)
+    expressions = Enum.map(placeholders, &hd/1)
 
     valid_uri(template) == :ok and balanced_braces?(template) and placeholders != [] and
       not String.contains?(Regex.replace(~r/\{[^{}]*\}/, template, ""), ["{", "}"]) and
+      length(expressions) <= @max_template_expressions and
+      Enum.all?(expressions, &(byte_size(&1) <= @max_template_expression_bytes)) and
       Enum.all?(placeholders, fn [expression] -> valid_template_expression?(expression) end) and
+      unique_template_variables?(expressions) and
       supported_template_layout?(template, placeholders)
   end
 
   defp valid_template(_), do: false
 
-  # The server performs reverse matching for one expression at a time. Reject
-  # layouts that would otherwise be accepted but cannot be matched without
-  # guessing (for example multiple query expressions or unsupported operators).
+  # Reverse matching is deliberately bounded and deterministic. Multiple
+  # path expressions are supported when each has one variable and a literal
+  # separator; adjacent expressions would require guessing a split point.
   defp supported_template_layout?(template, [[expression]]) do
     marker = "{" <> expression <> "}"
 
@@ -1005,7 +1055,52 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
+  defp supported_template_layout?(template, placeholders) when length(placeholders) > 1 do
+    expressions = Enum.map(placeholders, &hd/1)
+    literals = Regex.split(~r/\{[^{}]*\}/, template, trim: false)
+
+    length(expressions) <= @max_template_expressions and
+      length(expressions) <= @max_template_variables and
+      length(literals) == length(expressions) + 1 and
+      multi_path_expressions?(expressions) and
+      no_adjacent_template_expressions?(literals)
+  end
+
   defp supported_template_layout?(_template, _placeholders), do: false
+
+  defp multi_path_expressions?(expressions) do
+    Enum.all?(expressions, fn expression ->
+      {operator, variables} = template_operator(expression)
+
+      operator in [nil, ?+] and length(String.split(variables, ",", trim: false)) == 1
+    end)
+  end
+
+  defp no_adjacent_template_expressions?(literals) do
+    literals
+    |> Enum.with_index()
+    |> Enum.all?(fn
+      {_literal, 0} -> true
+      {_literal, index} when index == length(literals) - 1 -> true
+      {literal, _index} -> literal != ""
+    end)
+  end
+
+  defp unique_template_variables?(expressions) do
+    names =
+      Enum.flat_map(expressions, fn expression ->
+        {_operator, variables} = template_operator(expression)
+
+        Enum.map(String.split(variables, ",", trim: false), fn variable ->
+          variable
+          |> String.trim_trailing("*")
+          |> String.split(":", parts: 2)
+          |> hd()
+        end)
+      end)
+
+    length(names) <= @max_template_variables and length(names) == length(Enum.uniq(names))
+  end
 
   defp template_operator(expression) when is_binary(expression) do
     case expression do

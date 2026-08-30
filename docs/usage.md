@@ -30,6 +30,12 @@ With `attesto_phoenix` already declared directly by the host, run:
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 ```
 
+Whether or not CIMD is enabled, the installer sets
+`native_apps.loopback_include_localhost` to `true` only when that key is absent.
+This lets a registered portless `http://localhost/...` native-app callback use
+the ephemeral port chosen by the client. An application's existing `true` or
+`false` choice remains authoritative.
+
 On this combined path the installer does not enable Client ID Metadata Documents
 (CIMD) by default. This avoids silently selecting AttestoPhoenix's default
 Ecto-backed CIMD cache when an established host has not run the required
@@ -43,7 +49,8 @@ mix igniter.install attesto_mcp_server \
 ```
 
 The explicit opt-in adds the compatible Req dependency and, when the
-corresponding keys are absent, configures:
+corresponding CIMD key is absent, enables it. Together, the relevant defaults
+are:
 
 ```elixir
 config :my_app, AttestoPhoenix.Config,
@@ -51,12 +58,11 @@ config :my_app, AttestoPhoenix.Config,
   native_apps: [loopback_include_localhost: true]
 ```
 
-This supports clients that use an HTTPS Client ID Metadata Document and native
-clients that register a portless `http://localhost/...` callback before binding
-an ephemeral port. The default AttestoPhoenix fetcher retains its HTTPS,
-DNS/IP, size, timeout, redirect, and cache validation. Deployments with a known
-client set should add a narrow `:allowed_hosts` list. Existing configuration is
-not replaced, and the installer does not enable dynamic registration or invent
+The CIMD setting supports clients that use an HTTPS Client ID Metadata
+Document. The default AttestoPhoenix fetcher retains its HTTPS, DNS/IP, size,
+timeout, redirect, and cache validation. Deployments with a known client set
+should add a narrow `:allowed_hosts` list. Existing configuration is not
+replaced, and the installer does not enable dynamic registration or invent
 client persistence. Existing cache, repo, table-prefix, allowlist, and disabled
 settings remain authoritative; a custom cache module does not require an Ecto
 table. Review the generated notice and host migration status before enabling
@@ -330,13 +336,15 @@ by identity and pagination cursors are opaque, signed, expiring, and bound to
 the principal, tenant, scopes, visible catalog revision, page size, and
 negotiated era.
 
-Resource templates use bounded reverse matching for one RFC 6570 expression:
-named path variables (`{id}`), reserved path variables (`{+path}`), prefix
-modifiers (`{id:3}`), and query variables (`{?q,limit}` or `{?keys*}`) are
-supported. Query values are strictly percent-decoded, bounded, and reject
-ambiguous duplicates or decoded traversal. Unsupported multi-expression or
-operator layouts are rejected at registration rather than accepted with
-nonfunctional matching. A matching `resources/read` handler receives both the
+Resource templates use bounded reverse matching for an RFC 6570 subset. A
+template may contain up to 16 separated named or reserved path expressions and
+32 globally unique variables, including prefix modifiers such as `{id:3}`.
+Adjacent path expressions remain rejected because their capture boundary is
+ambiguous. A single query expression supports `{?q,limit}` and `{?keys*}`.
+Values are strictly percent-decoded and bounded; simple variables reject raw or
+encoded path separators, and every variable rejects traversal. Unsupported or
+ambiguous operator layouts are rejected at registration rather than accepted
+with nonfunctional matching. A matching `resources/read` handler receives both the
 requested `uri` and a `params` map of captured variables. Completion handlers
 should register an explicit `ref` matching the prompt or resource-template
 reference; only that handler is invoked, and returned string values preserve
@@ -548,14 +556,20 @@ methods, atom keys, and arbitrary extension methods are rejected. Each method
 has at most 128 unique scopes, each scope is at most 256 bytes, and per-method
 and aggregate byte limits are enforced during initialization.
 
+`max_json_bytes` bounds JSON Schema instances, handler-result normalization,
+final response validation, and JSON-RPC encoding. It defaults to 2,000,000
+bytes and accepts explicit finite values from 512 through 64,000,000 bytes.
+The minimum leaves room for a bounded protocol error.
 `max_body_bytes` bounds the HTTP body and `max_message_bytes` bounds JSON-RPC
-decoding (and the complete stdio frame). Both must be positive and no greater
-than the schema instance ceiling returned by
-`AttestoMCP.Server.Schema.max_instance_bytes/0`, currently 2,000,000 bytes.
-The HTTP defaults are 2,000,000 body bytes and 1,000,000 message bytes. This
-keeps transport acceptance consistent with the bounded JSON value validator;
-raising either option above the effective schema ceiling is rejected during
-initialization.
+decoding (and the complete stdio frame). HTTP limits must be positive; the
+stdio frame limit must be at least 512 bytes. None may exceed the supervised
+server's `max_json_bytes` value. The nominal HTTP defaults
+remain 2,000,000 body bytes and 1,000,000 message bytes; omitted values are
+automatically capped by a smaller selected JSON budget. Explicit transport
+limits above that budget fail before body reading. Configure all three together
+when opting into a larger payload. The stdio adapter defaults to the smaller of
+64,000 bytes and the supervised server's JSON budget unless
+`max_message_bytes` is supplied explicitly.
 
 For hosts that issue definition scopes instead of generic method grants, add an
 explicit Plug-only `scope_policy`:
@@ -611,23 +625,33 @@ JSON-RPC `-32029`, and are isolated by principal plus remote address.
 
 ### Atomic startup, telemetry, and durable sessions
 
-`AttestoMCP.Server.register_all/2` validates at most 1,000 registrations before
-committing any of them. A successful batch emits one catalog invalidation per
-affected category; a failed batch emits none. Supply the same tuples in the
-server's `:registrations` option to make the complete catalog available before
-`start_link/1` returns. Named server child specs use the registered name as the
-supervision ID, allowing multiple independently named servers under one
-supervisor.
+The complete catalog is limited to 1,000 definitions across all primitive
+types. `AttestoMCP.Server.register_all/2` validates at most 1,000 additions and
+refuses any batch or repeated registration that would take the catalog above
+that total; rejection leaves both the catalog and its revision unchanged. A
+successful batch emits one catalog invalidation per affected category, while a
+failed batch emits none. Supply the same tuples in the server's
+`:registrations` option to make the complete catalog available before
+`start_link/1` returns. Registry recovery enforces the same total. Named server
+child specs use the registered name as the supervision ID, allowing multiple
+independently named servers under one supervisor.
 
-`AttestoMCP.Server.replace_catalog/2` validates at most 1,000 tuples and then
-atomically replaces every primitive category, so definitions omitted from the
-batch are removed. A failed replacement leaves the prior definitions, revision,
-and notifications untouched. An identical replacement is a no-op. A changed
-replacement advances the catalog revision once and emits one list-changed
-notification for each affected advertised catalog category. Resources and
-templates share one category; completion-only changes emit none. Keep the
-host's generated or persisted catalog as the source of truth; this API does not
-introduce a second catalog store.
+URI-template resolution also has one finite work allowance for the complete
+candidate scan. Exhaustion is not treated as a missing or unscoped resource:
+resource reads return a bounded internal `resource_match_limit` error and
+resource-notification publication returns
+`{:error, :template_match_budget_exhausted}` without delivery. Exact static
+resources bypass template matching.
+
+`AttestoMCP.Server.replace_catalog/2` validates one complete catalog of at most
+1,000 tuples and then atomically replaces every primitive category, so
+definitions omitted from the batch are removed. A failed replacement leaves
+the prior definitions, revision, and notifications untouched. An identical
+replacement is a no-op. A changed replacement advances the catalog revision
+once and emits one list-changed notification for each affected advertised
+catalog category. Resources and templates share one category; completion-only
+changes emit none. Keep the host's generated or persisted catalog as the source
+of truth; this API does not introduce a second catalog store.
 
 `telemetry_metadata` is a map of at most 16 bounded scalar dimensions. Reserved
 protocol keys cannot be replaced. Handler spans include the registered

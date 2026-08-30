@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.12.1 - 2026-08-30
+
+- Support bounded resource URI templates containing up to 16 separated simple
+  or reserved path expressions and 32 globally unique variables. Reverse
+  matching remains deterministic, rejects adjacent ambiguous expressions,
+  encoded separators for simple variables, traversal, and oversized captures,
+  and is shared by direct, batch, startup, and replacement registration paths.
+- Bound URI-template work across the complete candidate scan for one resource
+  lookup. Budget exhaustion is distinct from a non-match, fails closed for
+  selected resource dispatch and notification scopes, and a local resource
+  notification reuses one scope resolution for modern and legacy delivery.
+- Limit the complete primitive catalog to 1,000 definitions across all types.
+  Atomic batches and replacements, repeated additions, startup, and registry
+  recovery enforce the same total without mutating the catalog or revision on
+  rejection.
+- Add the server-wide `max_json_bytes` budget. The secure default remains
+  2,000,000 bytes; hosts may explicitly raise it to a finite maximum of
+  64,000,000 bytes. The selected budget now governs JSON Schema instances,
+  handler-result normalization, final result validation, JSON-RPC encoding,
+  Streamable HTTP, and stdio. Transport limits may not exceed their supervised
+  server's budget. Registered definition and schema data use that same budget
+  during startup, dynamic registration, catalog replacement, and restoration.
+- Cap omitted HTTP transport limits by the selected JSON budget, including
+  budgets below the 2,000,000-byte nominal body default. Explicit limits above
+  the selected budget still fail during initialization.
+- Make invalid low-level JSON-RPC `max_bytes` options fail closed for decoding
+  and ID recovery instead of relying on Erlang term ordering.
+- Document the stdio adapter's 512-byte minimum frame limit alongside its
+  server-budget ceiling.
+- Clarify that `Schema.max_instance_bytes/0` denotes the secure default rather
+  than the configurable ceiling, and that `nil` and `true` schemas remain
+  subject to the active JSON budget.
+- Allow the public content and result constructors to opt into the same larger
+  finite budget with `max_json_bytes`, while retaining the 2,000,000-byte
+  default and all structural and canonical-Base64 checks.
+
 ## 0.12.0 - 2026-08-29
 
 - Add bounded `alternative_scope_sets` to primitive definitions. The primary

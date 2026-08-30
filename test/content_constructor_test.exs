@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.ContentConstructorTest do
   use ExUnit.Case, async: true
 
-  alias AttestoMCP.Server.{Content, Output, Result}
+  alias AttestoMCP.Server.{Content, Output, Result, Schema}
 
   test "text, image, and audio constructors emit canonical string-key maps" do
     assert Content.text("hello", annotations: %{audience: ["user"]}, meta: %{source: "test"}) ==
@@ -233,5 +233,31 @@ defmodule AttestoMCP.Server.ContentConstructorTest do
 
     assert {:error, :not_json} = Output.canonicalize(%{"x" => escaped <> "a"})
     assert {:error, :not_json} = Output.canonicalize(%{escaped => nil})
+  end
+
+  test "output canonicalization fails closed for invalid byte budgets" do
+    value = %{"message" => "ok"}
+
+    for invalid <- [0, 511, 64_000_001, "2048", 2.5] do
+      assert {:error, :not_json} = Output.canonicalize(value, max_bytes: invalid)
+    end
+  end
+
+  test "constructor budgets use the supervised server range" do
+    minimum = Schema.min_allowed_instance_bytes()
+    maximum = Schema.max_allowed_instance_bytes()
+
+    content = Content.text("ok", max_json_bytes: minimum)
+    assert Result.tool(content, max_json_bytes: minimum)["content"] == [content]
+
+    for invalid <- [minimum - 1, maximum + 1] do
+      assert_raise ArgumentError, ~r/max_json_bytes must be between/, fn ->
+        Content.text("no", max_json_bytes: invalid)
+      end
+
+      assert_raise ArgumentError, ~r/max_json_bytes must be between/, fn ->
+        Result.tool(Content.text("no"), max_json_bytes: invalid)
+      end
+    end
   end
 end

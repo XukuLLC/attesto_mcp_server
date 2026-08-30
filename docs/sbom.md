@@ -1,6 +1,6 @@
 # Production dependency inventory
 
-Observed locally on 2026-08-28 from `mix.exs` with `mix deps.get` and checked with
+Observed locally on 2026-08-30 from `mix.exs` with `mix deps.get` and checked with
 `mix deps.tree --only prod`. This library does not maintain or ship a project
 lockfile; the exact observed resolution is recorded below and must be refreshed
 when constraints or publication inputs change.

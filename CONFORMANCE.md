@@ -12,7 +12,7 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - commit archive SHA-256:
   `28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293`
-- evidence release: `0.12.0`
+- evidence release: `0.12.1`
 - `0.10.0` release source fingerprint:
   `35b985a6d0ffdc7ab7a0dd75983c69ae89d35000620a6f70079a711a586c6e32`
 - `0.10.1` patch-candidate source fingerprint:
@@ -39,6 +39,14 @@ The official `modelcontextprotocol/conformance` runner was frozen at:
 - `0.12.0` 2025 runner completed at: `2026-08-30T01:12:12Z`
 - `0.12.0` TypeScript SDK smoke gates completed at: `2026-08-30T01:14:55Z`
 - `0.12.0` Python SDK smoke gates completed at: `2026-08-30T01:15:43Z`
+- `0.12.1` release-candidate source fingerprint:
+  `ce98d7edadef2c68ed587b87eb3468203365f7b15f882debdd49b98a607d0ed4`
+- `0.12.1` 2026 runner completed at: `2026-08-30T15:10:39Z`
+- `0.12.1` 2025 runner completed at: `2026-08-30T15:10:50Z`
+- `0.12.1` TypeScript SDK smoke gates completed at: `2026-08-30T15:11:06Z`
+- `0.12.1` Python SDK smoke gates completed at: `2026-08-30T15:11:24Z`
+- `0.12.1` installer matrix completed at: `2026-08-30T15:15:29Z`
+- `0.12.1` complete local evidence set recorded at: `2026-08-30T15:15:29Z`
 - `0.10.1` hosted official-interop job completed at: `2026-08-27T15:40:48Z`
   in [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
 - `0.10.2` hosted official-interop job completed at: `2026-08-27T17:55:41Z`
@@ -54,7 +62,7 @@ does not embed a workstation path.
 
 Each fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
 `scripts`, `test`, and reusable installer `fixtures` files in lexical order.
-The table below was rerun against the exact `0.12.0` release candidate; it is
+The table below was rerun against the exact `0.12.1` release candidate; it is
 not inherited from an earlier release. The
 `0.10.1` patch candidate adds regressions for request bodies decoded or passed
 through by a host parser; its official runner and exact SDK client smokes were
@@ -116,6 +124,18 @@ supported `attesto_phoenix` floor, a freshly generated Phoenix 1.8.13 host,
 installer reruns, authenticated MCP traffic, and the no-Igniter fallback. The
 frozen official runner and exact SDK client smokes were repeated at the
 `0.12.0` fingerprint above with the scored and raw totals shown below.
+The `0.12.1` patch candidate adds bounded multi-expression resource URI
+templates and a configurable finite JSON budget that governs schema
+validation, handler-result normalization, and protocol encoding while bounding
+the configurable HTTP and stdio transport ceilings.
+Its local aggregate gate passed 506 checks (one doctest plus 505 tests),
+reported 82.90% coverage, completed Dialyzer with zero errors and zero skips,
+built the package, and passed the Hex advisory audit. The full installer matrix
+also passed against released dependencies, the supported `attesto_phoenix`
+floor, a freshly generated Phoenix 1.8.13 host, installer reruns, authenticated
+MCP traffic, and the no-Igniter fallback. The frozen official runner and exact
+SDK client smokes were repeated at the `0.12.1` fingerprint above with the
+scored and raw totals shown below.
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |
@@ -167,7 +187,7 @@ converted to an expected failure.
 The package-owned authenticated fixture was also exercised with exact released
 official clients. Each gate negotiated the named era, listed tools, called
 `test_simple_text`, validated its text response, and closed the connection.
-These four gates were rerun against the fingerprinted `0.12.0` candidate at its
+These four gates were rerun against the fingerprinted `0.12.1` candidate at its
 recorded completion times. The package fixture wrapper inserts its own bearer
 token into each client transport. These gates therefore validate authenticated
 server protocol interoperability, not SDK OAuth discovery or token acquisition.

@@ -23,7 +23,9 @@ defmodule AttestoMCP.Server.API do
   authenticated principal, tenant, scopes, transport, negotiated version,
   request ID, `trace_context`, progress callback, and the Attesto assigns (`:attesto_mcp_claims`,
   `:attesto_mcp_scopes`, `:attesto_mcp_sender`, `:attesto_mcp_principal`, and
-  `:attesto_context`) when the Plug boundary is used. A successful callback
+  `:attesto_context`) when the Plug boundary is used. The context also exposes
+  the supervised server's `:max_json_bytes` value for matching public content
+  and result constructor options. A successful callback
   returns `{:ok, result}`, an application failure returns `{:error, reason}`,
   and an interactive callback returns `{:input_required, request_map}` with
   typed MRTR request entries. An HTTP `context_builder` contributes only the
@@ -52,6 +54,7 @@ defmodule AttestoMCP.Server.API do
           | {:legacy_initialized_grace_ms, non_neg_integer()}
           | {:session_idle_timeout, pos_integer()}
           | {:session_absolute_timeout, pos_integer()}
+          | {:max_json_bytes, pos_integer()}
           | {:max_body_bytes, pos_integer()}
           | {:max_message_bytes, pos_integer()}
           | {:max_queue, pos_integer()}

@@ -1,9 +1,11 @@
 defmodule AttestoMCP.Server.Output do
   @moduledoc false
 
+  alias AttestoMCP.Server.Schema
+
   @max_output_depth 64
   @max_output_nodes 10_000
-  @max_output_bytes 2_000_000
+  @default_output_bytes 2_000_000
 
   @type normalization_error ::
           :not_json
@@ -15,43 +17,50 @@ defmodule AttestoMCP.Server.Output do
           | :invalid_tool_result
 
   @doc false
-  @spec canonicalize(term()) :: {:ok, term()} | {:error, :not_json}
-  def canonicalize(value) do
-    case canonicalize(value, 0, @max_output_nodes, 0) do
+  @spec canonicalize(term(), keyword()) :: {:ok, term()} | {:error, :not_json}
+  def canonicalize(value, opts \\ []) do
+    max_bytes = configured_max_bytes(opts)
+
+    case canonicalize(value, 0, @max_output_nodes, 0, max_bytes) do
       {:ok, normalized, _left, _used} -> {:ok, normalized}
       {:error, :not_json} = error -> error
     end
   end
 
   @doc false
-  @spec normalize_content_item(term()) :: {:ok, map()} | {:error, normalization_error()}
-  def normalize_content_item(value),
-    do: normalize(value, &valid_content_item?/1, :invalid_content)
+  @spec normalize_content_item(term(), keyword()) ::
+          {:ok, map()} | {:error, normalization_error()}
+  def normalize_content_item(value, opts \\ []),
+    do: normalize(value, &valid_content_item?/1, :invalid_content, opts)
 
   @doc false
-  @spec normalize_resource_content(term()) :: {:ok, map()} | {:error, normalization_error()}
-  def normalize_resource_content(value),
-    do: normalize(value, &valid_resource_content?/1, :invalid_resource_content)
+  @spec normalize_resource_content(term(), keyword()) ::
+          {:ok, map()} | {:error, normalization_error()}
+  def normalize_resource_content(value, opts \\ []),
+    do: normalize(value, &valid_resource_content?/1, :invalid_resource_content, opts)
 
   @doc false
-  @spec normalize_prompt_message(term()) :: {:ok, map()} | {:error, normalization_error()}
-  def normalize_prompt_message(value),
-    do: normalize(value, &valid_prompt_message?/1, :invalid_prompt_message)
+  @spec normalize_prompt_message(term(), keyword()) ::
+          {:ok, map()} | {:error, normalization_error()}
+  def normalize_prompt_message(value, opts \\ []),
+    do: normalize(value, &valid_prompt_message?/1, :invalid_prompt_message, opts)
 
   @doc false
-  @spec normalize_tool_result(term()) :: {:ok, map()} | {:error, normalization_error()}
-  def normalize_tool_result(value),
-    do: normalize(value, &valid_tool_result?/1, :invalid_tool_result)
+  @spec normalize_tool_result(term(), keyword()) :: {:ok, map()} | {:error, normalization_error()}
+  def normalize_tool_result(value, opts \\ []),
+    do: normalize(value, &valid_tool_result?/1, :invalid_tool_result, opts)
 
   @doc false
-  @spec normalize_resource_result(term()) :: {:ok, map()} | {:error, normalization_error()}
-  def normalize_resource_result(value),
-    do: normalize(value, &valid_resource_result?/1, :invalid_resource_result)
+  @spec normalize_resource_result(term(), keyword()) ::
+          {:ok, map()} | {:error, normalization_error()}
+  def normalize_resource_result(value, opts \\ []),
+    do: normalize(value, &valid_resource_result?/1, :invalid_resource_result, opts)
 
   @doc false
-  @spec normalize_prompt_result(term()) :: {:ok, map()} | {:error, normalization_error()}
-  def normalize_prompt_result(value),
-    do: normalize(value, &valid_prompt_result?/1, :invalid_prompt_result)
+  @spec normalize_prompt_result(term(), keyword()) ::
+          {:ok, map()} | {:error, normalization_error()}
+  def normalize_prompt_result(value, opts \\ []),
+    do: normalize(value, &valid_prompt_result?/1, :invalid_prompt_result, opts)
 
   @doc false
   @spec normalize_options(term(), [atom()]) :: {:ok, keyword()} | {:error, :invalid_options}
@@ -113,8 +122,8 @@ defmodule AttestoMCP.Server.Output do
 
   def canonical_base64?(_value), do: false
 
-  defp normalize(value, validator, error) do
-    with {:ok, normalized} <- canonicalize(value),
+  defp normalize(value, validator, error, opts) do
+    with {:ok, normalized} <- canonicalize(value, opts),
          true <- validator.(normalized) do
       {:ok, normalized}
     else
@@ -245,19 +254,20 @@ defmodule AttestoMCP.Server.Output do
     not Map.has_key?(map, key) or (is_integer(map[key]) and map[key] >= 0)
   end
 
-  defp canonicalize(_value, depth, nodes, bytes)
-       when depth > @max_output_depth or nodes <= 0 or bytes > @max_output_bytes,
+  defp canonicalize(_value, depth, nodes, bytes, max_bytes)
+       when depth > @max_output_depth or nodes <= 0 or bytes > max_bytes,
        do: {:error, :not_json}
 
-  defp canonicalize(value, depth, nodes, bytes) when is_map(value) do
-    with {:ok, bytes} <- add_bytes(bytes, 2) do
+  defp canonicalize(value, depth, nodes, bytes, max_bytes) when is_map(value) do
+    with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
       Enum.reduce_while(value, {:ok, %{}, nodes - 1, bytes, true}, fn {key, nested},
                                                                       {:ok, acc, left, used,
                                                                        first?} ->
         with {:ok, key} <- canonical_key(key),
-             {:ok, used} <- add_bytes(used, if(first?, do: 1, else: 2)),
-             {:ok, used} <- add_json_string_bytes(key, used),
-             {:ok, nested, left, used} <- canonicalize(nested, depth + 1, left, used),
+             {:ok, used} <- add_bytes(used, if(first?, do: 1, else: 2), max_bytes),
+             {:ok, used} <- add_json_string_bytes(key, used, max_bytes),
+             {:ok, nested, left, used} <-
+               canonicalize(nested, depth + 1, left, used, max_bytes),
              false <- Map.has_key?(acc, key) do
           {:cont, {:ok, Map.put(acc, key, nested), left, used, false}}
         else
@@ -273,50 +283,50 @@ defmodule AttestoMCP.Server.Output do
     end
   end
 
-  defp canonicalize(value, depth, nodes, bytes) when is_list(value) do
-    with {:ok, bytes} <- add_bytes(bytes, 2) do
-      canonicalize_list(value, depth, nodes - 1, bytes, [], true)
+  defp canonicalize(value, depth, nodes, bytes, max_bytes) when is_list(value) do
+    with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
+      canonicalize_list(value, depth, nodes - 1, bytes, [], true, max_bytes)
     else
       :error -> {:error, :not_json}
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes) when is_binary(value) do
-    case add_json_string_bytes(value, bytes) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when is_binary(value) do
+    case add_json_string_bytes(value, bytes, max_bytes) do
       {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
       :error -> {:error, :not_json}
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes) when is_integer(value) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when is_integer(value) do
     scalar_bytes = byte_size(Integer.to_string(value))
 
-    case add_bytes(bytes, scalar_bytes) do
+    case add_bytes(bytes, scalar_bytes, max_bytes) do
       {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
       :error -> {:error, :not_json}
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes) when value in [true, nil] do
-    case add_bytes(bytes, 4) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when value in [true, nil] do
+    case add_bytes(bytes, 4, max_bytes) do
       {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
       :error -> {:error, :not_json}
     end
   end
 
-  defp canonicalize(false, _depth, nodes, bytes) do
-    case add_bytes(bytes, 5) do
+  defp canonicalize(false, _depth, nodes, bytes, max_bytes) do
+    case add_bytes(bytes, 5, max_bytes) do
       {:ok, bytes} -> {:ok, false, nodes - 1, bytes}
       :error -> {:error, :not_json}
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes) when is_float(value) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when is_float(value) do
     if value == value and value <= 1.7976931348623157e308 and
          value >= -1.7976931348623157e308 do
       scalar_bytes = byte_size(:erlang.float_to_binary(value, [:short]))
 
-      case add_bytes(bytes, scalar_bytes) do
+      case add_bytes(bytes, scalar_bytes, max_bytes) do
         {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
         :error -> {:error, :not_json}
       end
@@ -325,59 +335,70 @@ defmodule AttestoMCP.Server.Output do
     end
   end
 
-  defp canonicalize(_value, _depth, _nodes, _bytes), do: {:error, :not_json}
+  defp canonicalize(_value, _depth, _nodes, _bytes, _max_bytes), do: {:error, :not_json}
 
-  defp canonicalize_list([], _depth, nodes, bytes, items, _first?),
+  defp canonicalize_list([], _depth, nodes, bytes, items, _first?, _max_bytes),
     do: {:ok, Enum.reverse(items), nodes, bytes}
 
-  defp canonicalize_list([item | rest], depth, nodes, bytes, items, first?) do
-    with {:ok, bytes} <- add_bytes(bytes, if(first?, do: 0, else: 1)),
-         {:ok, item, nodes, bytes} <- canonicalize(item, depth + 1, nodes, bytes) do
-      canonicalize_list(rest, depth, nodes, bytes, [item | items], false)
+  defp canonicalize_list([item | rest], depth, nodes, bytes, items, first?, max_bytes) do
+    with {:ok, bytes} <- add_bytes(bytes, if(first?, do: 0, else: 1), max_bytes),
+         {:ok, item, nodes, bytes} <- canonicalize(item, depth + 1, nodes, bytes, max_bytes) do
+      canonicalize_list(rest, depth, nodes, bytes, [item | items], false, max_bytes)
     else
       _ -> {:error, :not_json}
     end
   end
 
-  defp canonicalize_list(_improper, _depth, _nodes, _bytes, _items, _first?),
+  defp canonicalize_list(_improper, _depth, _nodes, _bytes, _items, _first?, _max_bytes),
     do: {:error, :not_json}
 
   # Count the default Jason JSON encoding without constructing escaped output. JSON
   # leaves valid non-ASCII UTF-8 bytes unchanged, while the ASCII cases below are
   # the only bytes whose encoded length differs from their input length.
-  defp add_json_string_bytes(value, bytes) when is_binary(value) do
+  defp add_json_string_bytes(value, bytes, max_bytes) when is_binary(value) do
     with true <- String.valid?(value),
-         {:ok, bytes} <- add_bytes(bytes, 2) do
-      add_escaped_string_bytes(value, bytes)
+         {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
+      add_escaped_string_bytes(value, bytes, max_bytes)
     else
       _ -> :error
     end
   end
 
-  defp add_escaped_string_bytes(<<>>, bytes), do: {:ok, bytes}
+  defp add_escaped_string_bytes(<<>>, bytes, _max_bytes), do: {:ok, bytes}
 
-  defp add_escaped_string_bytes(<<byte, rest::binary>>, bytes)
+  defp add_escaped_string_bytes(<<byte, rest::binary>>, bytes, max_bytes)
        when byte in [0x08, 0x09, 0x0A, 0x0C, 0x0D, 0x22, 0x5C] do
-    with {:ok, bytes} <- add_bytes(bytes, 2),
-         do: add_escaped_string_bytes(rest, bytes)
+    with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes),
+         do: add_escaped_string_bytes(rest, bytes, max_bytes)
   end
 
-  defp add_escaped_string_bytes(<<byte, rest::binary>>, bytes) when byte <= 0x1F do
-    with {:ok, bytes} <- add_bytes(bytes, 6),
-         do: add_escaped_string_bytes(rest, bytes)
+  defp add_escaped_string_bytes(<<byte, rest::binary>>, bytes, max_bytes) when byte <= 0x1F do
+    with {:ok, bytes} <- add_bytes(bytes, 6, max_bytes),
+         do: add_escaped_string_bytes(rest, bytes, max_bytes)
   end
 
-  defp add_escaped_string_bytes(<<_byte, rest::binary>>, bytes) do
-    with {:ok, bytes} <- add_bytes(bytes, 1),
-         do: add_escaped_string_bytes(rest, bytes)
+  defp add_escaped_string_bytes(<<_byte, rest::binary>>, bytes, max_bytes) do
+    with {:ok, bytes} <- add_bytes(bytes, 1, max_bytes),
+         do: add_escaped_string_bytes(rest, bytes, max_bytes)
   end
 
-  defp add_bytes(bytes, count)
+  defp add_bytes(bytes, count, max_bytes)
        when is_integer(bytes) and is_integer(count) and bytes >= 0 and count >= 0 and
-              bytes <= @max_output_bytes and count <= @max_output_bytes - bytes,
+              bytes <= max_bytes and count <= max_bytes - bytes,
        do: {:ok, bytes + count}
 
-  defp add_bytes(_bytes, _count), do: :error
+  defp add_bytes(_bytes, _count, _max_bytes), do: :error
+
+  defp configured_max_bytes(opts) when is_list(opts) do
+    max_bytes = Keyword.get(opts, :max_bytes, @default_output_bytes)
+
+    if is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
+         max_bytes <= Schema.max_allowed_instance_bytes(),
+       do: max_bytes,
+       else: 0
+  end
+
+  defp configured_max_bytes(_opts), do: 0
 
   defp canonical_key(key) when is_binary(key) do
     if String.valid?(key), do: {:ok, key}, else: {:error, :not_json}

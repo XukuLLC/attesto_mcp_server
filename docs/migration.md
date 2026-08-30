@@ -21,8 +21,10 @@ registrations = [
 
 The supported tuple types are `:tool`, `:resource`, `:template`, `:prompt`, and
 `:completion`. Identities, definitions, handlers, schemas, URI templates, and
-scope declarations are validated before registration. A batch contains at most
-1,000 entries.
+scope declarations are validated before registration. The complete catalog and
+each atomic startup, addition, replacement, or recovery batch contain at most
+1,000 entries across all primitive types. Repeated additions cannot bypass the
+total.
 
 Prefer startup registration when the entire catalog is known during boot:
 
@@ -38,7 +40,8 @@ children = [
 installed. `AttestoMCP.Server.API.register_all/2` provides the same atomic
 validation for additions after startup. A duplicate or invalid entry rejects
 the whole batch, leaves the previous catalog revision unchanged, and emits no
-invalidation.
+invalidation. An addition that would exceed the 1,000-definition total behaves
+the same way.
 
 For a generated catalog, `AttestoMCP.Server.API.replace_catalog/2` atomically
 makes one validated batch the complete catalog. Omitted definitions are
@@ -102,8 +105,9 @@ supported when an extension member is needed.
 Register a static resource when the client URI must equal one fixed URI.
 Register a `:template` when the server needs to extract bounded variables from
 the requested URI. The supported RFC 6570 subset includes named and reserved
-path variables, prefix modifiers, and query variables in one expression. An
-unsupported or ambiguous template is rejected during registration.
+path variables across bounded separated expressions, prefix modifiers, and one
+query expression. An unsupported or ambiguous template is rejected during
+registration.
 
 A static and a matching template may coexist. Exact static lookup wins; the
 first matching template in deterministic identity order handles the remaining
@@ -193,10 +197,19 @@ slashes before any host parser, or enforce an equally strict authenticated body
 reader yourself. Keep every upstream body limit at least as strict as the MCP
 Plug's `max_body_bytes`.
 
-`max_body_bytes` limits the HTTP body; `max_message_bytes` limits JSON-RPC
-decoding and the complete stdio frame. Neither may exceed
-`AttestoMCP.Server.Schema.max_instance_bytes/0`, currently 2,000,000 bytes.
-The HTTP defaults are 2,000,000 body bytes and 1,000,000 message bytes.
+`max_json_bytes` is the server-wide JSON value, schema-instance, and output
+budget. It defaults to 2,000,000 bytes and may be explicitly raised to at most
+64,000,000 bytes; the minimum configurable value is 512 bytes so a bounded
+protocol error still fits. `max_body_bytes` limits the HTTP body;
+`max_message_bytes` limits JSON-RPC decoding and the complete stdio frame.
+HTTP transport limits must be positive, the stdio frame limit must be at least
+512 bytes, and none may exceed its supervised server's selected budget.
+The nominal HTTP defaults remain 2,000,000 body bytes and 1,000,000 message
+bytes; omitted values are automatically capped by a smaller selected JSON
+budget. Explicit limits above that budget fail during initialization. When
+opting into a larger payload, configure the server budget and the relevant
+transport limits together. Content and result constructors building a value
+above the default also accept `max_json_bytes: selected_budget`.
 
 ## 7. Choose one metadata owner
 

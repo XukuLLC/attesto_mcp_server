@@ -33,7 +33,7 @@ defmodule AttestoMCP.Server.JSONRPC do
   def decode(payload, opts \\ [])
 
   def decode(payload, opts) when is_binary(payload) do
-    max = Keyword.get(opts, :max_bytes, 1_000_000)
+    max = configured_decode_max_bytes(Keyword.get(opts, :max_bytes, 1_000_000))
     max_depth = Keyword.get(opts, :max_depth, 64)
 
     cond do
@@ -57,7 +57,7 @@ defmodule AttestoMCP.Server.JSONRPC do
   end
 
   def decode(payload, opts) when is_map(payload) or is_list(payload) do
-    max = Keyword.get(opts, :max_bytes, 1_000_000)
+    max = configured_decode_max_bytes(Keyword.get(opts, :max_bytes, 1_000_000))
     max_depth = Keyword.get(opts, :max_depth, 64)
 
     if within_depth?(payload, 0, max_depth) do
@@ -78,7 +78,7 @@ defmodule AttestoMCP.Server.JSONRPC do
   def recover_id(payload, opts \\ [])
 
   def recover_id(payload, opts) when is_binary(payload) do
-    max_bytes = Keyword.get(opts, :max_bytes, 1_000_000)
+    max_bytes = configured_decode_max_bytes(Keyword.get(opts, :max_bytes, 1_000_000))
 
     with true <- byte_size(payload) <= max_bytes,
          true <- String.valid?(payload),
@@ -93,7 +93,7 @@ defmodule AttestoMCP.Server.JSONRPC do
   end
 
   def recover_id(%{"id" => id} = payload, opts) do
-    max_bytes = Keyword.get(opts, :max_bytes, 1_000_000)
+    max_bytes = configured_decode_max_bytes(Keyword.get(opts, :max_bytes, 1_000_000))
 
     with {:ok, encoded} <- Jason.encode(payload),
          true <- byte_size(encoded) <= max_bytes,
@@ -115,24 +115,54 @@ defmodule AttestoMCP.Server.JSONRPC do
 
   defp valid_recoverable_id?(_), do: false
 
-  @spec encode(map()) :: binary()
-  def encode(message) do
-    if json_value?(message) do
-      Jason.encode!(message)
-    else
-      id = if is_map(message), do: Map.get(message, "id"), else: nil
+  defp configured_decode_max_bytes(value) when is_integer(value) and value >= 0, do: value
+  defp configured_decode_max_bytes(_value), do: 0
 
-      Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "id" => if(is_binary(id) or is_integer(id), do: id, else: nil),
-        "error" => %{"code" => -32603, "message" => "Internal error"}
-      })
+  @spec encode(map(), keyword()) :: binary()
+  def encode(message, opts \\ []) do
+    max_bytes = Keyword.get(opts, :max_bytes, Schema.default_instance_bytes())
+
+    if valid_budget?(max_bytes) and json_value?(message, max_bytes) do
+      encoded = Jason.encode!(message)
+
+      if byte_size(encoded) <= max_bytes,
+        do: encoded,
+        else: fallback_error(message, max_bytes)
+    else
+      fallback_error(message, max_bytes)
     end
   rescue
-    _ -> ~s({"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}})
+    _ -> fallback_error()
   end
 
-  defp json_value?(value), do: Schema.json_value(value) == :ok
+  defp json_value?(value, max_bytes), do: Schema.json_value(value, max_bytes: max_bytes) == :ok
+
+  defp valid_budget?(value),
+    do:
+      is_integer(value) and value >= Schema.min_allowed_instance_bytes() and
+        value <= Schema.max_allowed_instance_bytes()
+
+  defp fallback_error(message \\ nil, max_bytes \\ nil) do
+    id = if is_map(message), do: Map.get(message, "id"), else: nil
+
+    with_id = %{
+      "jsonrpc" => "2.0",
+      "id" => if(is_binary(id) or is_integer(id), do: id, else: nil),
+      "error" => %{"code" => -32603, "message" => "Internal error"}
+    }
+
+    encoded = Jason.encode!(with_id)
+
+    if is_integer(max_bytes) and byte_size(encoded) > max_bytes do
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => nil,
+        "error" => %{"code" => -32603, "message" => "Internal error"}
+      })
+    else
+      encoded
+    end
+  end
 
   defp validate(value) when is_list(value),
     do: {:error, Error.invalid_request(%{"reason" => "batch_not_supported"})}

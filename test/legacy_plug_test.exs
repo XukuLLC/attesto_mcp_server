@@ -1251,9 +1251,17 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
   end
 
   defp call(plug, token, method, body, opts) do
+    method =
+      case String.upcase(method) do
+        "GET" -> :get
+        "POST" -> :post
+        "DELETE" -> :delete
+        _ -> raise ArgumentError, "unsupported test HTTP method"
+      end
+
     conn =
       conn(
-        String.to_atom(String.downcase(method)),
+        method,
         "/mcp",
         if(body, do: Jason.encode!(body), else: "")
       )
@@ -1261,7 +1269,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
       |> put_req_header("accept", "application/json, text/event-stream")
 
     conn =
-      if method == "POST",
+      if method == :post,
         do: put_req_header(conn, "content-type", "application/json"),
         else: conn
 

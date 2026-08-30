@@ -45,6 +45,12 @@ defmodule AttestoMCP.Server do
   @max_template_uri_bytes 4_096
   @max_template_value_bytes 2_048
   @max_template_query_pairs 32
+  @max_template_expressions 16
+  @max_template_variables 32
+  @max_template_expression_bytes 128
+  @max_template_match_steps 65_536
+  @max_template_match_work 8_388_608
+  @max_template_match_candidates 1_000
   @max_notifications_per_request 128
   @max_resource_subscription_uri_bytes 4_096
   @max_resource_subscriptions_per_session 128
@@ -73,6 +79,7 @@ defmodule AttestoMCP.Server do
     :legacy_initialized_grace_ms,
     :session_idle_timeout,
     :session_absolute_timeout,
+    :max_json_bytes,
     :max_body_bytes,
     :max_message_bytes,
     :max_queue,
@@ -284,6 +291,9 @@ defmodule AttestoMCP.Server do
                    progress_token = metadata_value(request.params, "progressToken")
                    progress = progress_callback(parent, ref, progress_token, on_event)
 
+                   notification_context =
+                     Map.put(context, :max_json_bytes, runtime.opts[:max_json_bytes])
+
                    notify =
                      notification_callback(
                        parent,
@@ -291,7 +301,7 @@ defmodule AttestoMCP.Server do
                        on_event,
                        era,
                        request,
-                       context,
+                       notification_context,
                        runtime.opts[:max_queue] || @max_notifications_per_request
                      )
 
@@ -314,6 +324,7 @@ defmodule AttestoMCP.Server do
                      |> Map.put(:subscription_ref, ref)
                      |> Map.put(:owner, parent)
                      |> Map.put(:request_id, id)
+                     |> Map.put(:max_json_bytes, runtime.opts[:max_json_bytes])
                      |> Map.put(:request_extensions, Map.get(request, :extensions, %{}))
                      |> Map.put_new(:protocol_version, raw_version)
                      |> Map.put(:logging_level, request_logging_level(request, context, era))
@@ -535,7 +546,9 @@ defmodule AttestoMCP.Server do
 
   @spec publish(pid() | atom(), map(), keyword()) :: :ok | {:error, atom()}
   def publish(server, notification, opts \\ []) do
-    with {:ok, notification} <- normalize_public_notification(notification),
+    runtime = GenServer.call(server, :runtime)
+
+    with {:ok, notification} <- normalize_public_notification(notification, runtime.opts),
          {:ok, opts} <- normalize_public_notification_opts(opts) do
       GenServer.call(server, {:publish_notification, notification, opts})
     else
@@ -553,7 +566,7 @@ defmodule AttestoMCP.Server do
 
   defp normalize_public_notification_opts(_opts), do: {:error, :invalid_options}
 
-  defp normalize_public_notification(%{"type" => type} = notification)
+  defp normalize_public_notification(%{"type" => type} = notification, opts)
        when type in [
               "toolsListChanged",
               "promptsListChanged",
@@ -564,23 +577,25 @@ defmodule AttestoMCP.Server do
             ] do
     params = Map.delete(notification, "type")
 
+    budget_opts = json_budget_opts(opts)
+
     valid_params? =
       if type in ["resource", "resourceUpdated", "resourceSubscriptions"],
-        do: validate_resource_updated_notification_params(params) == :ok,
-        else: validate_catalog_notification_params(params) == :ok
+        do: validate_resource_updated_notification_params(params, budget_opts) == :ok,
+        else: validate_catalog_notification_params(params, budget_opts) == :ok
 
-    if valid_params? and Schema.json_value(notification) == :ok,
+    if valid_params? and Schema.json_value(notification, budget_opts) == :ok,
       do: {:ok, notification},
       else: {:error, :invalid_notification}
   end
 
-  defp normalize_public_notification(_), do: {:error, :invalid_notification}
+  defp normalize_public_notification(_, _opts), do: {:error, :invalid_notification}
 
   defp publish_catalog_invalidation_state(state, type) do
     notification = catalog_notification(type)
 
     if notification do
-      state = publish_notification_local(state, notification, [], [])
+      state = publish_notification_local(state, notification, [], :local, [[]])
       broadcast_cluster_notification(state, notification, [], [])
 
       state_telemetry(state, [:cache, :invalidation], %{count: 1}, %{
@@ -695,7 +710,9 @@ defmodule AttestoMCP.Server do
   def init(opts) do
     Process.flag(:trap_exit, true)
     normalized_opts = default_opts(opts)
-    {:ok, registry} = Registry.start_link([])
+
+    {:ok, registry} =
+      Registry.start_link(max_json_bytes: normalized_opts[:max_json_bytes])
 
     normalized_registrations =
       case Registry.register_all(registry, normalized_opts[:registrations] || []) do
@@ -823,10 +840,28 @@ defmodule AttestoMCP.Server do
   end
 
   def handle_call({:publish_notification, notification, opts}, _from, state) do
-    publisher_scope_sets = publisher_notification_scope_sets(state, notification)
-    state = publish_notification_local(state, notification, opts, :local)
-    broadcast_cluster_notification(state, notification, opts, publisher_scope_sets)
-    {:reply, :ok, state}
+    case local_notification_scope_sets(state, notification) do
+      {:ok, local_scope_sets} ->
+        state =
+          publish_notification_local(
+            state,
+            notification,
+            opts,
+            :local,
+            local_scope_sets
+          )
+
+        broadcast_cluster_notification(state, notification, opts, local_scope_sets)
+        {:reply, :ok, state}
+
+      {:error, :template_match_budget_exhausted} ->
+        template_match_budget_exhausted(:notification)
+        {:reply, {:error, :template_match_budget_exhausted}, state}
+
+      {:error, reason} ->
+        Telemetry.execute([:notification, :reject], %{count: 1}, %{reason: reason})
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:register_all, registrations}, _from, state) do
@@ -1020,7 +1055,7 @@ defmodule AttestoMCP.Server do
       {request_ref, request} ->
         if session_owned?(state, session_id, principal, tenant) and
              request.principal == principal and request.tenant == tenant do
-          case validate_client_response(request.method, response, request.params) do
+          case validate_client_response(request.method, response, request.params, state.opts) do
             {:ok, result} ->
               send(request.waiter, {request_ref, {:response, {:ok, result}}})
 
@@ -1357,13 +1392,40 @@ defmodule AttestoMCP.Server do
 
   @impl true
   def handle_cast({:publish_legacy, notification}, state) do
-    {:noreply, publish_legacy(state, notification)}
+    case local_notification_scope_sets(state, notification) do
+      {:ok, local_scope_sets} ->
+        {:noreply, publish_legacy(state, notification, local_scope_sets)}
+
+      {:error, :template_match_budget_exhausted} ->
+        template_match_budget_exhausted(:notification)
+        {:noreply, state}
+
+      {:error, _reason} ->
+        {:noreply, state}
+    end
   end
 
   def handle_cast({:cluster_publish, envelope}, state) do
-    case cluster_notification(envelope) do
+    case cluster_notification(envelope, state.opts) do
       {:ok, notification, opts, publisher_scope_sets} ->
-        {:noreply, publish_notification_local(state, notification, opts, publisher_scope_sets)}
+        case local_notification_scope_sets(state, notification) do
+          {:ok, local_scope_sets} ->
+            {:noreply,
+             publish_notification_local(
+               state,
+               notification,
+               opts,
+               publisher_scope_sets,
+               local_scope_sets
+             )}
+
+          {:error, :template_match_budget_exhausted} ->
+            template_match_budget_exhausted(:notification)
+            {:noreply, state}
+
+          {:error, _reason} ->
+            {:noreply, state}
+        end
 
       :error ->
         {:noreply, state}
@@ -1374,11 +1436,11 @@ defmodule AttestoMCP.Server do
     # Older peers did not send publisher resource scopes. Keep their validated
     # catalog invalidations working, but never guess at authorization metadata
     # for resource notifications.
-    case normalize_public_notification(notification) do
+    case normalize_public_notification(notification, state.opts) do
       {:ok, notification} ->
         with false <- resource_notification?(notification),
              {:ok, opts} <- validate_cluster_notification_opts(opts) do
-          {:noreply, publish_notification_local(state, notification, opts, [])}
+          {:noreply, publish_notification_local(state, notification, opts, [], [[]])}
         else
           _ -> {:noreply, state}
         end
@@ -1437,7 +1499,7 @@ defmodule AttestoMCP.Server do
   def handle_info({:EXIT, pid, _reason}, state) do
     cond do
       pid == state.registry ->
-        case Registry.start_link([]) do
+        case Registry.start_link(max_json_bytes: state.opts[:max_json_bytes]) do
           {:ok, registry} ->
             case restore_registry(registry, state.definitions, state.catalog_revision) do
               :ok ->
@@ -1779,6 +1841,7 @@ defmodule AttestoMCP.Server do
       |> Keyword.put_new(:legacy_initialized_grace_ms, 50)
       |> Keyword.put_new(:max_request_timeout, 120_000)
       |> Keyword.put_new(:request_state_ttl, 120_000)
+      |> Keyword.put_new(:max_json_bytes, Schema.default_instance_bytes())
       |> Keyword.put_new(:stream_keepalive_ms, 15_000)
       |> Keyword.put_new(:max_queue, 128)
       |> Keyword.put_new(:rate_limits, %{
@@ -1893,15 +1956,23 @@ defmodule AttestoMCP.Server do
       end
     end)
 
+    json_budget = Keyword.fetch!(opts, :max_json_bytes)
+
+    unless is_integer(json_budget) and json_budget >= Schema.min_allowed_instance_bytes() and
+             json_budget <= Schema.max_allowed_instance_bytes() do
+      raise ArgumentError,
+            ":max_json_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{Schema.max_allowed_instance_bytes()} bytes"
+    end
+
     Enum.each([:max_body_bytes, :max_message_bytes], fn key ->
       case Keyword.get(opts, key) do
         nil ->
           :ok
 
         value when is_integer(value) and value > 0 ->
-          if value > Schema.max_instance_bytes() do
+          if value > json_budget do
             raise ArgumentError,
-                  "#{key} cannot exceed the #{Schema.max_instance_bytes()}-byte schema-instance ceiling"
+                  "#{key} cannot exceed the #{json_budget}-byte JSON value budget"
           end
 
         _ ->
@@ -1946,7 +2017,12 @@ defmodule AttestoMCP.Server do
 
     validate_scope_map!(Keyword.get(opts, :scope_map))
     validate_default_scopes!(Keyword.get(opts, :default_scopes))
-    validate_capabilities!(Keyword.get(opts, :capabilities))
+
+    validate_capabilities!(
+      Keyword.get(opts, :capabilities),
+      Keyword.fetch!(opts, :max_json_bytes)
+    )
+
     Telemetry.validate_trusted_metadata!(Keyword.get(opts, :telemetry_metadata))
 
     Enum.each([{:exception_reporter, 1}, {:handler_task_init, 2}], fn {key, arity} ->
@@ -2030,17 +2106,18 @@ defmodule AttestoMCP.Server do
   defp validate_default_scopes!(_scopes),
     do: raise(ArgumentError, ":default_scopes must be a non-empty list of unique scopes")
 
-  defp validate_capabilities!(nil), do: :ok
+  defp validate_capabilities!(nil, _max_bytes), do: :ok
 
-  defp validate_capabilities!(capabilities) when is_map(capabilities) do
-    if Schema.json_value(capabilities) == :ok do
+  defp validate_capabilities!(capabilities, max_bytes) when is_map(capabilities) do
+    if Schema.json_value(capabilities, max_bytes: max_bytes) == :ok do
       :ok
     else
       raise ArgumentError, ":capabilities must contain only bounded JSON values"
     end
   end
 
-  defp validate_capabilities!(_), do: raise(ArgumentError, ":capabilities must be a JSON map")
+  defp validate_capabilities!(_, _max_bytes),
+    do: raise(ArgumentError, ":capabilities must be a JSON map")
 
   defp validate_replica_options!(opts) do
     if opts[:clustered] == true do
@@ -2446,7 +2523,7 @@ defmodule AttestoMCP.Server do
   defp notification_callback(parent, ref, _on_event, era, request, context, limit) do
     fn event ->
       with :ok <- reject_progress_notification(event),
-           :ok <- validate_server_notification(event, era),
+           :ok <- validate_server_notification(event, era, context),
            :ok <- notification_log_policy(event, era, request, context),
            :ok <- bounded_notification_count(ref, limit) do
         delivery_ref = make_ref()
@@ -2516,7 +2593,8 @@ defmodule AttestoMCP.Server do
 
   defp validate_server_notification(
          %{"jsonrpc" => "2.0", "method" => method, "params" => params} = event,
-         era
+         era,
+         context
        )
        when is_binary(method) and is_map(params) do
     cond do
@@ -2526,31 +2604,32 @@ defmodule AttestoMCP.Server do
       method not in notification_methods(era) ->
         {:error, :notification_method}
 
-      Schema.json_value(event) != :ok ->
+      Schema.json_value(event, json_budget_opts(context)) != :ok ->
         {:error, :notification_not_json}
 
       method == "notifications/message" ->
-        validate_log_params(params)
+        validate_log_params(params, json_budget_opts(context))
 
       method == "notifications/progress" ->
-        validate_progress_params(params)
+        validate_progress_params(params, json_budget_opts(context))
 
       method in [
         "notifications/tools/list_changed",
         "notifications/prompts/list_changed",
         "notifications/resources/list_changed"
       ] ->
-        validate_catalog_notification_params(params)
+        validate_catalog_notification_params(params, json_budget_opts(context))
 
       method == "notifications/resources/updated" ->
-        validate_resource_updated_notification_params(params)
+        validate_resource_updated_notification_params(params, json_budget_opts(context))
 
       true ->
         {:error, :notification_params}
     end
   end
 
-  defp validate_server_notification(_event, _era), do: {:error, :invalid_notification}
+  defp validate_server_notification(_event, _era, _context),
+    do: {:error, :invalid_notification}
 
   defp notification_methods(@modern),
     do: [
@@ -2574,7 +2653,7 @@ defmodule AttestoMCP.Server do
 
   defp notification_methods(_), do: []
 
-  defp validate_log_params(params) do
+  defp validate_log_params(params, opts) do
     allowed = ["level", "logger", "data", "_meta"]
 
     cond do
@@ -2591,11 +2670,11 @@ defmodule AttestoMCP.Server do
           not (is_binary(params["logger"]) and byte_size(params["logger"]) <= 256) ->
         {:error, :log_logger_invalid}
 
-      not Map.has_key?(params, "data") or Schema.json_value(params["data"]) != :ok ->
+      not Map.has_key?(params, "data") or Schema.json_value(params["data"], opts) != :ok ->
         {:error, :log_data_invalid}
 
       Map.has_key?(params, "_meta") and
-          (not is_map(params["_meta"]) or Schema.json_value(params["_meta"]) != :ok) ->
+          (not is_map(params["_meta"]) or Schema.json_value(params["_meta"], opts) != :ok) ->
         {:error, :log_meta_invalid}
 
       true ->
@@ -2603,33 +2682,33 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_catalog_notification_params(params) when is_map(params) do
+  defp validate_catalog_notification_params(params, opts) when is_map(params) do
     if Enum.all?(Map.keys(params), &(&1 == "_meta")) and
          (not Map.has_key?(params, "_meta") or
-            (is_map(params["_meta"]) and Schema.json_value(params["_meta"]) == :ok)),
+            (is_map(params["_meta"]) and Schema.json_value(params["_meta"], opts) == :ok)),
        do: :ok,
        else: {:error, :notification_params}
   end
 
-  defp validate_resource_updated_notification_params(params) when is_map(params) do
+  defp validate_resource_updated_notification_params(params, opts) when is_map(params) do
     uri = Map.get(params, "uri")
 
     if is_binary(uri) and byte_size(uri) in 1..4_096 and String.valid?(uri) and
          Enum.all?(Map.keys(params), &(&1 in ["uri", "_meta"])) and
          (not Map.has_key?(params, "_meta") or
-            (is_map(params["_meta"]) and Schema.json_value(params["_meta"]) == :ok)),
+            (is_map(params["_meta"]) and Schema.json_value(params["_meta"], opts) == :ok)),
        do: :ok,
        else: {:error, :notification_params}
   end
 
-  defp validate_progress_params(params) do
+  defp validate_progress_params(params, opts) do
     token = params["progressToken"]
     progress = params["progress"]
     total = params["total"]
 
     if (is_binary(token) or is_integer(token)) and is_number(progress) and progress >= 0 and
          (is_nil(total) or (is_number(total) and total >= progress)) and
-         Schema.json_value(params) == :ok,
+         Schema.json_value(params, opts) == :ok,
        do: :ok,
        else: {:error, :progress_invalid}
   end
@@ -2764,19 +2843,25 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_client_response(method, response, params) when is_map(response) do
+  defp validate_client_response(method, response, params, opts) when is_map(response) do
     kind = response[:kind] || response["kind"]
     result = response[:result] || response["result"]
     error = response[:error] || response["error"]
 
     cond do
+      not is_nil(result) and Schema.json_value(result, json_budget_opts(opts)) != :ok ->
+        {:error, :invalid_response}
+
+      not is_nil(error) and Schema.json_value(error, json_budget_opts(opts)) != :ok ->
+        {:error, :invalid_response}
+
       kind not in [:response, "response"] ->
         {:error, :invalid_response}
 
       is_map(error) and is_nil(result) and valid_client_error?(error) ->
         {:error, {:client_error, error}}
 
-      is_nil(error) and valid_client_result?(method, result, params) ->
+      is_nil(error) and valid_client_result?(method, result, params, opts) ->
         {:ok, result}
 
       true ->
@@ -2784,14 +2869,15 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_client_response(_method, _response, _params), do: {:error, :invalid_response}
+  defp validate_client_response(_method, _response, _params, _opts),
+    do: {:error, :invalid_response}
 
   defp valid_client_error?(error) when is_map(error) do
     is_integer(error[:code] || error["code"]) and
       is_binary(error[:message] || error["message"])
   end
 
-  defp valid_client_result?("elicitation/create", result, params) when is_map(result) do
+  defp valid_client_result?("elicitation/create", result, params, _opts) when is_map(result) do
     action = result["action"] || result[:action]
     content = result["content"] || result[:content]
 
@@ -2802,23 +2888,24 @@ defmodule AttestoMCP.Server do
       )
   end
 
-  defp valid_client_result?("sampling/createMessage", result, _params) when is_map(result) do
+  defp valid_client_result?("sampling/createMessage", result, _params, opts)
+       when is_map(result) do
     role = result["role"] || result[:role]
     content = result["content"] || result[:content]
     model = result["model"] || result[:model]
     stop_reason = result["stopReason"] || result[:stopReason]
 
-    role == "assistant" and valid_sampling_content?(content) and is_binary(model) and
+    role == "assistant" and valid_sampling_content?(content, opts) and is_binary(model) and
       (is_nil(stop_reason) or is_binary(stop_reason))
   end
 
-  defp valid_client_result?("roots/list", result, _params) when is_map(result) do
+  defp valid_client_result?("roots/list", result, _params, _opts) when is_map(result) do
     roots = result["roots"] || result[:roots]
 
     is_list(roots) and Enum.all?(roots, &valid_client_root?/1)
   end
 
-  defp valid_client_result?(_, _, _), do: false
+  defp valid_client_result?(_, _, _, _), do: false
 
   defp valid_client_root?(root) when is_map(root) do
     uri = root["uri"] || root[:uri]
@@ -3015,9 +3102,15 @@ defmodule AttestoMCP.Server do
     _kind, _reason -> {:error, :session_store_unavailable}
   end
 
-  defp publish_notification_local(state, notification, opts, publisher_scope_sets) do
+  defp publish_notification_local(
+         state,
+         notification,
+         opts,
+         publisher_scope_sets,
+         local_scope_sets
+       ) do
     with {:ok, required_scope_sets} <-
-           required_notification_scope_sets(state, notification, publisher_scope_sets) do
+           required_notification_scope_sets(local_scope_sets, publisher_scope_sets) do
       required_scopes = List.first(required_scope_sets) || []
 
       notification_opts =
@@ -3036,7 +3129,7 @@ defmodule AttestoMCP.Server do
       publish_legacy(
         state,
         notification,
-        publisher_scope_sets,
+        required_scope_sets,
         notification_authorizer(notification_opts)
       )
     else
@@ -3169,16 +3262,19 @@ defmodule AttestoMCP.Server do
     Enum.reduce(refs, state, &remove_legacy_stream(&2, &1))
   end
 
+  defp publish_legacy(state, notification, required_resource_scope_sets),
+    do: publish_legacy(state, notification, required_resource_scope_sets, nil)
+
   defp publish_legacy(
          state,
          notification,
-         publisher_scope_sets \\ :local,
-         notification_authorizer \\ nil
+         required_resource_scope_sets,
+         notification_authorizer
        ) do
     event = legacy_event(notification)
 
     with {:ok, required_scope_sets} <-
-           legacy_event_required_scope_sets(state, event, publisher_scope_sets) do
+           legacy_event_required_scope_sets(event, required_resource_scope_sets) do
       state.legacy_streams
       |> Enum.group_by(fn {_ref, stream} -> stream.session_id end)
       |> Enum.reduce(state, fn {session_id, streams}, acc ->
@@ -3265,52 +3361,44 @@ defmodule AttestoMCP.Server do
   end
 
   defp legacy_event_required_scope_sets(
-         state,
-         %{
-           "method" => "notifications/resources/updated",
-           "params" => params
-         },
-         publisher_scope_sets
+         %{"method" => "notifications/resources/updated"},
+         required_scope_sets
        )
-       when is_map(params) do
-    uri = resource_uri(params)
+       when is_list(required_scope_sets) and required_scope_sets != [],
+       do: {:ok, required_scope_sets}
 
-    with {:ok, definition_scope_sets} <- resolve_resource_definition_scope_sets(state, uri),
-         {:ok, local_scope_sets} <-
-           prepend_scope_to_sets(AttestoMCP.Scopes.resources_read(), definition_scope_sets) do
-      case publisher_scope_sets do
-        :local -> {:ok, local_scope_sets}
-        scope_sets -> conjoin_cluster_scope_sets(scope_sets, local_scope_sets)
-      end
-    end
-  end
+  defp legacy_event_required_scope_sets(
+         %{"method" => "notifications/resources/updated"},
+         _required_scope_sets
+       ),
+       do: :error
 
-  defp legacy_event_required_scope_sets(_state, %{"method" => method}, _publisher_scope_sets)
+  defp legacy_event_required_scope_sets(%{"method" => method}, _required_scope_sets)
        when method == "notifications/tools/list_changed",
        do: {:ok, [[AttestoMCP.Scopes.tools_read()]]}
 
-  defp legacy_event_required_scope_sets(_state, %{"method" => method}, _publisher_scope_sets)
+  defp legacy_event_required_scope_sets(%{"method" => method}, _required_scope_sets)
        when method == "notifications/prompts/list_changed",
        do: {:ok, [[AttestoMCP.Scopes.prompts_read()]]}
 
-  defp legacy_event_required_scope_sets(_state, %{"method" => method}, _publisher_scope_sets)
+  defp legacy_event_required_scope_sets(%{"method" => method}, _required_scope_sets)
        when method == "notifications/resources/list_changed",
        do: {:ok, [[AttestoMCP.Scopes.resources_read()]]}
 
-  defp legacy_event_required_scope_sets(_state, _event, _publisher_scope_sets), do: {:ok, [[]]}
+  defp legacy_event_required_scope_sets(_event, _required_scope_sets), do: {:ok, [[]]}
 
   defp resolve_resource_definition_scope_sets(_state, uri) when not is_binary(uri), do: :error
 
   defp resolve_resource_definition_scope_sets(state, uri) when is_binary(uri) do
+    Telemetry.execute(
+      [:uri_template, :scope_resolution],
+      %{count: 1},
+      %{source: :resource_notification}
+    )
+
     resources =
       state.definitions
       |> Map.get(:resource, %{})
-      |> Map.values()
-      |> Enum.sort_by(& &1[:identity])
-
-    templates =
-      state.definitions
-      |> Map.get(:template, %{})
       |> Map.values()
       |> Enum.sort_by(& &1[:identity])
 
@@ -3319,12 +3407,31 @@ defmodule AttestoMCP.Server do
         definition_scope_sets(definition)
 
       nil ->
-        Enum.reduce_while(templates, {:ok, [[]]}, fn definition, _acc ->
-          case match_uri_template(definition[:uri_template], uri) do
-            {:ok, _params} -> {:halt, definition_scope_sets(definition)}
-            :error -> {:cont, {:ok, [[]]}}
-          end
-        end)
+        templates =
+          state.definitions
+          |> Map.get(:template, %{})
+          |> Map.values()
+          |> Enum.sort_by(& &1[:identity])
+
+        {result, _budget} =
+          Enum.reduce_while(
+            templates,
+            {{:ok, [[]]}, new_template_match_budget()},
+            fn definition, {_result, budget} ->
+              case match_uri_template(definition[:uri_template], uri, budget) do
+                {:ok, _params, budget} ->
+                  {:halt, {definition_scope_sets(definition), budget}}
+
+                {:error, budget} ->
+                  {:cont, {{:ok, [[]]}, budget}}
+
+                {:exhausted, budget} ->
+                  {:halt, {{:error, :template_match_budget_exhausted}, budget}}
+              end
+            end
+          )
+
+        result
     end
   rescue
     _ -> :error
@@ -3343,23 +3450,16 @@ defmodule AttestoMCP.Server do
 
   defp notification_scopes(state, %{"type" => type} = notification)
        when type in ["resource", "resourceUpdated", "resourceSubscriptions"] do
-    uri = notification["uri"] || notification[:uri]
-
-    case resolve_resource_definition_scope_sets(state, uri) do
-      {:ok, definition_scope_sets} ->
-        case prepend_scope_to_sets(AttestoMCP.Scopes.resources_read(), definition_scope_sets) do
-          {:ok, [required_scopes | _]} -> required_scopes
-          _ -> []
-        end
-
-      :error ->
-        []
+    case local_notification_scope_sets(state, notification) do
+      {:ok, [required_scopes | _]} -> required_scopes
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_notification}
     end
   end
 
   defp notification_scopes(_state, _notification), do: []
 
-  defp publisher_notification_scope_sets(state, notification) do
+  defp local_notification_scope_sets(state, notification) do
     if resource_notification?(notification) do
       case resolve_resource_definition_scope_sets(state, resource_notification_uri(notification)) do
         {:ok, definition_scope_sets} ->
@@ -3367,39 +3467,31 @@ defmodule AttestoMCP.Server do
                  AttestoMCP.Scopes.resources_read(),
                  definition_scope_sets
                ) do
-            {:ok, scope_sets} -> scope_sets
+            {:ok, scope_sets} -> {:ok, scope_sets}
             :error -> :error
           end
 
-        :error ->
-          :error
-      end
-    else
-      [[]]
-    end
-  end
+        {:error, :template_match_budget_exhausted} = error ->
+          error
 
-  defp required_notification_scope_sets(state, notification, publisher_scope_sets) do
-    if resource_notification?(notification) do
-      with {:ok, definition_scope_sets} <-
-             resolve_resource_definition_scope_sets(
-               state,
-               resource_notification_uri(notification)
-             ),
-           {:ok, local_scope_sets} <-
-             prepend_scope_to_sets(
-               AttestoMCP.Scopes.resources_read(),
-               definition_scope_sets
-             ) do
-        case publisher_scope_sets do
-          :local -> {:ok, local_scope_sets}
-          scope_sets -> conjoin_cluster_scope_sets(scope_sets, local_scope_sets)
-        end
+        :error ->
+          {:error, :invalid_notification}
       end
     else
       {:ok, [[]]}
     end
   end
+
+  defp required_notification_scope_sets(local_scope_sets, publisher_scope_sets)
+       when is_list(local_scope_sets) and local_scope_sets != [] do
+    case publisher_scope_sets do
+      :local -> {:ok, local_scope_sets}
+      [] -> {:ok, local_scope_sets}
+      scope_sets -> conjoin_cluster_scope_sets(scope_sets, local_scope_sets)
+    end
+  end
+
+  defp required_notification_scope_sets(_local_scope_sets, _publisher_scope_sets), do: :error
 
   defp prepend_scope_to_sets(scope, scope_sets)
        when is_binary(scope) and is_list(scope_sets) and scope_sets != [] do
@@ -3489,10 +3581,11 @@ defmodule AttestoMCP.Server do
            notification: notification,
            opts: opts,
            resource_scope_sets: resource_scope_sets
-         } = envelope
+         } = envelope,
+         budget_opts
        )
        when map_size(envelope) == 4 do
-    with {:ok, notification} <- normalize_public_notification(notification),
+    with {:ok, notification} <- normalize_public_notification(notification, budget_opts),
          {:ok, opts} <- validate_cluster_notification_opts(opts),
          {:ok, resource_scope_sets} <-
            cluster_resource_scope_set_metadata(notification, resource_scope_sets) do
@@ -3512,10 +3605,11 @@ defmodule AttestoMCP.Server do
            notification: notification,
            opts: opts,
            resource_scopes: resource_scopes
-         } = envelope
+         } = envelope,
+         budget_opts
        )
        when map_size(envelope) == 4 do
-    with {:ok, notification} <- normalize_public_notification(notification),
+    with {:ok, notification} <- normalize_public_notification(notification, budget_opts),
          {:ok, opts} <- validate_cluster_notification_opts(opts),
          {:ok, resource_scopes} <-
            legacy_cluster_resource_scope_metadata(notification, resource_scopes) do
@@ -3529,7 +3623,7 @@ defmodule AttestoMCP.Server do
     _, _ -> :error
   end
 
-  defp cluster_notification(_envelope), do: :error
+  defp cluster_notification(_envelope, _budget_opts), do: :error
 
   defp cluster_resource_scope_set_metadata(notification, scope_sets) do
     if resource_notification?(notification) do
@@ -3808,11 +3902,12 @@ defmodule AttestoMCP.Server do
   defp validate_client_request_revision(_version, _method, _params), do: :ok
 
   defp encode_outcome(id, {:ok, result}, @modern, opts) when is_map(result) do
+    budget_opts = json_budget_opts(opts)
     result = stamp_server_info(result, opts)
 
-    with true <- Map.has_key?(result, "resultType"),
-         :ok <- Schema.validate_modern_result(result),
-         {:ok, result} <- canonical_wire_value(result) do
+    with {:ok, result} <- canonical_wire_value(result, budget_opts),
+         true <- Map.has_key?(result, "resultType"),
+         :ok <- Schema.validate_modern_result(result, budget_opts) do
       JSONRPC.response(id, result)
     else
       _ -> JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
@@ -3822,10 +3917,17 @@ defmodule AttestoMCP.Server do
   defp encode_outcome(id, {:ok, _result}, @modern, _opts),
     do: JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
 
-  defp encode_outcome(id, {:ok, result}, _era, _opts) do
-    case canonical_wire_value(result) do
-      {:ok, result} -> JSONRPC.response(id, result)
-      _ -> JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
+  defp encode_outcome(id, {:ok, result}, _era, opts) do
+    budget_opts = json_budget_opts(opts)
+
+    case canonical_wire_value(result, budget_opts) do
+      {:ok, result} ->
+        if Schema.json_value(result, budget_opts) == :ok,
+          do: JSONRPC.response(id, result),
+          else: JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
+
+      _ ->
+        JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
     end
   end
 
@@ -3999,7 +4101,7 @@ defmodule AttestoMCP.Server do
     era = request_era(opts, request, params)
 
     with :ok <- validate_request_params_shape(params),
-         :ok <- validate_legacy_initialize_request(method, era, params),
+         :ok <- validate_legacy_initialize_request(method, era, params, runtime.opts),
          :ok <- validate_era(era, params, runtime.opts),
          :ok <- validate_protocol_binding(method, era, context, opts),
          :ok <- validate_trace_context(params),
@@ -4104,22 +4206,22 @@ defmodule AttestoMCP.Server do
 
   defp validate_protocol_binding(_method, _era, _context, _opts), do: :ok
 
-  defp validate_legacy_initialize_request("initialize", era, params)
+  defp validate_legacy_initialize_request("initialize", era, params, opts)
        when era == @legacy and is_map(params) do
     client_info = params["clientInfo"]
     capabilities = params["capabilities"]
 
     if is_binary(params["protocolVersion"]) and is_map(capabilities) and
-         valid_legacy_capabilities?(capabilities) and valid_client_info?(client_info),
+         valid_legacy_capabilities?(capabilities, opts) and valid_client_info?(client_info),
        do: :ok,
        else: {:error, Error.invalid_params(%{"reason" => "invalid_initialize_params"})}
   end
 
-  defp validate_legacy_initialize_request("initialize", era, _params)
+  defp validate_legacy_initialize_request("initialize", era, _params, _opts)
        when era == @legacy,
        do: {:error, Error.invalid_params(%{"reason" => "invalid_initialize_params"})}
 
-  defp validate_legacy_initialize_request(_method, _era, _params), do: :ok
+  defp validate_legacy_initialize_request(_method, _era, _params, _opts), do: :ok
 
   defp valid_client_info?(%{"name" => name, "version" => version})
        when is_binary(name) and is_binary(version),
@@ -4127,7 +4229,7 @@ defmodule AttestoMCP.Server do
 
   defp valid_client_info?(_), do: false
 
-  defp valid_legacy_capabilities?(capabilities) when is_map(capabilities) do
+  defp valid_legacy_capabilities?(capabilities, opts) when is_map(capabilities) do
     known = [
       "experimental",
       "logging",
@@ -4140,7 +4242,7 @@ defmodule AttestoMCP.Server do
       "completions"
     ]
 
-    Schema.json_value(capabilities) == :ok and
+    Schema.json_value(capabilities, json_budget_opts(opts)) == :ok and
       Enum.all?(capabilities, fn {key, value} ->
         is_binary(key) and
           (key not in known or is_map(value))
@@ -4590,7 +4692,7 @@ defmodule AttestoMCP.Server do
       definitions =
         Enum.map(page.items, &public_definition(type, &1, context[:protocol_version]))
 
-      if Schema.json_value(definitions) == :ok do
+      if Schema.json_value(definitions, json_budget_opts(opts)) == :ok do
         result = %{key => definitions}
         result = if era == @modern, do: Map.put(result, "resultType", "complete"), else: result
 
@@ -4692,7 +4794,7 @@ defmodule AttestoMCP.Server do
              operation,
              runtime.opts
            ),
-         :ok <- validate_input_responses(state_payload, params),
+         :ok <- validate_input_responses(state_payload, params, runtime.opts),
          :ok <- consume_retry_state(state_payload, runtime.opts) do
       call_tool_validated(
         params,
@@ -4732,42 +4834,92 @@ defmodule AttestoMCP.Server do
 
   defp authorize_selected_resource(registry, uri, context, opts, era) do
     cond do
-      not is_function(Keyword.get(opts, :definition_authorizer), 1) ->
-        {:ok, :none}
-
       not is_binary(uri) or not safe_uri?(uri) ->
         {:ok, :none}
 
       true ->
-        resources = Registry.list(registry, :resource)
-        templates = Registry.list(registry, :template)
+        snapshot = Registry.snapshot(registry)
+
+        resources =
+          snapshot
+          |> Map.get(:resource, %{})
+          |> Map.values()
+          |> Enum.sort_by(& &1.identity)
+
+        selected_policy? = is_function(Keyword.get(opts, :definition_authorizer), 1)
 
         candidate =
-          case Enum.find(resources, &(&1.uri == uri)) do
+          case Enum.find(resources, fn resource ->
+                 resource.uri == uri and (selected_policy? or visible?(resource, context))
+               end) do
             resource when is_map(resource) ->
-              {resource, %{}}
+              {:ok, {resource, %{}}}
 
             nil ->
-              Enum.find_value(templates, fn template ->
-                case match_uri_template(template.uri_template, uri) do
-                  {:ok, params} -> {template, params}
-                  :error -> nil
-                end
-              end)
+              templates =
+                snapshot
+                |> Map.get(:template, %{})
+                |> Map.values()
+                |> Enum.sort_by(& &1.identity)
+
+              find_resource_template(
+                templates,
+                uri,
+                context,
+                selected_policy?,
+                new_template_match_budget()
+              )
           end
 
         case candidate do
-          nil ->
+          {:ok, nil} when selected_policy? ->
             {:error, unknown_resource_error(uri, era)}
 
-          {resource, _template_params} = selected ->
+          {:ok, nil} ->
+            {:ok, :none}
+
+          {:ok, {resource, _template_params} = selected} when selected_policy? ->
             if definition_visible?(resource, context, opts),
               do: {:ok, selected},
               else: {:error, unknown_resource_error(uri, era)}
+
+          {:ok, selected} ->
+            {:ok, selected}
+
+          {:error, :template_match_budget_exhausted} ->
+            template_match_budget_exhausted(:resource_read)
+
+            {:error,
+             Error.internal(%{
+               "reason" => "uri_template_match_budget_exhausted",
+               "type" => "resource_match_limit"
+             })}
         end
     end
   rescue
     _ -> {:error, unknown_resource_error(uri, era)}
+  end
+
+  defp find_resource_template(templates, uri, context, selected_policy?, budget) do
+    {result, _budget} =
+      Enum.reduce_while(templates, {{:ok, nil}, budget}, fn template, {_result, budget} ->
+        if selected_policy? or visible?(template, context) do
+          case match_uri_template(template.uri_template, uri, budget) do
+            {:ok, params, budget} ->
+              {:halt, {{:ok, {template, params}}, budget}}
+
+            {:error, budget} ->
+              {:cont, {{:ok, nil}, budget}}
+
+            {:exhausted, budget} ->
+              {:halt, {{:error, :template_match_budget_exhausted}, budget}}
+          end
+        else
+          {:cont, {{:ok, nil}, budget}}
+        end
+      end)
+
+    result
   end
 
   defp unknown_resource_error(uri, @modern), do: Error.invalid_params(%{"uri" => uri})
@@ -4833,19 +4985,22 @@ defmodule AttestoMCP.Server do
       else: {:error, Error.invalid_params(%{"reason" => "invalid_request_state"})}
   end
 
-  defp validate_input_responses(nil, params) do
+  defp validate_input_responses(nil, params, _opts) do
     if Map.has_key?(params, "inputResponses"),
       do: {:error, Error.invalid_params(%{"reason" => "request_state_required"})},
       else: :ok
   end
 
-  defp validate_input_responses(%{"q" => input_types}, params) when is_map(input_types) do
+  defp validate_input_responses(%{"q" => input_types}, params, opts)
+       when is_map(input_types) do
     responses = input_responses(params)
 
     Enum.reduce_while(input_types, :ok, fn {key, method}, :ok ->
       case Map.fetch(responses, key) do
         {:ok, response} ->
-          if valid_input_response?(method, response), do: {:cont, :ok}, else: {:halt, :invalid}
+          if valid_input_response?(method, response, opts),
+            do: {:cont, :ok},
+            else: {:halt, :invalid}
 
         :error ->
           {:halt, :invalid}
@@ -4857,21 +5012,25 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_input_responses(_payload, _params), do: :ok
+  defp validate_input_responses(_payload, _params, _opts), do: :ok
 
-  defp valid_input_response?("elicitation/create:url", response) when is_map(response) do
+  defp valid_input_response?("elicitation/create:url", response, _opts) when is_map(response) do
     response["action"] in ["accept", "decline", "cancel"] and
       not Map.has_key?(response, "content")
   end
 
-  defp valid_input_response?("elicitation/create", response) when is_map(response) do
+  defp valid_input_response?("elicitation/create", response, _opts) when is_map(response) do
     action = response["action"]
 
     action in ["accept", "decline", "cancel"] and
       (action != "accept" or is_map(response["content"]))
   end
 
-  defp valid_input_response?(%{"method" => "elicitation/create", "params" => params}, response)
+  defp valid_input_response?(
+         %{"method" => "elicitation/create", "params" => params},
+         response,
+         opts
+       )
        when is_map(response) and is_map(params) do
     action = response["action"]
 
@@ -4882,7 +5041,11 @@ defmodule AttestoMCP.Server do
 
         {"form", "accept"} ->
           is_map(response["content"]) and
-            Schema.validate(response["content"], params["requestedSchema"]) == :ok
+            Schema.validate(
+              response["content"],
+              params["requestedSchema"],
+              json_budget_opts(opts)
+            ) == :ok
 
         {"form", _} ->
           true
@@ -4892,30 +5055,31 @@ defmodule AttestoMCP.Server do
       end
   end
 
-  defp valid_input_response?("sampling/createMessage", response) when is_map(response) do
-    response["role"] == "assistant" and valid_sampling_content?(response["content"]) and
+  defp valid_input_response?("sampling/createMessage", response, opts) when is_map(response) do
+    response["role"] == "assistant" and valid_sampling_content?(response["content"], opts) and
       is_binary(response["model"]) and
       (is_nil(response["stopReason"]) or is_binary(response["stopReason"]))
   end
 
-  defp valid_input_response?(%{"method" => "sampling/createMessage"}, response),
-    do: valid_input_response?("sampling/createMessage", response)
+  defp valid_input_response?(%{"method" => "sampling/createMessage"}, response, opts),
+    do: valid_input_response?("sampling/createMessage", response, opts)
 
-  defp valid_input_response?("roots/list", response) when is_map(response) do
+  defp valid_input_response?("roots/list", response, _opts) when is_map(response) do
     is_list(response["roots"]) and Enum.all?(response["roots"], &valid_root_response?/1)
   end
 
-  defp valid_input_response?(%{"method" => "roots/list"}, response),
-    do: valid_input_response?("roots/list", response)
+  defp valid_input_response?(%{"method" => "roots/list"}, response, opts),
+    do: valid_input_response?("roots/list", response, opts)
 
-  defp valid_input_response?(_, _), do: false
+  defp valid_input_response?(_, _, _), do: false
 
-  defp valid_sampling_content?(content) when is_map(content), do: valid_content_item?(content)
+  defp valid_sampling_content?(content, opts) when is_map(content),
+    do: valid_content_item?(content, opts)
 
-  defp valid_sampling_content?(content) when is_list(content),
-    do: Enum.all?(content, &valid_content_item?/1)
+  defp valid_sampling_content?(content, opts) when is_list(content),
+    do: Enum.all?(content, &valid_content_item?(&1, opts))
 
-  defp valid_sampling_content?(_), do: false
+  defp valid_sampling_content?(_, _opts), do: false
 
   defp valid_root_response?(%{"uri" => uri} = root) when is_binary(uri) do
     String.starts_with?(uri, "file://") and (is_nil(root["name"]) or is_binary(root["name"]))
@@ -4923,22 +5087,24 @@ defmodule AttestoMCP.Server do
 
   defp valid_root_response?(_), do: false
 
-  defp normalize_input_requests(input) do
-    with {:ok, input} <- canonical_wire_value(input) do
+  defp normalize_input_requests(input, opts) do
+    budget_opts = json_budget_opts(opts)
+
+    with {:ok, input} <- canonical_wire_value(input, budget_opts) do
       cond do
         is_map(input) and Map.has_key?(input, "method") ->
-          normalize_input_entries([{"input_1", input}])
+          normalize_input_entries([{"input_1", input}], budget_opts)
 
         is_map(input) ->
           input
           |> Enum.sort_by(fn {key, _value} -> key end)
-          |> normalize_input_entries()
+          |> normalize_input_entries(budget_opts)
 
         is_list(input) ->
           input
           |> Enum.with_index(1)
           |> Enum.map(fn {value, index} -> {"input_#{index}", value} end)
-          |> normalize_input_entries()
+          |> normalize_input_entries(budget_opts)
 
         true ->
           {:error, :invalid_input_requests}
@@ -4948,10 +5114,10 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp normalize_input_entries(entries) do
+  defp normalize_input_entries(entries, opts) do
     Enum.reduce_while(entries, {:ok, %{}}, fn {key, request}, {:ok, acc} ->
       with true <- is_binary(key) and byte_size(key) in 1..128,
-           {:ok, request} <- normalize_input_request(request),
+           {:ok, request} <- normalize_input_request(request, opts),
            false <- Map.has_key?(acc, key) do
         {:cont, {:ok, Map.put(acc, key, request)}}
       else
@@ -4960,65 +5126,69 @@ defmodule AttestoMCP.Server do
     end)
   end
 
-  defp normalize_input_request(request) when is_map(request) do
-    with {:ok, request} <- canonical_wire_value(request),
+  defp normalize_input_request(request, opts) when is_map(request) do
+    with {:ok, request} <- canonical_wire_value(request, json_budget_opts(opts)),
          method when method in ["elicitation/create", "sampling/createMessage", "roots/list"] <-
            request["method"],
          params when is_map(params) <- Map.get(request, "params", %{}),
-         :ok <- validate_input_request_json(method, params),
-         true <- valid_input_request_params?(method, params) do
+         :ok <- validate_input_request_json(method, params, opts),
+         true <- valid_input_request_params?(method, params, opts) do
       {:ok, %{"method" => method, "params" => params}}
     else
       _ -> {:error, :invalid_input_request}
     end
   end
 
-  defp normalize_input_request(_), do: {:error, :invalid_input_request}
+  defp normalize_input_request(_, _opts), do: {:error, :invalid_input_request}
 
-  defp valid_input_request_params?("elicitation/create", params) do
+  defp valid_input_request_params?("elicitation/create", params, opts) do
     message = params["message"]
     mode = params["mode"] || "form"
 
     is_binary(message) and byte_size(message) in 1..10_000 and
-      ((mode == "form" and valid_requested_schema?(params["requestedSchema"])) or
+      ((mode == "form" and valid_requested_schema?(params["requestedSchema"], opts)) or
          (mode == "url" and is_binary(params["url"]) and
-            Schema.validate(params["url"], %{"type" => "string", "format" => "uri"}) == :ok))
+            Schema.validate(
+              params["url"],
+              %{"type" => "string", "format" => "uri"},
+              json_budget_opts(opts)
+            ) == :ok))
   end
 
-  defp valid_input_request_params?("sampling/createMessage", params) do
+  defp valid_input_request_params?("sampling/createMessage", params, opts) do
     is_list(params["messages"]) and
       Enum.all?(params["messages"], fn message ->
         is_map(message) and message["role"] in ["user", "assistant"] and
-          valid_sampling_content?(message["content"])
+          valid_sampling_content?(message["content"], opts)
       end)
   end
 
-  defp valid_input_request_params?("roots/list", _params), do: true
+  defp valid_input_request_params?("roots/list", _params, _opts), do: true
 
-  defp valid_requested_schema?(schema) when is_map(schema) do
+  defp valid_requested_schema?(schema, opts) when is_map(schema) do
     properties = schema["properties"] || %{}
     required = schema["required"] || []
 
-    Schema.validate_schema(schema) == :ok and schema["type"] == "object" and
+    Schema.validate_schema(schema, json_budget_opts(opts)) == :ok and schema["type"] == "object" and
       is_map(properties) and is_list(required) and
       Enum.all?(required, &(is_binary(&1) and Map.has_key?(properties, &1))) and
       Enum.all?(properties, fn {name, property} ->
-        is_binary(name) and valid_requested_property_schema?(property)
+        is_binary(name) and valid_requested_property_schema?(property, opts)
       end)
   end
 
-  defp valid_requested_schema?(_), do: false
+  defp valid_requested_schema?(_, _opts), do: false
 
-  defp valid_requested_property_schema?(schema) when is_map(schema) do
+  defp valid_requested_property_schema?(schema, opts) when is_map(schema) do
     schema["type"] in ["string", "number", "integer", "boolean"] and
-      Schema.validate_schema(schema) == :ok and
+      Schema.validate_schema(schema, json_budget_opts(opts)) == :ok and
       not Map.has_key?(schema, "properties") and not Map.has_key?(schema, "items")
   end
 
-  defp valid_requested_property_schema?(_), do: false
+  defp valid_requested_property_schema?(_, _opts), do: false
 
-  defp validate_input_request_json(_method, params) when is_map(params) do
-    if json_value?(params), do: :ok, else: {:error, :invalid_input_request}
+  defp validate_input_request_json(_method, params, opts) when is_map(params) do
+    if json_value?(params, opts), do: :ok, else: {:error, :invalid_input_request}
   end
 
   defp require_input_capabilities(params, requests) do
@@ -5061,9 +5231,11 @@ defmodule AttestoMCP.Server do
     end)
   end
 
-  defp modern_result(result) do
-    case {Schema.json_value(result), Schema.validate_modern_result(result)} do
-      {:ok, :ok} -> {:ok, result}
+  defp modern_result(result, opts) do
+    budget_opts = json_budget_opts(opts)
+
+    case Schema.validate_modern_result(result, budget_opts) do
+      :ok -> {:ok, result}
       _ -> {:error, Error.internal(%{"reason" => "invalid_modern_result"})}
     end
   end
@@ -5097,7 +5269,10 @@ defmodule AttestoMCP.Server do
         {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
 
       tool when is_map(tool) ->
-        with :ok <- Schema.validate(arguments, tool.input_schema),
+        with :ok <-
+               Schema.validate(arguments, tool.input_schema,
+                 max_bytes: runtime.opts[:max_json_bytes]
+               ),
              result <-
                invoke(
                  tool.handler,
@@ -5107,7 +5282,7 @@ defmodule AttestoMCP.Server do
                ) do
           case result do
             {:input_required, input} when era == @modern ->
-              with {:ok, requests} <- normalize_input_requests(input),
+              with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
                    {:ok, requests} <- require_input_capabilities(params, requests) do
                 state =
                   RequestState.issue(
@@ -5127,11 +5302,14 @@ defmodule AttestoMCP.Server do
 
                 Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "tools/call"})
 
-                modern_result(%{
-                  "resultType" => "input_required",
-                  "inputRequests" => requests,
-                  "requestState" => state
-                })
+                modern_result(
+                  %{
+                    "resultType" => "input_required",
+                    "inputRequests" => requests,
+                    "requestState" => state
+                  },
+                  runtime.opts
+                )
               else
                 {:error, :invalid_input_requests} ->
                   {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
@@ -5141,16 +5319,16 @@ defmodule AttestoMCP.Server do
               end
 
             {:ok, output_value} ->
-              output = normalize_tool_result(output_value)
+              output = normalize_tool_result(output_value, runtime.opts)
               output = if era == @legacy, do: legacy_tool_result(output), else: output
               output = filter_tool_result_revision(output, context[:protocol_version])
 
               output =
                 if not is_nil(tool.output_schema),
-                  do: validate_output(output, tool.output_schema),
+                  do: validate_output(output, tool.output_schema, runtime.opts),
                   else: output
 
-              if valid_tool_result?(output) do
+              if valid_tool_result?(output, runtime.opts) do
                 {:ok,
                  Map.merge(
                    output,
@@ -5199,7 +5377,7 @@ defmodule AttestoMCP.Server do
              operation,
              runtime.opts
            ),
-         :ok <- validate_input_responses(state_payload, params),
+         :ok <- validate_input_responses(state_payload, params, runtime.opts),
          :ok <- consume_retry_state(state_payload, runtime.opts) do
       read_resource_validated(
         params,
@@ -5230,7 +5408,7 @@ defmodule AttestoMCP.Server do
       resolved_resource =
         case selected_definition do
           {resource, template_params} -> {resource, template_params}
-          _ -> locate_resource(runtime.registry, uri, context)
+          _ -> nil
         end
 
       case resolved_resource do
@@ -5259,7 +5437,7 @@ defmodule AttestoMCP.Server do
                  []
                ) do
             {:input_required, input} when era == @modern ->
-              with {:ok, requests} <- normalize_input_requests(input),
+              with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
                    {:ok, requests} <- require_input_capabilities(params, requests) do
                 request_state =
                   RequestState.issue(
@@ -5279,11 +5457,14 @@ defmodule AttestoMCP.Server do
 
                 Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "resources/read"})
 
-                modern_result(%{
-                  "resultType" => "input_required",
-                  "inputRequests" => requests,
-                  "requestState" => request_state
-                })
+                modern_result(
+                  %{
+                    "resultType" => "input_required",
+                    "inputRequests" => requests,
+                    "requestState" => request_state
+                  },
+                  runtime.opts
+                )
               else
                 {:error, :invalid_input_requests} ->
                   {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
@@ -5293,7 +5474,7 @@ defmodule AttestoMCP.Server do
               end
 
             {:ok, content} ->
-              normalized = normalize_resource_contents(content)
+              normalized = normalize_resource_contents(content, runtime.opts)
 
               normalized =
                 if era == @legacy, do: Map.delete(normalized, "resultType"), else: normalized
@@ -5301,7 +5482,7 @@ defmodule AttestoMCP.Server do
               normalized =
                 filter_resource_result_revision(normalized, context[:protocol_version])
 
-              if valid_resource_result?(normalized) do
+              if valid_resource_result?(normalized, runtime.opts) do
                 {:ok,
                  Map.merge(
                    normalized,
@@ -5321,54 +5502,140 @@ defmodule AttestoMCP.Server do
             {:error, reason} ->
               {:error, application_error(reason, %{"reason" => "resource_handler_failure"})}
           end
-
-        _missing ->
-          {:error,
-           if(era == @modern,
-             do: Error.invalid_params(%{"uri" => uri}),
-             else: Error.legacy_resource_not_found(uri)
-           )}
       end
     else
       {:error, Error.invalid_params(%{"reason" => "unsafe_resource_uri"})}
     end
   end
 
-  defp locate_resource(registry, uri, context) do
-    resources = Registry.list(registry, :resource)
-    templates = Registry.list(registry, :template)
-
-    case Enum.find(resources, &(&1.uri == uri and visible?(&1, context))) do
-      nil ->
-        Enum.find_value(templates, fn template ->
-          if visible?(template, context) do
-            case match_uri_template(template.uri_template, uri) do
-              {:ok, params} -> {template, params}
-              :error -> nil
-            end
-          end
-        end)
-
-      resource ->
-        {resource, %{}}
-    end
-  end
-
   # URI-template matching is deliberately bounded and only accepts layouts that
-  # the registration validator declares supported. A reverse matcher must not
-  # guess when a query key is ambiguous or when decoding changes path safety.
-  defp match_uri_template(template, uri) when is_binary(template) and is_binary(uri) do
-    if String.valid?(template) and String.valid?(uri) and
-         byte_size(uri) <= @max_template_uri_bytes do
-      case Regex.run(~r/\{([^{}]+)\}/, template, capture: :all_but_first) do
-        [expression] -> match_single_template(template, uri, expression)
-        _ -> :error
-      end
+  # the registration validator declares supported. For a supported path, a
+  # delimiter inside a valid capture is resolved by the bounded matcher below;
+  # query keys remain exact and decoding never relaxes path-safety checks.
+  defp match_uri_template(template, uri, budget)
+       when is_binary(template) and is_binary(uri) and is_map(budget) do
+    with {:ok, budget} <- reserve_template_match_candidate(budget),
+         {:ok, budget} <-
+           consume_template_match_work(budget, byte_size(template) + byte_size(uri) + 1) do
+      match_uri_template_with_budget(template, uri, budget)
     else
-      :error
+      {:exhausted, budget} -> {:exhausted, budget}
     end
   rescue
-    _ -> :error
+    _ -> {:error, budget}
+  end
+
+  defp match_uri_template(_template, _uri, budget), do: {:error, budget}
+
+  defp match_uri_template_with_budget(template, uri, budget) do
+    if String.valid?(template) and String.valid?(uri) and
+         byte_size(uri) <= @max_template_uri_bytes do
+      case template_parts(template) do
+        {:ok, parts} ->
+          expressions = for {:expression, expression} <- parts, do: expression
+
+          cond do
+            expressions == [] or length(expressions) > @max_template_expressions ->
+              {:error, budget}
+
+            length(expressions) > @max_template_variables ->
+              {:error, budget}
+
+            Enum.any?(expressions, &(byte_size(&1) > @max_template_expression_bytes)) ->
+              {:error, budget}
+
+            not template_literal_boundaries_match?(parts, uri) ->
+              {:error, budget}
+
+            length(expressions) == 1 ->
+              with {:ok, budget} <- consume_template_match_work(budget, byte_size(uri)) do
+                case match_single_template(template, uri, hd(expressions)) do
+                  {:ok, params} -> {:ok, params, budget}
+                  :error -> {:error, budget}
+                end
+              else
+                {:exhausted, budget} -> {:exhausted, budget}
+              end
+
+            true ->
+              with {:ok, budget} <-
+                     consume_template_match_work(
+                       budget,
+                       multi_template_setup_work(parts, uri)
+                     ) do
+                match_multi_path_template(parts, uri, expressions, budget)
+              else
+                {:exhausted, budget} -> {:exhausted, budget}
+              end
+          end
+
+        :error ->
+          {:error, budget}
+      end
+    else
+      {:error, budget}
+    end
+  rescue
+    _ -> {:error, budget}
+  end
+
+  defp new_template_match_budget do
+    %{work: @max_template_match_work, candidates: @max_template_match_candidates}
+  end
+
+  defp template_literal_boundaries_match?(parts, uri)
+       when is_list(parts) and is_binary(uri) do
+    literals = for {:literal, literal} <- parts, do: literal
+    prefix = List.first(literals) || ""
+    suffix = List.last(literals) || ""
+
+    String.starts_with?(uri, prefix) and
+      (suffix == "" or String.ends_with?(uri, suffix))
+  end
+
+  defp reserve_template_match_candidate(%{candidates: candidates} = budget)
+       when is_integer(candidates) and candidates > 0,
+       do: {:ok, %{budget | candidates: candidates - 1}}
+
+  defp reserve_template_match_candidate(budget), do: {:exhausted, exhaust_match_budget(budget)}
+
+  defp consume_template_match_work(%{work: remaining} = budget, work)
+       when is_integer(remaining) and is_integer(work) and work >= 0 and remaining >= work,
+       do: {:ok, %{budget | work: remaining - work}}
+
+  defp consume_template_match_work(budget, _work),
+    do: {:exhausted, exhaust_match_budget(budget)}
+
+  defp exhaust_match_budget(%{work: _work} = budget), do: %{budget | work: 0}
+  defp exhaust_match_budget(budget), do: budget
+
+  defp template_match_budget_exhausted(operation) do
+    Telemetry.execute(
+      [:uri_template, :budget_exhausted],
+      %{count: 1},
+      %{source: operation, outcome: :rejected}
+    )
+  end
+
+  defp multi_template_setup_work(parts, uri) do
+    literals = for {:literal, literal} <- parts, do: literal
+    uri_bytes = byte_size(uri)
+    delimiter_scan_work = uri_bytes * max(length(Enum.uniq(literals)), 1)
+    terminal_window_bytes = min(uri_bytes, @max_template_value_bytes)
+
+    terminal_source =
+      binary_part(uri, uri_bytes - terminal_window_bytes, terminal_window_bytes)
+
+    terminal_scan_work =
+      if String.contains?(terminal_source, "%") or not ascii_binary?(terminal_source) do
+        div(terminal_window_bytes * (terminal_window_bytes + 1), 2)
+      else
+        terminal_window_bytes
+      end
+
+    uri_bytes + delimiter_scan_work + terminal_scan_work
+  rescue
+    _ -> @max_template_match_work
   end
 
   defp match_single_template(template, uri, expression) do
@@ -5393,6 +5660,608 @@ defmodule AttestoMCP.Server do
 
       _ ->
         :error
+    end
+  end
+
+  defp template_parts(template) when is_binary(template) do
+    matches = Regex.scan(~r/\{([^{}]+)\}/, template, return: :index)
+
+    if matches == [] do
+      :error
+    else
+      build_template_parts(template, matches, 0, [])
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp build_template_parts(template, [], offset, acc) do
+    suffix_size = byte_size(template) - offset
+
+    if suffix_size >= 0 do
+      literal = binary_part(template, offset, suffix_size)
+
+      if String.contains?(literal, ["{", "}"]) do
+        :error
+      else
+        {:ok, Enum.reverse([{:literal, literal} | acc])}
+      end
+    else
+      :error
+    end
+  end
+
+  defp build_template_parts(
+         template,
+         [[{start, length}, {expression_start, expression_length}] | rest],
+         offset,
+         acc
+       )
+       when start >= offset and expression_start >= start and expression_length >= 1 do
+    literal_length = start - offset
+    literal = binary_part(template, offset, literal_length)
+    expression = binary_part(template, expression_start, expression_length)
+
+    if String.contains?(literal, ["{", "}"]) do
+      :error
+    else
+      build_template_parts(
+        template,
+        rest,
+        start + length,
+        [{:expression, expression}, {:literal, literal} | acc]
+      )
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp build_template_parts(_template, _matches, _offset, _acc), do: :error
+
+  defp match_multi_path_template(parts, uri, expressions, budget) do
+    if multi_path_layout?(parts, expressions) do
+      literals = for {:literal, literal} <- parts, do: literal
+      delimiter_positions = template_delimiter_positions(uri, literals)
+
+      with {:ok, parsed_expressions} <- parse_path_template_expressions(expressions),
+           ascii_uri <- ascii_binary?(uri),
+           terminal_starts <-
+             terminal_capture_positions(uri, List.last(parsed_expressions), List.last(literals)),
+           true <- terminal_starts != MapSet.new(),
+           true <- literal_at?(uri, 0, hd(literals)) do
+        {result, _memo, budget, _steps} =
+          match_multi_path_expressions(
+            literals,
+            parsed_expressions,
+            uri,
+            0,
+            byte_size(hd(literals)),
+            delimiter_positions,
+            path_remaining_bounds(literals, length(parsed_expressions)),
+            terminal_starts,
+            ascii_uri,
+            %{},
+            budget,
+            0
+          )
+
+        case result do
+          {:ok, params, position} when position == byte_size(uri) -> {:ok, params, budget}
+          :exhausted -> {:exhausted, budget}
+          _ -> {:error, budget}
+        end
+      else
+        _ -> {:error, budget}
+      end
+    else
+      {:error, budget}
+    end
+  end
+
+  defp multi_path_layout?(parts, expressions) do
+    literals = for {:literal, literal} <- parts, do: literal
+
+    length(expressions) <= @max_template_expressions and
+      length(expressions) <= @max_template_variables and
+      length(literals) == length(expressions) + 1 and
+      Enum.all?(expressions, &single_path_expression?/1) and
+      no_adjacent_path_expressions?(literals)
+  end
+
+  defp single_path_expression?(expression) do
+    case parse_template_expression(expression) do
+      {:ok, operator, [_spec]} when operator in [nil, ?+] -> true
+      _ -> false
+    end
+  end
+
+  defp no_adjacent_path_expressions?(literals) do
+    last_index = length(literals) - 1
+
+    literals
+    |> Enum.with_index()
+    |> Enum.all?(fn
+      {_literal, 0} -> true
+      {_literal, index} when index == last_index -> true
+      {literal, _index} -> literal != ""
+    end)
+  end
+
+  # A delimiter can occur inside an expanded value. We therefore try every
+  # bounded delimiter position from the URI suffix inward and memoize every
+  # {expression, position} suffix decision. Suffix-first ordering also avoids
+  # mistaking a delimiter encoded inside one grapheme for the separator before
+  # the next expression. This is a finite dynamic-programming matcher: URI
+  # input is capped above, each state is evaluated once, and remaining-length
+  # and terminal-capture indexes discard impossible splits before decoding
+  # them. The candidate budget is a final fail-closed guard.
+  defp parse_path_template_expressions(expressions) do
+    parsed =
+      Enum.map(expressions, fn expression ->
+        case parse_template_expression(expression) do
+          {:ok, operator, [spec]} when operator in [nil, ?+] -> {:ok, {operator, spec}}
+          _ -> :error
+        end
+      end)
+
+    if Enum.all?(parsed, &match?({:ok, _}, &1)),
+      do: {:ok, Enum.map(parsed, fn {:ok, value} -> value end)},
+      else: :error
+  end
+
+  defp path_remaining_bounds(literals, expression_count)
+       when is_list(literals) and is_integer(expression_count) and expression_count > 0 do
+    Enum.map(0..(expression_count - 1), fn expression_index ->
+      future_expression_count = expression_count - expression_index - 1
+
+      future_literal_bytes =
+        literals
+        |> Enum.drop(expression_index + 2)
+        |> Enum.reduce(0, fn literal, total -> total + byte_size(literal) end)
+
+      {
+        future_expression_count + future_literal_bytes,
+        future_expression_count * @max_template_value_bytes + future_literal_bytes
+      }
+    end)
+  end
+
+  defp path_remaining_bounds(_literals, _expression_count), do: []
+
+  defp terminal_capture_positions(uri, {operator, spec}, delimiter)
+       when is_binary(uri) and is_binary(delimiter) and operator in [nil, ?+] do
+    terminal_position = byte_size(uri) - byte_size(delimiter)
+
+    if terminal_position >= 1 and literal_at?(uri, terminal_position, delimiter) do
+      lower_position = max(terminal_position - @max_template_value_bytes, 0)
+
+      if String.contains?(
+           binary_part(uri, lower_position, terminal_position - lower_position),
+           "%"
+         ) do
+        Enum.reduce(lower_position..(terminal_position - 1), MapSet.new(), fn position,
+                                                                              positions ->
+          value = binary_part(uri, position, terminal_position - position)
+
+          case decode_path_template_value(value, operator, spec) do
+            {:ok, _decoded} -> MapSet.put(positions, position)
+            :error -> positions
+          end
+        end)
+      else
+        plain_terminal_capture_positions(
+          uri,
+          lower_position,
+          terminal_position,
+          operator,
+          spec
+        )
+      end
+    else
+      MapSet.new()
+    end
+  rescue
+    _ -> MapSet.new()
+  end
+
+  defp terminal_capture_positions(_uri, _expression, _delimiter), do: MapSet.new()
+
+  defp plain_path_capture_valid?(value, operator, spec) when is_binary(value) do
+    value != "" and byte_size(value) <= @max_template_value_bytes and
+      (operator == ?+ or not String.contains?(value, ["/", "?", "#"])) and
+      not unsafe_template_value?(value) and prefix_length_ok?(value, spec.prefix)
+  end
+
+  defp plain_terminal_capture_positions(uri, lower_position, terminal_position, operator, spec) do
+    source = binary_part(uri, lower_position, terminal_position - lower_position)
+    unsafe_offset = last_plain_unsafe_offset(source, operator)
+    lower_position = max(lower_position, lower_position + unsafe_offset + 1)
+
+    if lower_position >= terminal_position do
+      MapSet.new()
+    else
+      case spec.prefix do
+        nil ->
+          MapSet.new(lower_position..(terminal_position - 1))
+
+        prefix when is_integer(prefix) ->
+          if ascii_binary?(source) do
+            lower_position = max(lower_position, terminal_position - prefix)
+
+            if lower_position < terminal_position,
+              do: MapSet.new(lower_position..(terminal_position - 1)),
+              else: MapSet.new()
+          else
+            Enum.reduce(lower_position..(terminal_position - 1), MapSet.new(), fn position,
+                                                                                  positions ->
+              value = binary_part(uri, position, terminal_position - position)
+
+              if plain_path_capture_valid?(value, operator, spec),
+                do: MapSet.put(positions, position),
+                else: positions
+            end)
+          end
+      end
+    end
+  end
+
+  defp ascii_binary?(value) when is_binary(value) do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(&(&1 < 128))
+  end
+
+  defp last_plain_unsafe_offset(source, operator) when is_binary(source) do
+    last_offset = byte_size(source) - 1
+
+    if last_offset >= 0 do
+      Enum.reduce(0..last_offset, -1, fn offset, latest ->
+        byte = :binary.at(source, offset)
+        next_byte = if offset < last_offset, do: :binary.at(source, offset + 1), else: nil
+
+        unsafe_separator = operator == nil and byte in [?/, ??, ?#]
+        unsafe_byte = byte in [?\\, 0, ?\r, ?\n]
+        unsafe_dot_pair = byte == ?. and next_byte == ?.
+
+        if unsafe_separator or unsafe_byte or unsafe_dot_pair, do: offset, else: latest
+      end)
+    else
+      -1
+    end
+  end
+
+  defp match_multi_path_expressions(
+         literals,
+         expressions,
+         uri,
+         expression_index,
+         position,
+         delimiter_positions,
+         remaining_bounds,
+         terminal_starts,
+         ascii_uri,
+         memo,
+         budget,
+         steps
+       ) do
+    key = {expression_index, position}
+
+    case Map.fetch(memo, key) do
+      {:ok, result} ->
+        {result, memo, budget, steps}
+
+      :error ->
+        {result, memo, budget, steps} =
+          if expression_index == length(expressions) do
+            if position == byte_size(uri) do
+              {{:ok, %{}, position}, memo, budget, steps}
+            else
+              {:error, memo, budget, steps}
+            end
+          else
+            {operator, spec} = Enum.at(expressions, expression_index)
+            delimiter = Enum.at(literals, expression_index + 1)
+
+            try_multi_path_candidates(
+              candidate_positions_from(
+                delimiter_positions,
+                uri,
+                delimiter,
+                position,
+                expression_index,
+                length(expressions),
+                spec,
+                remaining_bounds,
+                terminal_starts,
+                ascii_uri
+              ),
+              delimiter,
+              operator,
+              spec,
+              literals,
+              expressions,
+              uri,
+              expression_index,
+              position,
+              delimiter_positions,
+              remaining_bounds,
+              terminal_starts,
+              ascii_uri,
+              memo,
+              budget,
+              steps
+            )
+          end
+
+        {result, Map.put(memo, key, result), budget, steps}
+    end
+  rescue
+    _ -> {:error, memo, budget, steps}
+  end
+
+  defp try_multi_path_candidates(
+         [],
+         _delimiter,
+         _operator,
+         _spec,
+         _literals,
+         _expressions,
+         _uri,
+         _expression_index,
+         _position,
+         _delimiter_positions,
+         _remaining_bounds,
+         _terminal_starts,
+         _ascii_uri,
+         memo,
+         budget,
+         steps
+       ),
+       do: {:error, memo, budget, steps}
+
+  defp try_multi_path_candidates(
+         [offset | rest],
+         delimiter,
+         operator,
+         spec,
+         literals,
+         expressions,
+         uri,
+         expression_index,
+         position,
+         delimiter_positions,
+         remaining_bounds,
+         terminal_starts,
+         ascii_uri,
+         memo,
+         budget,
+         steps
+       ) do
+    if steps >= @max_template_match_steps do
+      {:exhausted, memo, exhaust_match_budget(budget), steps}
+    else
+      case consume_template_match_work(budget, 1) do
+        {:ok, budget} ->
+          steps = steps + 1
+          value = binary_part(uri, position, offset)
+
+          case decode_path_template_value(value, operator, spec) do
+            {:ok, decoded} ->
+              next_position = position + offset + byte_size(delimiter)
+
+              {result, memo, budget, steps} =
+                match_multi_path_expressions(
+                  literals,
+                  expressions,
+                  uri,
+                  expression_index + 1,
+                  next_position,
+                  delimiter_positions,
+                  remaining_bounds,
+                  terminal_starts,
+                  ascii_uri,
+                  memo,
+                  budget,
+                  steps
+                )
+
+              case result do
+                {:ok, params, final_position} ->
+                  {{:ok, Map.put(params, spec.name, decoded), final_position}, memo, budget,
+                   steps}
+
+                :exhausted ->
+                  {:exhausted, memo, budget, steps}
+
+                :error ->
+                  try_multi_path_candidates(
+                    rest,
+                    delimiter,
+                    operator,
+                    spec,
+                    literals,
+                    expressions,
+                    uri,
+                    expression_index,
+                    position,
+                    delimiter_positions,
+                    remaining_bounds,
+                    terminal_starts,
+                    ascii_uri,
+                    memo,
+                    budget,
+                    steps
+                  )
+              end
+
+            :error ->
+              try_multi_path_candidates(
+                rest,
+                delimiter,
+                operator,
+                spec,
+                literals,
+                expressions,
+                uri,
+                expression_index,
+                position,
+                delimiter_positions,
+                remaining_bounds,
+                terminal_starts,
+                ascii_uri,
+                memo,
+                budget,
+                steps
+              )
+          end
+
+        {:exhausted, budget} ->
+          {:exhausted, memo, budget, steps}
+      end
+    end
+  rescue
+    _ -> {:error, memo, budget, steps}
+  end
+
+  defp template_delimiter_positions(uri, literals) when is_binary(uri) and is_list(literals) do
+    literals
+    |> Enum.uniq()
+    |> Map.new(fn
+      "" -> {"", [byte_size(uri)]}
+      delimiter -> {delimiter, delimiter_positions(uri, delimiter)}
+    end)
+  end
+
+  defp template_delimiter_positions(_uri, _literals), do: %{}
+
+  defp delimiter_positions(uri, delimiter)
+       when is_binary(uri) and is_binary(delimiter) and delimiter != "" do
+    max_position = byte_size(uri) - byte_size(delimiter)
+
+    if max_position >= 0 do
+      for position <- 0..max_position, literal_at?(uri, position, delimiter), do: position
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp delimiter_positions(_uri, _delimiter), do: []
+
+  defp candidate_positions_from(
+         delimiter_positions,
+         uri,
+         delimiter,
+         position,
+         expression_index,
+         expression_count,
+         spec,
+         remaining_bounds,
+         terminal_starts,
+         ascii_uri
+       )
+       when is_map(delimiter_positions) and is_binary(uri) and is_integer(position) and
+              position >= 0 and is_integer(expression_index) and expression_index >= 0 and
+              is_integer(expression_count) and expression_count > expression_index and
+              is_list(remaining_bounds) and is_struct(terminal_starts, MapSet) and
+              is_boolean(ascii_uri) do
+    {min_remaining, max_remaining} = Enum.at(remaining_bounds, expression_index)
+    delimiter_bytes = byte_size(delimiter)
+    uri_bytes = byte_size(uri)
+
+    max_possible_capture_bytes =
+      min(
+        @max_template_value_bytes,
+        max(uri_bytes - delimiter_bytes - min_remaining - position, 0)
+      )
+
+    percent_in_capture_window? =
+      max_possible_capture_bytes > 0 and
+        :binary.match(uri, "%", scope: {position, max_possible_capture_bytes}) != :nomatch
+
+    ascii_capture_window? =
+      ascii_uri or
+        ascii_binary?(binary_part(uri, position, max_possible_capture_bytes))
+
+    raw_prefix_pruning_safe? = ascii_capture_window? and not percent_in_capture_window?
+
+    max_capture_bytes =
+      case {raw_prefix_pruning_safe?, spec.prefix} do
+        # Prefixes count decoded graphemes, so a raw-byte bound is sound only
+        # for unescaped ASCII in this capture's possible byte window. Percent
+        # escapes can form arbitrarily many combining codepoints in one
+        # grapheme cluster.
+        {true, prefix} when is_integer(prefix) ->
+          min(@max_template_value_bytes, prefix)
+
+        _ ->
+          @max_template_value_bytes
+      end
+
+    lower_position = max(position + 1, uri_bytes - delimiter_bytes - max_remaining)
+
+    upper_position =
+      min(
+        position + max_capture_bytes,
+        uri_bytes - delimiter_bytes - min_remaining
+      )
+
+    positions =
+      delimiter_positions
+      |> Map.get(delimiter, [])
+      |> Enum.drop_while(&(&1 < lower_position))
+      |> Enum.take_while(&(&1 <= upper_position))
+
+    positions =
+      if expression_index == expression_count - 2 do
+        Enum.filter(positions, fn candidate ->
+          MapSet.member?(terminal_starts, candidate + delimiter_bytes)
+        end)
+      else
+        positions
+      end
+
+    positions
+    |> Enum.reverse()
+    |> Enum.map(&(&1 - position))
+  end
+
+  defp candidate_positions_from(
+         _delimiter_positions,
+         _uri,
+         _delimiter,
+         _position,
+         _expression_index,
+         _expression_count,
+         _spec,
+         _remaining_bounds,
+         _terminal_starts,
+         _ascii_uri
+       ),
+       do: []
+
+  defp literal_at?(uri, position, literal)
+       when is_binary(uri) and is_integer(position) and position >= 0 and is_binary(literal) do
+    position + byte_size(literal) <= byte_size(uri) and
+      binary_part(uri, position, byte_size(literal)) == literal
+  rescue
+    _ -> false
+  end
+
+  defp decode_path_template_value(value, operator, spec) do
+    if value == "" or byte_size(value) > @max_template_value_bytes or
+         (operator == nil and String.contains?(value, ["/", "?", "#"])) do
+      :error
+    else
+      with {:ok, decoded} <- strict_template_decode(value, :path),
+           false <- unsafe_template_value?(decoded),
+           false <- operator == nil and String.contains?(decoded, ["/", "?", "#"]),
+           true <- prefix_length_ok?(decoded, spec.prefix) do
+        {:ok, decoded}
+      else
+        _ -> :error
+      end
     end
   end
 
@@ -5442,6 +6311,7 @@ defmodule AttestoMCP.Server do
     else
       with {:ok, decoded} <- strict_template_decode(value, :path),
            false <- unsafe_template_value?(decoded),
+           false <- operator == nil and String.contains?(decoded, ["/", "?", "#"]),
            true <- prefix_length_ok?(decoded, spec.prefix) do
         {:ok, %{spec.name => decoded}}
       else
@@ -5549,13 +6419,13 @@ defmodule AttestoMCP.Server do
 
   defp strict_template_decode(value, mode) when is_binary(value) do
     if byte_size(value) > @max_template_value_bytes or
-         Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, value) do
+         (String.contains?(value, "%") and Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, value)) do
       :error
     else
       source = if mode == :query, do: String.replace(value, "+", " "), else: value
 
       try do
-        decoded = URI.decode(source)
+        decoded = if String.contains?(source, "%"), do: URI.decode(source), else: source
 
         if String.valid?(decoded) and byte_size(decoded) <= @max_template_value_bytes do
           {:ok, decoded}
@@ -5590,7 +6460,7 @@ defmodule AttestoMCP.Server do
              operation,
              runtime.opts
            ),
-         :ok <- validate_input_responses(state_payload, params),
+         :ok <- validate_input_responses(state_payload, params, runtime.opts),
          :ok <- consume_retry_state(state_payload, runtime.opts) do
       case Registry.list(runtime.registry, :prompt)
            |> Enum.filter(&(&1.name == name and visible?(&1, context))) do
@@ -5610,7 +6480,7 @@ defmodule AttestoMCP.Server do
                  input_keys
                ) do
             {:input_required, input} when era == @modern ->
-              with {:ok, requests} <- normalize_input_requests(input),
+              with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
                    {:ok, requests} <- require_input_capabilities(params, requests) do
                 request_state =
                   RequestState.issue(
@@ -5630,11 +6500,14 @@ defmodule AttestoMCP.Server do
 
                 Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "prompts/get"})
 
-                modern_result(%{
-                  "resultType" => "input_required",
-                  "inputRequests" => requests,
-                  "requestState" => request_state
-                })
+                modern_result(
+                  %{
+                    "resultType" => "input_required",
+                    "inputRequests" => requests,
+                    "requestState" => request_state
+                  },
+                  runtime.opts
+                )
               else
                 {:error, :invalid_input_requests} ->
                   {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
@@ -5644,14 +6517,14 @@ defmodule AttestoMCP.Server do
               end
 
             {:ok, content} ->
-              normalized = normalize_prompt_messages(content)
+              normalized = normalize_prompt_messages(content, runtime.opts)
 
               normalized =
                 if era == @legacy, do: Map.delete(normalized, "resultType"), else: normalized
 
               normalized = filter_prompt_result_revision(normalized, context[:protocol_version])
 
-              if valid_prompt_result?(normalized) do
+              if valid_prompt_result?(normalized, runtime.opts) do
                 {:ok,
                  Map.merge(
                    normalized,
@@ -5711,13 +6584,16 @@ defmodule AttestoMCP.Server do
               value,
               completion_context || %{},
               context,
-              era
+              era,
+              runtime.opts
             )
         end
     end
   end
 
-  defp completion_result(entry, ref, argument, value, completion_context, context, era) do
+  defp completion_result(entry, ref, argument, value, completion_context, context, era, opts) do
+    budget_opts = json_budget_opts(opts)
+
     case invoke(
            entry.handler,
            %{ref: ref, argument: argument, value: value, context: completion_context},
@@ -5725,7 +6601,7 @@ defmodule AttestoMCP.Server do
            []
          ) do
       {:ok, result} ->
-        with {:ok, result} <- canonical_wire_value(result),
+        with {:ok, result} <- canonical_wire_value(result, budget_opts),
              {values, supplied_total, supplied_more} <- completion_values(result),
              true <- is_list(values) and Enum.all?(values, &is_binary/1),
              values <- Enum.uniq(values),
@@ -5836,10 +6712,13 @@ defmodule AttestoMCP.Server do
              context[:subscription_authorize]
            ) do
         {:ok, id} ->
-          modern_result(%{
-            "resultType" => "complete",
-            "_meta" => %{"io.modelcontextprotocol/subscriptionId" => id}
-          })
+          modern_result(
+            %{
+              "resultType" => "complete",
+              "_meta" => %{"io.modelcontextprotocol/subscriptionId" => id}
+            },
+            runtime.opts
+          )
 
         {:error, _reason} ->
           {:error, Error.invalid_params(%{"reason" => "notifications_filter_invalid"})}
@@ -6071,32 +6950,32 @@ defmodule AttestoMCP.Server do
   defp normalize_handler_result({:error, reason}), do: {:error, reason}
   defp normalize_handler_result(value), do: {:ok, value}
 
-  defp normalize_tool_result(%{} = result) do
-    case canonical_wire_value(result) do
+  defp normalize_tool_result(%{} = result, opts) do
+    case canonical_wire_value(result, json_budget_opts(opts)) do
       {:ok, %{"content" => _} = normalized} -> normalized
       {:ok, normalized} -> normalize_structured_tool_value(normalized)
       _ -> result
     end
   end
 
-  defp normalize_tool_result(result) when is_binary(result),
+  defp normalize_tool_result(result, _opts) when is_binary(result),
     do: %{"content" => [%{"type" => "text", "text" => result}], "isError" => false}
 
-  defp normalize_tool_result(result) when is_number(result) or is_boolean(result),
+  defp normalize_tool_result(result, _opts) when is_number(result) or is_boolean(result),
     do: %{
       "structuredContent" => result,
       "content" => [%{"type" => "text", "text" => to_string(result)}],
       "isError" => false
     }
 
-  defp normalize_tool_result(result) when is_nil(result),
+  defp normalize_tool_result(result, _opts) when is_nil(result),
     do: %{
       "structuredContent" => nil,
       "content" => [%{"type" => "text", "text" => ""}],
       "isError" => false
     }
 
-  defp normalize_tool_result(result),
+  defp normalize_tool_result(result, _opts),
     do: %{
       "structuredContent" => result,
       "content" => [%{"type" => "text", "text" => "structured output"}],
@@ -6117,8 +6996,8 @@ defmodule AttestoMCP.Server do
 
   defp legacy_tool_result(result) when is_map(result), do: Map.delete(result, "resultType")
 
-  defp normalize_resource_contents(value) do
-    value = canonical_output(value)
+  defp normalize_resource_contents(value, opts) do
+    value = canonical_output(value, json_budget_opts(opts))
 
     cond do
       is_map(value) and Map.has_key?(value, "contents") -> value
@@ -6127,8 +7006,8 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp normalize_prompt_messages(value) do
-    value = canonical_output(value)
+  defp normalize_prompt_messages(value, opts) do
+    value = canonical_output(value, json_budget_opts(opts))
 
     cond do
       is_map(value) and Map.has_key?(value, "messages") -> value
@@ -6179,18 +7058,20 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp valid_tool_result?(result), do: match?({:ok, _}, Output.normalize_tool_result(result))
+  defp valid_tool_result?(result, opts),
+    do: match?({:ok, _}, Output.normalize_tool_result(result, json_budget_opts(opts)))
 
-  defp valid_resource_result?(result),
-    do: match?({:ok, _}, Output.normalize_resource_result(result))
+  defp valid_resource_result?(result, opts),
+    do: match?({:ok, _}, Output.normalize_resource_result(result, json_budget_opts(opts)))
 
-  defp valid_prompt_result?(result),
-    do: match?({:ok, _}, Output.normalize_prompt_result(result))
+  defp valid_prompt_result?(result, opts),
+    do: match?({:ok, _}, Output.normalize_prompt_result(result, json_budget_opts(opts)))
 
-  defp valid_content_item?(item),
-    do: match?({:ok, _}, Output.normalize_content_item(item))
+  defp valid_content_item?(item, opts),
+    do: match?({:ok, _}, Output.normalize_content_item(item, json_budget_opts(opts)))
 
-  defp json_value?(value), do: Schema.json_value(value) == :ok
+  defp json_value?(value, opts),
+    do: Schema.json_value(value, json_budget_opts(opts)) == :ok
 
   defp validate_prompt_call_arguments(definitions, arguments, input_keys)
        when is_list(definitions) and is_map(arguments) do
@@ -6227,10 +7108,10 @@ defmodule AttestoMCP.Server do
 
   defp validate_prompt_call_arguments(_, _, _), do: {:error, :invalid_arguments}
 
-  defp validate_output(output, schema) do
+  defp validate_output(output, schema, opts) do
     with {:ok, structured_content} when is_map(structured_content) <-
            Map.fetch(output, "structuredContent"),
-         :ok <- Schema.validate(structured_content, schema) do
+         :ok <- Schema.validate(structured_content, schema, json_budget_opts(opts)) do
       output
     else
       _ ->
@@ -6335,14 +7216,39 @@ defmodule AttestoMCP.Server do
 
   defp tenant(context), do: Map.get(context, :tenant, Map.get(context, "tenant"))
 
+  defp json_budget_opts(opts) when is_list(opts) do
+    max_bytes =
+      Keyword.get(
+        opts,
+        :max_json_bytes,
+        Keyword.get(opts, :max_bytes, Schema.default_instance_bytes())
+      )
+
+    [max_bytes: max_bytes]
+  end
+
+  defp json_budget_opts(opts) when is_map(opts) do
+    [
+      max_bytes:
+        Map.get(
+          opts,
+          :max_json_bytes,
+          Schema.default_instance_bytes()
+        )
+    ]
+  end
+
+  defp json_budget_opts(_opts), do: [max_bytes: Schema.default_instance_bytes()]
+
   # Handler-produced protocol objects may use atom keys, but every value that
   # reaches a wire encoder must be a bounded JSON value.  Canonicalize only
   # keys (never arbitrary terms) and reject collisions such as :method plus
   # "method" rather than silently dropping one of them.
-  defp canonical_wire_value(value), do: Output.canonicalize(value)
+  defp canonical_wire_value(value, opts),
+    do: Output.canonicalize(value, json_budget_opts(opts))
 
-  defp canonical_output(value) do
-    case canonical_wire_value(value) do
+  defp canonical_output(value, opts) do
+    case canonical_wire_value(value, opts) do
       {:ok, normalized} -> normalized
       _ -> value
     end

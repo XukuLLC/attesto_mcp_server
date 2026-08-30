@@ -48,10 +48,14 @@ path and any static resource/origin value, and uses the same resolved identifier
 for metadata and audience verification. Do not use `allow_dynamic_origin` in
 production or derive an audience from an untrusted Host header.
 
-HTTP `max_body_bytes` and `max_message_bytes`, and stdio
-`max_message_bytes`, cannot exceed the 2,000,000-byte schema-instance ceiling.
-The message limit still governs JSON-RPC decoding. Keep an upstream parser's
-limit at least as strict as the MCP Plug and preserve the
+The server-wide `max_json_bytes` budget defaults to 2,000,000 bytes and accepts
+values from 512 through 64,000,000 bytes. The minimum leaves room for a bounded
+protocol error. HTTP `max_body_bytes` and `max_message_bytes` must be positive;
+stdio `max_message_bytes` must be at least 512 bytes. None may exceed the
+supervised server's selected budget. The message limit still governs JSON-RPC
+decoding. Raising the budget increases peak allocation and
+response-amplification exposure; set only the smallest value required. Keep an
+upstream parser's limit at least as strict as the MCP Plug and preserve the
 authenticate-before-body-read ordering.
 
 Every successful result is bounded again after protocol, cache, and server

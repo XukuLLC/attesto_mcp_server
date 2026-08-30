@@ -34,6 +34,8 @@ defmodule AttestoMCP.Server.Plug do
   @max_request_header_name_bytes 256
   @max_request_header_value_bytes 8_192
   @max_request_header_bytes 65_536
+  @default_max_body_bytes 2_000_000
+  @default_max_message_bytes 1_000_000
   @static_path_pattern ~r/\A\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\z/
   @resolver_assign_keys %{
     claims_key: :attesto_mcp_claims,
@@ -139,6 +141,7 @@ defmodule AttestoMCP.Server.Plug do
     path = Keyword.get(opts, :path, "/mcp")
     validate_plug_options!(opts)
     validate_path!(path)
+    validate_initial_transport_limits!(server, opts)
 
     {auth_opts, auth_boundary, auth_resolver} = initialize_authentication(opts, path)
 
@@ -502,6 +505,7 @@ defmodule AttestoMCP.Server.Plug do
   @impl Plug
   def call(conn, state) do
     started = System.monotonic_time()
+    Process.delete(:attesto_mcp_json_budget)
 
     Telemetry.execute(
       [:http_request, :start],
@@ -558,6 +562,8 @@ defmodule AttestoMCP.Server.Plug do
       _error -> recover_http_failure(conn, started)
     catch
       _kind, _reason -> recover_http_failure(conn, started)
+    after
+      Process.delete(:attesto_mcp_json_budget)
     end
   end
 
@@ -588,7 +594,10 @@ defmodule AttestoMCP.Server.Plug do
 
     if available? do
       options = Server.options(server)
-      {:ok, %{state | opts: Keyword.merge(options, state.opts)}}
+      merged_opts = Keyword.merge(options, state.opts)
+      validate_transport_limits!(merged_opts)
+      Process.put(:attesto_mcp_json_budget, merged_opts[:max_json_bytes])
+      {:ok, %{state | opts: merged_opts}}
     else
       :unavailable
     end
@@ -725,8 +734,8 @@ defmodule AttestoMCP.Server.Plug do
     case validate_content_type(conn) do
       :ok ->
         with {:ok, body, conn} <-
-               read_body_bounded(conn, state.opts[:max_body_bytes] || 2_000_000) do
-          case JSONRPC.decode(body, max_bytes: state.opts[:max_message_bytes] || 1_000_000) do
+               read_body_bounded(conn, transport_limit(state, :max_body_bytes)) do
+          case JSONRPC.decode(body, max_bytes: transport_limit(state, :max_message_bytes)) do
             {:ok, request} ->
               case process_post(conn, state, request) do
                 {:error, %Error{} = error} ->
@@ -745,7 +754,7 @@ defmodule AttestoMCP.Server.Plug do
             {:error, %Error{} = error} ->
               error_response(
                 conn,
-                JSONRPC.recover_id(body, max_bytes: state.opts[:max_message_bytes] || 1_000_000),
+                JSONRPC.recover_id(body, max_bytes: transport_limit(state, :max_message_bytes)),
                 error,
                 state.auth_opts
               )
@@ -2543,14 +2552,83 @@ defmodule AttestoMCP.Server.Plug do
       end
     end
 
-    for key <- [:max_body_bytes, :max_message_bytes], Keyword.has_key?(opts, key) do
-      if Keyword.fetch!(opts, key) > Schema.max_instance_bytes() do
-        raise ArgumentError,
-              ":#{key} cannot exceed the #{Schema.max_instance_bytes()}-byte schema-instance ceiling"
-      end
+    :ok
+  end
+
+  defp validate_transport_limits!(opts) when is_list(opts) do
+    budget = Keyword.get(opts, :max_json_bytes, Schema.default_instance_bytes())
+
+    unless is_integer(budget) and budget >= Schema.min_allowed_instance_bytes() and
+             budget <= Schema.max_allowed_instance_bytes() do
+      raise ArgumentError,
+            ":max_json_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{Schema.max_allowed_instance_bytes()} bytes"
     end
 
+    Enum.each([:max_body_bytes, :max_message_bytes], fn key ->
+      case Keyword.get(opts, key) do
+        nil ->
+          :ok
+
+        value when is_integer(value) and value > 0 and value <= budget ->
+          :ok
+
+        value when is_integer(value) and value > budget ->
+          raise ArgumentError, ":#{key} cannot exceed the #{budget}-byte JSON value budget"
+
+        _ ->
+          raise ArgumentError, ":#{key} must be a positive integer"
+      end
+    end)
+
     :ok
+  end
+
+  defp validate_initial_transport_limits!(server, opts) do
+    case server_options_at_init(server) do
+      {:ok, server_opts} -> validate_transport_limits!(Keyword.merge(server_opts, opts))
+      :unavailable -> validate_declared_transport_limits!(opts)
+    end
+  end
+
+  defp server_options_at_init(server) when is_pid(server) do
+    if Process.alive?(server), do: safe_server_options(server), else: :unavailable
+  end
+
+  defp server_options_at_init(server) when is_atom(server) do
+    if is_pid(Process.whereis(server)), do: safe_server_options(server), else: :unavailable
+  end
+
+  defp safe_server_options(server) do
+    {:ok, Server.options(server)}
+  rescue
+    _ -> :unavailable
+  catch
+    _kind, _reason -> :unavailable
+  end
+
+  defp validate_declared_transport_limits!(opts) do
+    Enum.each([:max_body_bytes, :max_message_bytes], fn key ->
+      case Keyword.get(opts, key) do
+        nil -> :ok
+        value when is_integer(value) and value > 0 -> :ok
+        _ -> raise ArgumentError, ":#{key} must be a positive integer"
+      end
+    end)
+  end
+
+  defp transport_limit(state, key) when key in [:max_body_bytes, :max_message_bytes] do
+    budget = Keyword.get(state.opts, :max_json_bytes, Schema.default_instance_bytes())
+
+    default =
+      case key do
+        :max_body_bytes -> @default_max_body_bytes
+        :max_message_bytes -> @default_max_message_bytes
+      end
+
+    case Keyword.get(state.opts, key) do
+      nil -> min(default, budget)
+      value -> value
+    end
   end
 
   defp metadata(conn, state) do
@@ -3197,7 +3275,7 @@ defmodule AttestoMCP.Server.Plug do
       |> put_resp_content_type("application/json")
       |> put_resp_header("cache-control", "private, no-store")
       |> put_resp_header("vary", "authorization")
-      |> send_resp(status, JSONRPC.encode(data))
+      |> send_resp(status, JSONRPC.encode(data, max_bytes: http_json_budget()))
 
   defp error_response(conn, id, %Error{} = error, auth_opts) do
     Telemetry.execute([:protocol, :error], %{count: 1}, %{
@@ -3249,8 +3327,15 @@ defmodule AttestoMCP.Server.Plug do
   defp telemetry_correlation(id) when is_integer(id), do: "integer:" <> Integer.to_string(id)
   defp telemetry_correlation(_id), do: nil
 
-  defp sse_event(message), do: "event: message\ndata: " <> JSONRPC.encode(message) <> "\n\n"
+  defp sse_event(message),
+    do:
+      "event: message\ndata: " <> JSONRPC.encode(message, max_bytes: http_json_budget()) <> "\n\n"
 
   defp legacy_sse_event(event_id, message),
-    do: "id: #{event_id}\nevent: message\ndata: " <> JSONRPC.encode(message) <> "\n\n"
+    do:
+      "id: #{event_id}\nevent: message\ndata: " <>
+        JSONRPC.encode(message, max_bytes: http_json_budget()) <> "\n\n"
+
+  defp http_json_budget,
+    do: Process.get(:attesto_mcp_json_budget, Schema.default_instance_bytes())
 end

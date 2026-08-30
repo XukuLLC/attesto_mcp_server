@@ -5,7 +5,11 @@ defmodule AttestoMCP.Server.Schema do
   @max_nodes 500
   @max_json_depth 64
   @max_json_nodes 10_000
-  @max_json_bytes 2_000_000
+  # A bounded JSON-RPC internal error with the largest permitted request ID
+  # needs a small amount of room even when the application budget is tiny.
+  @min_json_bytes 512
+  @default_json_bytes 2_000_000
+  @max_json_bytes 64_000_000
   @max_default_applications 500
   @dialyzer {:nowarn_function,
              unevaluated_properties: 4,
@@ -39,9 +43,21 @@ defmodule AttestoMCP.Server.Schema do
   @types ~w(null boolean object array number integer string)
   @formats ~w(date date-time duration email hostname ipv4 ipv6 regex time uri uri-reference)
 
-  @doc "Returns the hard byte ceiling used for bounded JSON Schema instances."
+  @doc "Returns the secure default byte budget used for bounded JSON values."
   @spec max_instance_bytes() :: pos_integer()
-  def max_instance_bytes, do: @max_json_bytes
+  def max_instance_bytes, do: @default_json_bytes
+
+  @doc "Returns the maximum configurable JSON value budget."
+  @spec max_allowed_instance_bytes() :: pos_integer()
+  def max_allowed_instance_bytes, do: @max_json_bytes
+
+  @doc "Returns the minimum configurable JSON value budget."
+  @spec min_allowed_instance_bytes() :: pos_integer()
+  def min_allowed_instance_bytes, do: @min_json_bytes
+
+  @doc "Returns the secure default JSON value budget."
+  @spec default_instance_bytes() :: pos_integer()
+  def default_instance_bytes, do: @default_json_bytes
 
   @doc """
   Validates the original JSON-compatible instance against a bounded subset.
@@ -50,20 +66,30 @@ defmodule AttestoMCP.Server.Schema do
   function. Hosts that explicitly want direct property defaults can call
   `apply_property_defaults/2` before invoking a handler.
   """
-  @spec validate(term(), term()) :: :ok | {:error, term()}
-  def validate(_value, nil), do: :ok
-  def validate(_value, true), do: :ok
-  def validate(_value, false), do: {:error, :schema_false}
+  @spec validate(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate(value, schema, opts \\ []) do
+    max_bytes = configured_max_bytes(opts)
 
-  def validate(value, schema) when is_map(schema) do
-    with :ok <- validate_schema(schema),
-         :ok <- bounded(schema),
-         :ok <- json_value(value) do
-      validate_node(value, schema, schema, 0)
+    case schema do
+      nil ->
+        json_value(value, max_bytes: max_bytes)
+
+      true ->
+        json_value(value, max_bytes: max_bytes)
+
+      false ->
+        {:error, :schema_false}
+
+      schema when is_map(schema) ->
+        with :ok <- json_value(value, max_bytes: max_bytes),
+             :ok <- validate_schema(schema, max_bytes: max_bytes) do
+          validate_node(value, schema, schema, 0)
+        end
+
+      _ ->
+        {:error, :invalid_schema}
     end
   end
-
-  def validate(_, _), do: {:error, :invalid_schema}
 
   @doc """
   Applies bounded, direct JSON Schema property defaults and validates the result.
@@ -80,42 +106,57 @@ defmodule AttestoMCP.Server.Schema do
   completed value must satisfy the normal depth, node, byte, and schema bounds.
   Server dispatch never calls this helper automatically.
   """
-  @spec apply_property_defaults(map(), map() | boolean()) ::
+  @spec apply_property_defaults(map(), map() | boolean(), keyword()) ::
           {:ok, map()} | {:error, term()}
-  def apply_property_defaults(value, schema) when is_map(value) do
-    with :ok <- validate_schema(schema),
-         :ok <- json_value(value),
+  def apply_property_defaults(value, schema, opts \\ [])
+
+  def apply_property_defaults(value, schema, opts) when is_map(value) do
+    max_bytes = configured_max_bytes(opts)
+
+    with :ok <- validate_schema(schema, max_bytes: max_bytes),
+         :ok <- json_value(value, max_bytes: max_bytes),
          {:ok, completed, _remaining} <-
            apply_property_defaults_node(value, schema, @max_default_applications, 0),
-         :ok <- json_value(completed),
-         :ok <- validate(completed, schema) do
+         :ok <- json_value(completed, max_bytes: max_bytes),
+         :ok <- validate(completed, schema, max_bytes: max_bytes) do
       {:ok, completed}
     end
   end
 
-  def apply_property_defaults(_value, _schema), do: {:error, :invalid_instance}
+  def apply_property_defaults(_value, _schema, _opts), do: {:error, :invalid_instance}
 
   @doc "Checks a schema without validating an instance. No network references are fetched."
-  @spec validate_schema(term()) :: :ok | {:error, term()}
-  def validate_schema(schema) when is_boolean(schema), do: :ok
+  @spec validate_schema(term(), keyword()) :: :ok | {:error, term()}
+  def validate_schema(schema, opts \\ [])
+  def validate_schema(schema, _opts) when is_boolean(schema), do: :ok
 
-  def validate_schema(schema) when is_map(schema) do
-    with :ok <- bounded(schema),
-         :ok <- json_value(schema),
+  def validate_schema(schema, opts) when is_map(schema) do
+    max_bytes = configured_max_bytes(opts)
+
+    with :ok <- bounded(schema, max_bytes),
+         :ok <- json_value(schema, max_bytes: max_bytes),
          :ok <- schema_node(schema, 0, schema_dialect(schema)),
          :ok <- validate_anchors_unique(schema) do
       :ok
     end
   end
 
-  def validate_schema(_), do: {:error, :invalid_schema}
+  def validate_schema(_schema, _opts), do: {:error, :invalid_schema}
 
   @doc "Checks that a term can be represented losslessly as JSON."
-  @spec json_value(term()) :: :ok | {:error, :not_json}
-  def json_value(value) do
-    case bounded_json_value(value, 0, @max_json_nodes, 0) do
-      {:ok, _nodes, _bytes} -> :ok
-      {:error, _} = error -> error
+  @spec json_value(term(), keyword()) :: :ok | {:error, :not_json}
+  def json_value(value, opts \\ []) do
+    max_bytes = configured_max_bytes(opts)
+
+    case bounded_json_value(value, 0, @max_json_nodes, 0, max_bytes) do
+      {:ok, _nodes, _bytes} ->
+        case Jason.encode(value) do
+          {:ok, encoded} when byte_size(encoded) <= max_bytes -> :ok
+          _ -> {:error, :not_json}
+        end
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -181,31 +222,38 @@ defmodule AttestoMCP.Server.Schema do
   defp json_equal?(left, right), do: left === right
 
   @doc "Validates the bounded modern result variants emitted by this package."
-  @spec validate_modern_result(map()) :: :ok | {:error, term()}
-  def validate_modern_result(%{"resultType" => "complete"} = result) when is_map(result) do
-    with :ok <- optional_nonnegative_integer(result, "ttlMs"),
+  @spec validate_modern_result(map(), keyword()) :: :ok | {:error, term()}
+  def validate_modern_result(result, opts \\ [])
+
+  def validate_modern_result(%{"resultType" => "complete"} = result, opts) when is_map(result) do
+    with :ok <- json_value(result, opts),
+         :ok <- optional_nonnegative_integer(result, "ttlMs"),
          :ok <- optional_cache_scope(result),
          :ok <- optional_result_catalog(result) do
       :ok
     end
   end
 
-  def validate_modern_result(%{
-        "resultType" => "input_required",
-        "inputRequests" => requests,
-        "requestState" => state
-      })
+  def validate_modern_result(
+        %{
+          "resultType" => "input_required",
+          "inputRequests" => requests,
+          "requestState" => state
+        } = result,
+        opts
+      )
       when is_map(requests) and is_binary(state) and map_size(requests) > 0 do
-    if Enum.all?(requests, fn {key, request} ->
-         is_binary(key) and byte_size(key) in 1..128 and is_map(request) and
-           request["method"] in ["elicitation/create", "sampling/createMessage", "roots/list"] and
-           is_map(request["params"])
-       end) and is_binary(state) and byte_size(state) <= 4096,
+    if json_value(result, opts) == :ok and
+         Enum.all?(requests, fn {key, request} ->
+           is_binary(key) and byte_size(key) in 1..128 and is_map(request) and
+             request["method"] in ["elicitation/create", "sampling/createMessage", "roots/list"] and
+             is_map(request["params"])
+         end) and is_binary(state) and byte_size(state) <= 4096,
        do: :ok,
        else: {:error, :invalid_input_requests}
   end
 
-  def validate_modern_result(_), do: {:error, :invalid_modern_result}
+  def validate_modern_result(_, _opts), do: {:error, :invalid_modern_result}
 
   defp optional_nonnegative_integer(result, key) do
     case Map.fetch(result, key) do
@@ -271,7 +319,7 @@ defmodule AttestoMCP.Server.Schema do
     end
   end
 
-  defp bounded(schema) when is_map(schema) do
+  defp bounded(schema, max_bytes) when is_map(schema) do
     cond do
       Map.has_key?(schema, "$schema") and schema["$schema"] not in @supported_dialects ->
         {:error, :unsupported_dialect}
@@ -284,6 +332,9 @@ defmodule AttestoMCP.Server.Schema do
 
       depth(schema) > @max_depth ->
         {:error, :schema_too_deep}
+
+      json_encoded_bytes(schema) > max_bytes ->
+        {:error, :not_json}
 
       true ->
         :ok
@@ -407,7 +458,10 @@ defmodule AttestoMCP.Server.Schema do
   defp validate_type_keyword(_), do: :ok
 
   defp validate_enum_keyword(%{"enum" => values}) when is_list(values) and values != [] do
-    if Enum.all?(values, &(json_value(&1) == :ok)), do: :ok, else: {:error, :invalid_enum}
+    # The complete schema has already passed json_value/2 in validate_schema/2.
+    # Rechecking each member with the default budget would incorrectly reject a
+    # valid large enum when the caller selected a larger bounded budget.
+    :ok
   end
 
   defp validate_enum_keyword(%{"enum" => _}), do: {:error, :invalid_enum}
@@ -427,7 +481,8 @@ defmodule AttestoMCP.Server.Schema do
   defp validate_const_keyword(schema) do
     case Map.fetch(schema, "const") do
       :error -> :ok
-      {:ok, value} -> if json_value(value) == :ok, do: :ok, else: {:error, :invalid_const}
+      # The complete schema has already passed json_value/2 in validate_schema/2.
+      {:ok, _value} -> :ok
     end
   end
 
@@ -1898,25 +1953,25 @@ defmodule AttestoMCP.Server.Schema do
 
   defp depth(_, n), do: n
 
-  defp bounded_json_value(value, depth, nodes, bytes) do
+  defp bounded_json_value(value, depth, nodes, bytes, max_bytes) do
     cond do
-      depth > @max_json_depth or nodes <= 0 or bytes > @max_json_bytes ->
+      depth > @max_json_depth or nodes <= 0 or bytes > max_bytes ->
         {:error, :not_json}
 
       is_binary(value) ->
-        if String.valid?(value) and bytes + byte_size(value) <= @max_json_bytes,
+        if String.valid?(value) and bytes + byte_size(value) <= max_bytes,
           do: {:ok, nodes - 1, bytes + byte_size(value)},
           else: {:error, :not_json}
 
       is_integer(value) ->
         scalar_bytes = byte_size(Integer.to_string(value))
 
-        if bytes + scalar_bytes <= @max_json_bytes,
+        if bytes + scalar_bytes <= max_bytes,
           do: {:ok, nodes - 1, bytes + scalar_bytes},
           else: {:error, :not_json}
 
       is_boolean(value) or is_nil(value) ->
-        if bytes + 1 <= @max_json_bytes,
+        if bytes + 1 <= max_bytes,
           do: {:ok, nodes - 1, bytes + 1},
           else: {:error, :not_json}
 
@@ -1927,11 +1982,12 @@ defmodule AttestoMCP.Server.Schema do
            else: {:error, :not_json}
 
       is_list(value) ->
-        bounded_json_children(value, depth + 1, nodes - 1, bytes)
+        bounded_json_children(value, depth + 1, nodes - 1, bytes, max_bytes)
 
       is_map(value) ->
         with true <- depth <= @max_json_depth,
-             {:ok, nodes, bytes} <- bounded_json_map_children(value, depth + 1, nodes - 1, bytes) do
+             {:ok, nodes, bytes} <-
+               bounded_json_map_children(value, depth + 1, nodes - 1, bytes, max_bytes) do
           {:ok, nodes, bytes}
         else
           _ -> {:error, :not_json}
@@ -1942,19 +1998,19 @@ defmodule AttestoMCP.Server.Schema do
     end
   end
 
-  defp bounded_json_children(children, depth, nodes, bytes) do
+  defp bounded_json_children(children, depth, nodes, bytes, max_bytes) do
     Enum.reduce_while(children, {:ok, nodes, bytes}, fn child, {:ok, left, used} ->
-      case bounded_json_value(child, depth, left, used) do
+      case bounded_json_value(child, depth, left, used, max_bytes) do
         {:ok, left, used} -> {:cont, {:ok, left, used}}
         {:error, _} = error -> {:halt, error}
       end
     end)
   end
 
-  defp bounded_json_map_children(map, depth, nodes, bytes) do
+  defp bounded_json_map_children(map, depth, nodes, bytes, max_bytes) do
     Enum.reduce_while(map, {:ok, nodes, bytes}, fn {key, value}, {:ok, left, used} ->
-      if is_binary(key) and String.valid?(key) and used + byte_size(key) <= @max_json_bytes do
-        case bounded_json_value(value, depth, left, used + byte_size(key)) do
+      if is_binary(key) and String.valid?(key) and used + byte_size(key) <= max_bytes do
+        case bounded_json_value(value, depth, left, used + byte_size(key), max_bytes) do
           {:ok, left, used} -> {:cont, {:ok, left, used}}
           {:error, _} = error -> {:halt, error}
         end
@@ -1962,5 +2018,25 @@ defmodule AttestoMCP.Server.Schema do
         {:halt, {:error, :not_json}}
       end
     end)
+  end
+
+  defp configured_max_bytes(opts) when is_list(opts) do
+    max_bytes = Keyword.get(opts, :max_bytes, @default_json_bytes)
+
+    if is_integer(max_bytes) and max_bytes >= @min_json_bytes and
+         max_bytes <= @max_json_bytes,
+       do: max_bytes,
+       else: 0
+  end
+
+  defp configured_max_bytes(_opts), do: 0
+
+  defp json_encoded_bytes(value) do
+    case Jason.encode(value) do
+      {:ok, encoded} -> byte_size(encoded)
+      {:error, _reason} -> @max_json_bytes + 1
+    end
+  rescue
+    _ -> @max_json_bytes + 1
   end
 end

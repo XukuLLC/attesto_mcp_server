@@ -326,7 +326,7 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
              list_tools(server, 3, cursor)
   end
 
-  test "a registry crash restores a cumulative catalog larger than one public batch" do
+  test "repeated registration cannot exceed the total catalog limit and recovery stays exact" do
     {:ok, server} = Server.start_link([])
 
     first_batch =
@@ -335,11 +335,18 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
       end)
 
     assert :ok = Server.register_all(server, first_batch)
-    assert :ok = Server.register_tool(server, "batch-tool-1001", %{})
 
     expected = Server.snapshot(server)
-    assert map_size(expected.tool) == 1_001
-    assert Registry.revision(registry(server)) == 1_001
+    revision = Registry.revision(registry(server))
+
+    assert map_size(expected.tool) == 1_000
+    assert revision == 1_000
+
+    assert {:error, :too_many_registrations} =
+             Server.register_tool(server, "batch-tool-1001", %{})
+
+    assert Server.snapshot(server) == expected
+    assert Registry.revision(registry(server)) == revision
 
     old_registry = registry(server)
     Process.exit(old_registry, :kill)
@@ -347,11 +354,36 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
     assert eventually(fn ->
              recovered = registry(server)
 
-             recovered != old_registry and Registry.revision(recovered) == 1_001 and
+             recovered != old_registry and Registry.revision(recovered) == revision and
                Server.snapshot(server) == expected
            end)
 
     assert Process.alive?(server)
+  end
+
+  test "registry restore rejects an oversized persisted catalog without mutation" do
+    {:ok, registry} = Registry.start_link([])
+
+    oversized =
+      Enum.map(1..1_001, fn index ->
+        {:tool, "restored-tool-#{index}", %{}}
+      end)
+
+    assert {:error, :too_many_registrations} = Registry.restore_all(registry, oversized, 99)
+    assert Registry.revision(registry) == 0
+    assert Registry.snapshot(registry) |> Map.values() |> Enum.all?(&(map_size(&1) == 0))
+    assert Process.alive?(registry)
+  end
+
+  test "startup rejects an oversized catalog cleanly" do
+    oversized =
+      Enum.map(1..1_001, fn index ->
+        {:tool, "startup-tool-#{index}", %{}}
+      end)
+
+    assert {:error,
+            {%ArgumentError{message: ":registrations are invalid: :too_many_registrations"},
+             _stacktrace}} = GenServer.start(Server, registrations: oversized)
   end
 
   test "a selected in-flight handler finishes while later calls use the replacement" do

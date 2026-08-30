@@ -1,6 +1,7 @@
 defmodule AttestoMCP.Server.Stdio do
   @moduledoc "Line-delimited stdio adapter over the shared protocol core."
 
+  alias AttestoMCP.Server
   alias AttestoMCP.Server.{Error, JSONRPC, Schema, Telemetry}
 
   @legacy "2025-11-25"
@@ -24,11 +25,12 @@ defmodule AttestoMCP.Server.Stdio do
     # The default stays conservative because the live-pipe fallback reads one
     # byte at a time to guarantee prompt newline delivery without retaining an
     # unterminated peer frame. Hosts handling larger bounded frames must opt in.
-    max = Keyword.get(opts, :max_message_bytes, 64_000)
+    json_budget = Server.options(server)[:max_json_bytes] || Schema.default_instance_bytes()
+    max = Keyword.get(opts, :max_message_bytes, min(64_000, json_budget))
 
-    unless is_integer(max) and max > 0 and max <= Schema.max_instance_bytes() do
+    unless is_integer(max) and max >= Schema.min_allowed_instance_bytes() and max <= json_budget do
       raise ArgumentError,
-            ":max_message_bytes must be between 1 and #{Schema.max_instance_bytes()}"
+            ":max_message_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{json_budget}"
     end
 
     {:ok, legacy_session} =
@@ -48,12 +50,17 @@ defmodule AttestoMCP.Server.Stdio do
 
     {reader, reader_monitor} = spawn_monitor(fn -> read_loop(parent, input) end)
     Process.put(:attesto_mcp_stdio_pending, %{})
+    # A stdio frame has its own transport ceiling.  Keep output under the
+    # declared frame bound even when the server's value/schema budget is
+    # larger.
+    Process.put(:attesto_mcp_stdio_json_budget, max)
 
     try do
       loop(server, context, opts, max, reader, reader_monitor, %{})
     after
       stop_pending(Process.get(:attesto_mcp_stdio_pending, %{}))
       Process.delete(:attesto_mcp_stdio_pending)
+      Process.delete(:attesto_mcp_stdio_json_budget)
       AttestoMCP.Server.delete_session(server, legacy_session.id)
       if Process.alive?(reader), do: Process.exit(reader, :kill)
       Process.demonitor(reader_monitor, [:flush])
@@ -121,7 +128,7 @@ defmodule AttestoMCP.Server.Stdio do
         {:error, reason}
 
       "\n" ->
-        if discarding or size > max,
+        if discarding or size + 1 > max,
           do: {:oversized, :message_too_large},
           else: IO.iodata_to_binary(Enum.reverse(["\n" | chunks]))
 
@@ -691,7 +698,40 @@ defmodule AttestoMCP.Server.Stdio do
     end
   end
 
-  defp write(message), do: IO.puts(JSONRPC.encode(message))
+  defp write(message) do
+    max_bytes = Process.get(:attesto_mcp_stdio_json_budget, Schema.default_instance_bytes())
+    encoded = JSONRPC.encode(message, max_bytes: max_bytes)
+
+    encoded =
+      if byte_size(encoded) + 1 <= max_bytes do
+        encoded
+      else
+        bounded_frame_error(message, max_bytes)
+      end
+
+    IO.write(encoded <> "\n")
+  end
+
+  defp bounded_frame_error(message, max_bytes) do
+    error = frame_error(message)
+    encoded = Jason.encode!(error)
+
+    if byte_size(encoded) + 1 <= max_bytes do
+      encoded
+    else
+      Jason.encode!(%{error | "id" => nil})
+    end
+  end
+
+  defp frame_error(message) do
+    id = Map.get(message, "id")
+
+    %{
+      "jsonrpc" => "2.0",
+      "id" => if(is_binary(id) or is_integer(id), do: id, else: nil),
+      "error" => %{"code" => -32603, "message" => "Internal error"}
+    }
+  end
 
   defp safe_server_request_callback(callback, event) when is_function(callback, 1) do
     try do
