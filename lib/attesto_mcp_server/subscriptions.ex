@@ -307,6 +307,8 @@ defmodule AttestoMCP.Server.Subscriptions do
     event = event_for(notification, id)
     current_authorizer = Keyword.get(opts, :authorize)
     authorizers = Enum.reject([subscription.authorize, current_authorizer], &is_nil/1)
+    required_scopes = List.wrap(opts[:required_scopes])
+    required_scope_sets = notification_scope_sets(opts, required_scopes)
 
     allowed =
       matches?(subscription.filter, event) and
@@ -316,7 +318,8 @@ defmodule AttestoMCP.Server.Subscriptions do
             principal: subscription.principal,
             tenant: subscription.tenant,
             event: event,
-            required_scopes: List.wrap(opts[:required_scopes])
+            required_scopes: required_scopes,
+            required_scope_sets: required_scope_sets
           })
         )
 
@@ -354,6 +357,13 @@ defmodule AttestoMCP.Server.Subscriptions do
     Enum.reduce(state.subscriptions, state, fn {_key, subscription}, acc ->
       deliver(acc, subscription.id, subscription, notification, opts)
     end)
+  end
+
+  defp notification_scope_sets(opts, required_scopes) do
+    case Keyword.get(opts, :required_scope_sets) do
+      scope_sets when is_list(scope_sets) and scope_sets != [] -> scope_sets
+      _ -> [required_scopes]
+    end
   end
 
   defp telemetry(state, event, measurements, metadata) do

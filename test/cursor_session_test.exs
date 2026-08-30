@@ -3,6 +3,7 @@ defmodule AttestoMCP.Server.CursorSessionTest do
   alias AttestoMCP.Server.{Cursor, Session}
 
   @cursor_secret_key {Cursor, :secret}
+  @concurrent_fallback_timeout_ms 30_000
 
   test "cursors bind principal and era and expire" do
     cursor = Cursor.issue(42, "alice", "2026-07-28", secret: "test-secret", ttl: 10_000)
@@ -46,32 +47,76 @@ defmodule AttestoMCP.Server.CursorSessionTest do
 
     Application.delete_env(:attesto_mcp_server, :cursor_secret)
     :persistent_term.erase(@cursor_secret_key)
+    task_supervisor = start_supervised!(Task.Supervisor)
     parent = self()
+    barrier = make_ref()
 
     tasks =
       for position <- 1..128 do
-        Task.async(fn ->
-          send(parent, {:cursor_ready, self()})
+        Task.Supervisor.async_nolink(task_supervisor, fn ->
+          send(parent, {barrier, :ready, self()})
 
           receive do
-            :issue_cursor -> Cursor.issue(position, "principal", "2026-07-28")
+            {^barrier, :issue_cursor} -> Cursor.issue(position, "principal", "2026-07-28")
           end
         end)
       end
 
-    task_pids = MapSet.new(tasks, & &1.pid)
-
-    for _ <- tasks do
-      assert_receive {:cursor_ready, pid}, 1_000
-      assert MapSet.member?(task_pids, pid)
-    end
-
-    Enum.each(tasks, &send(&1.pid, :issue_cursor))
-    cursors = Enum.map(tasks, &Task.await(&1, 5_000))
+    deadline = deadline(@concurrent_fallback_timeout_ms)
+    await_task_barrier!(tasks, barrier, deadline)
+    Enum.each(tasks, &send(&1.pid, {barrier, :issue_cursor}))
+    cursors = await_task_results!(tasks, deadline)
 
     Enum.zip(1..128, cursors)
     |> Enum.each(fn {position, cursor} ->
       assert {:ok, ^position} = Cursor.verify(cursor, "principal", "2026-07-28")
     end)
   end
+
+  defp await_task_barrier!(tasks, barrier, deadline) do
+    pending = MapSet.new(tasks, & &1.pid)
+
+    case await_task_barrier(pending, barrier, deadline) do
+      :ok ->
+        :ok
+
+      {:timeout, pending} ->
+        Enum.each(tasks, &Task.shutdown(&1, :brutal_kill))
+        flunk("cursor workers did not reach the barrier: #{MapSet.size(pending)} pending")
+    end
+  end
+
+  defp await_task_barrier(pending, barrier, deadline) do
+    if MapSet.size(pending) == 0 do
+      :ok
+    else
+      receive do
+        {^barrier, :ready, pid} ->
+          await_task_barrier(MapSet.delete(pending, pid), barrier, deadline)
+      after
+        remaining(deadline) -> {:timeout, pending}
+      end
+    end
+  end
+
+  defp await_task_results!(tasks, deadline) do
+    results = Task.yield_many(tasks, remaining(deadline))
+
+    if Enum.any?(results, &match?({_task, nil}, &1)) do
+      Enum.each(results, fn
+        {task, nil} -> Task.shutdown(task, :brutal_kill)
+        _completed -> :ok
+      end)
+
+      flunk("cursor workers exceeded the absolute deadline")
+    end
+
+    Enum.map(results, fn
+      {_task, {:ok, value}} -> value
+      {_task, {:exit, reason}} -> flunk("cursor worker exited: #{inspect(reason)}")
+    end)
+  end
+
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 end

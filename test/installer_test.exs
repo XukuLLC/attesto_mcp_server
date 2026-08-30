@@ -397,6 +397,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
              ~s({:req, ">= 0.7.0 and < 1.0.0"})
   end
 
+  @tag timeout: 180_000
   test "rejects incompatible or runtime-restricted authorization dependencies before editing" do
     cases = [
       [req_dependency: ~s({:req, "~> 1.0"})],

@@ -1,14 +1,27 @@
 defmodule AttestoMCP.Server.Result do
   @moduledoc """
-  Explicit client-visible business failures returned by MCP handlers.
+  Typed MCP result constructors and explicit client-visible business failures.
+
+  `tool/2` and `resource/2` emit canonical string-key maps and validate their
+  complete aggregate against the same bounds used for raw handler output.
+  Protocol-owned `resultType`, cache, and server-identity fields are added by
+  the server after a handler returns.
 
   Arbitrary handler errors and exceptions remain private. Use `error/2` only
   for bounded text and a machine-readable code that are safe to disclose to
   the calling client.
   """
 
+  alias AttestoMCP.Server.{Content, Output}
+
   @max_message_bytes 4_096
   @max_code_bytes 128
+
+  @type tool_result :: %{required(String.t()) => term()}
+  @type resource_result :: %{required(String.t()) => term()}
+  @type tool_option ::
+          {:structured_content, term()} | {:is_error, boolean()} | {:meta, map()}
+  @type resource_option :: {:meta, map()}
 
   defmodule ClientError do
     @moduledoc """
@@ -37,6 +50,42 @@ defmodule AttestoMCP.Server.Result do
     %ClientError{message: message, code: code}
   end
 
+  @doc """
+  Builds a complete tool result from one content block or a list of blocks.
+
+  `:structured_content`, when present, must be a bounded JSON value. `:meta`
+  must be a bounded JSON object. Unknown and duplicate options are rejected.
+  """
+  @spec tool(Content.t() | [Content.t()], [tool_option()]) :: tool_result()
+  def tool(content, opts \\ []) do
+    opts = options!(opts, [:structured_content, :is_error, :meta])
+
+    %{"content" => list_wrap(content)}
+    |> put_options(
+      opts,
+      structured_content: "structuredContent",
+      is_error: "isError",
+      meta: "_meta"
+    )
+    |> tool_result!()
+  end
+
+  @doc """
+  Builds a complete resource result from one resource-content entry or a list.
+
+  The server owns modern cache and result-discrimination fields. Unknown and
+  duplicate options are rejected.
+  """
+  @spec resource(Content.resource_content() | [Content.resource_content()], [resource_option()]) ::
+          resource_result()
+  def resource(contents, opts \\ []) do
+    opts = options!(opts, [:meta])
+
+    %{"contents" => list_wrap(contents)}
+    |> put_options(opts, meta: "_meta")
+    |> resource_result!()
+  end
+
   @doc false
   @spec valid_message?(term()) :: boolean()
   def valid_message?(message) when is_binary(message),
@@ -52,4 +101,38 @@ defmodule AttestoMCP.Server.Result do
     do: byte_size(code) in 1..@max_code_bytes and String.valid?(code)
 
   def valid_code?(_code), do: false
+
+  defp tool_result!(value) do
+    case Output.normalize_tool_result(value) do
+      {:ok, result} -> result
+      {:error, _reason} -> raise ArgumentError, "invalid MCP tool result"
+    end
+  end
+
+  defp resource_result!(value) do
+    case Output.normalize_resource_result(value) do
+      {:ok, result} -> result
+      {:error, _reason} -> raise ArgumentError, "invalid MCP resource result"
+    end
+  end
+
+  defp options!(opts, allowed) do
+    case Output.normalize_options(opts, allowed) do
+      {:ok, opts} -> opts
+      {:error, :invalid_options} -> raise ArgumentError, "invalid or duplicate MCP result option"
+    end
+  end
+
+  defp put_options(map, opts, mapping) do
+    Enum.reduce(mapping, map, fn {option, key}, acc ->
+      case Keyword.fetch(opts, option) do
+        {:ok, nil} when option == :meta -> acc
+        {:ok, value} -> Map.put(acc, key, value)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp list_wrap(value) when is_list(value), do: value
+  defp list_wrap(value), do: [value]
 end

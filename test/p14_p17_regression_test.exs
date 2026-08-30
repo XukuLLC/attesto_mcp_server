@@ -3,10 +3,13 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
 
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Registry
+  alias AttestoMCP.Test.OwnedPort
 
   import ExUnit.CaptureIO
 
   @modern "2026-07-28"
+  @live_stdio_timeout_ms 300_000
+  @port_stop_timeout_ms 30_000
 
   test "registration canonicalizes atom/string fields and rejects conflicting aliases" do
     {:ok, server} = Server.start_link([])
@@ -138,107 +141,119 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
              })
   end
 
-  test "live stdio pipe answers a near-limit frame before the writer closes" do
-    executable = System.find_executable("elixir") || raise "elixir executable not found"
-    script = Path.expand("../examples/stdio.exs", __DIR__)
+  test "owned port cleanup is port-aware and runs only once" do
+    install_dir =
+      Path.join(System.tmp_dir!(), "attesto-mcp-cleanup-#{System.unique_integer([:positive])}")
 
+    File.mkdir_p!(install_dir)
+    on_exit(fn -> File.rm_rf!(install_dir) end)
+
+    executable = System.find_executable("sleep") || raise "sleep executable not found"
+    port = Port.open({:spawn_executable, executable}, [:binary, :exit_status, {:args, [~c"60"]}])
+    monitor = :erlang.monitor(:port, port)
+    process = OwnedPort.capture(port)
+    cleanup = OwnedPort.cleanup(port, monitor, process, install_dir, @port_stop_timeout_ms)
+    on_exit(cleanup)
+
+    Port.close(port)
+    assert_receive {:DOWN, ^monitor, :port, ^port, _reason}, 1_000
+
+    assert :ok = cleanup.()
+    refute File.exists?(install_dir)
+
+    marker = Path.join(install_dir, "second-cleanup-must-not-run")
+    File.mkdir_p!(install_dir)
+    File.write!(marker, "present")
+
+    assert :ok = cleanup.()
+    assert File.read!(marker) == "present"
+  end
+
+  @tag timeout: 350_000
+  test "live stdio pipe answers a near-limit frame before the writer closes" do
     install_dir =
       Path.join(System.tmp_dir!(), "attesto-mcp-live-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(install_dir)
+    {port, monitor, process} = open_stdio_example(install_dir)
+    cleanup = OwnedPort.cleanup(port, monitor, process, install_dir, @port_stop_timeout_ms)
 
-    port =
-      Port.open({:spawn_executable, executable}, [
-        :binary,
-        :exit_status,
-        :use_stdio,
-        {:env, [{~c"MIX_INSTALL_DIR", String.to_charlist(install_dir)}]},
-        {:args, [script]}
-      ])
+    on_exit(cleanup)
 
-    on_exit(fn ->
-      if Port.info(port), do: Port.close(port)
-      File.rm_rf!(install_dir)
-    end)
-
-    request = %{
-      "jsonrpc" => "2.0",
-      "id" => 91,
-      "method" => "server/discover",
-      "params" => %{
-        "_meta" => %{
-          "io.modelcontextprotocol/protocolVersion" => @modern,
-          "io.modelcontextprotocol/clientCapabilities" => %{}
-        },
-        "padding" => String.duplicate("x", 60_000)
+    try do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 91,
+        "method" => "server/discover",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => @modern,
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          },
+          "padding" => String.duplicate("x", 60_000)
+        }
       }
-    }
 
-    assert Port.command(port, Jason.encode!(request) <> "\n")
+      assert Port.command(port, Jason.encode!(request) <> "\n")
 
-    line = receive_port_line(port, "")
-    assert {:ok, response} = Jason.decode(line)
-    assert response["id"] == 91
-    assert response["result"]["resultType"] == "complete"
+      line = receive_port_line(port, "", deadline(@live_stdio_timeout_ms))
+      assert {:ok, response} = Jason.decode(line)
+      assert response["id"] == 91
+      assert response["result"]["resultType"] == "complete"
+    after
+      cleanup.()
+    end
   end
 
+  @tag timeout: 350_000
   test "live stdio pipe recovers after malformed and over-limit lines" do
-    executable = System.find_executable("elixir") || raise "elixir executable not found"
-    script = Path.expand("../examples/stdio.exs", __DIR__)
-
     install_dir =
       Path.join(System.tmp_dir!(), "attesto-mcp-recovery-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(install_dir)
+    {port, monitor, process} = open_stdio_example(install_dir)
+    cleanup = OwnedPort.cleanup(port, monitor, process, install_dir, @port_stop_timeout_ms)
 
-    port =
-      Port.open({:spawn_executable, executable}, [
-        :binary,
-        :exit_status,
-        :use_stdio,
-        {:env, [{~c"MIX_INSTALL_DIR", String.to_charlist(install_dir)}]},
-        {:args, [script]}
-      ])
+    on_exit(cleanup)
 
-    on_exit(fn ->
-      if Port.info(port), do: Port.close(port)
-      File.rm_rf!(install_dir)
-    end)
-
-    valid_request = %{
-      "jsonrpc" => "2.0",
-      "id" => 95,
-      "method" => "server/discover",
-      "params" => %{
-        "_meta" => %{
-          "io.modelcontextprotocol/protocolVersion" => @modern,
-          "io.modelcontextprotocol/clientCapabilities" => %{}
+    try do
+      valid_request = %{
+        "jsonrpc" => "2.0",
+        "id" => 95,
+        "method" => "server/discover",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => @modern,
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          }
         }
       }
-    }
 
-    input = [
-      "not-json\n",
-      String.duplicate("x", 64_001),
-      "\n",
-      Jason.encode!(valid_request),
-      "\n"
-    ]
+      input = [
+        "not-json\n",
+        String.duplicate("x", 64_001),
+        "\n",
+        Jason.encode!(valid_request),
+        "\n"
+      ]
 
-    assert Port.command(port, IO.iodata_to_binary(input))
+      assert Port.command(port, IO.iodata_to_binary(input))
 
-    [malformed_error, oversized_error, response] =
-      port
-      |> receive_port_lines(3, "")
-      |> Enum.map(&Jason.decode!/1)
+      [malformed_error, oversized_error, response] =
+        port
+        |> receive_port_lines(3, "", deadline(@live_stdio_timeout_ms))
+        |> Enum.map(&Jason.decode!/1)
 
-    assert malformed_error["id"] == nil
-    assert malformed_error["error"]["code"] == -32700
-    assert oversized_error["id"] == nil
-    assert oversized_error["error"]["code"] == -32700
-    assert oversized_error["error"]["data"]["reason"] == "message_too_large"
-    assert response["id"] == 95
-    assert response["result"]["resultType"] == "complete"
+      assert malformed_error["id"] == nil
+      assert malformed_error["error"]["code"] == -32700
+      assert oversized_error["id"] == nil
+      assert oversized_error["error"]["code"] == -32700
+      assert oversized_error["error"]["data"]["reason"] == "message_too_large"
+      assert response["id"] == 95
+      assert response["result"]["resultType"] == "complete"
+    after
+      cleanup.()
+    end
   end
 
   test "2025-06-18 initialize is accepted and echoed exactly" do
@@ -299,33 +314,52 @@ defmodule AttestoMCP.Server.P14P17RegressionTest do
     assert response["error"]["code"] == -32601
   end
 
-  defp receive_port_line(port, buffer) do
+  defp open_stdio_example(install_dir) do
+    executable = System.find_executable("elixir") || raise "elixir executable not found"
+    script = Path.expand("../examples/stdio.exs", __DIR__)
+
+    port =
+      Port.open({:spawn_executable, executable}, [
+        :binary,
+        :exit_status,
+        :use_stdio,
+        {:env, [{~c"MIX_INSTALL_DIR", String.to_charlist(install_dir)}]},
+        {:args, [script]}
+      ])
+
+    {port, :erlang.monitor(:port, port), OwnedPort.capture(port)}
+  end
+
+  defp receive_port_line(port, buffer, deadline) do
     case String.split(buffer, "\n", parts: 2) do
       [line, _rest] when line != "" ->
         line
 
       _ ->
         receive do
-          {^port, {:data, data}} -> receive_port_line(port, buffer <> data)
+          {^port, {:data, data}} -> receive_port_line(port, buffer <> data, deadline)
           {^port, {:exit_status, status}} -> flunk("stdio exited before response: #{status}")
         after
-          30_000 -> flunk("stdio live pipe did not answer")
+          remaining(deadline) -> flunk("stdio live pipe did not answer")
         end
     end
   end
 
-  defp receive_port_lines(port, count, buffer) do
+  defp receive_port_lines(port, count, buffer, deadline) do
     if length(:binary.matches(buffer, "\n")) >= count do
       buffer
       |> String.split("\n", trim: true)
       |> Enum.take(count)
     else
       receive do
-        {^port, {:data, data}} -> receive_port_lines(port, count, buffer <> data)
+        {^port, {:data, data}} -> receive_port_lines(port, count, buffer <> data, deadline)
         {^port, {:exit_status, status}} -> flunk("stdio exited before responses: #{status}")
       after
-        30_000 -> flunk("stdio live pipe did not answer")
+        remaining(deadline) -> flunk("stdio live pipe did not answer")
       end
     end
   end
+
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 end

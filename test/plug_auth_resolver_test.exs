@@ -28,6 +28,32 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
       end)
     end
 
+    def runtime_resource_options(fixture) do
+      Agent.get_and_update(fixture, fn state ->
+        options = [
+          config: state.config,
+          replay_check: state.replay_check,
+          htu: &__MODULE__.htu/1,
+          resource: "https://mcp.example.com/mcp"
+        ]
+
+        {options, Map.update!(state, :calls, &(&1 + 1))}
+      end)
+    end
+
+    def runtime_origin_options(fixture) do
+      Agent.get_and_update(fixture, fn state ->
+        options = [
+          config: state.config,
+          replay_check: state.replay_check,
+          htu: &__MODULE__.htu/1,
+          base_url: "https://mcp.example.com"
+        ]
+
+        {options, Map.update!(state, :calls, &(&1 + 1))}
+      end)
+    end
+
     def htu(_conn), do: "https://mcp.example.com/mcp"
 
     def raise_error(fixture) do
@@ -44,6 +70,10 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
 
     def conflicting_options do
       [base_url: "https://other.example.com", config: :configured]
+    end
+
+    def path_origin_options do
+      [issuer: "https://issuer.example", base_url: "https://mcp.example.com/base"]
     end
 
     def noncanonical_assign_options(key),
@@ -214,15 +244,69 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
     assert (request() |> Server.Plug.call(malformed)).status == 500
   end
 
-  test "resolver auth requires a static top-level pin and preserves conflict checks", %{
+  test "resolver auth may pin the canonical resource at runtime and preserves conflict checks", %{
+    config: config,
     server: server
   } do
-    assert_raise ArgumentError, ~r/resolver-backed auth requires a statically pinned/, fn ->
+    assert :ok = Server.register_tool(server, "runtime-resource", %{handler: fn _, _ -> "ok" end})
+
+    replay_check = AttestoMCP.Test.DPoPReplay.callback()
+    fixture = start_fixture(%{calls: 0, config: config, replay_check: replay_check})
+
+    runtime_resource =
       Server.Plug.init(
         server: server,
         path: "/mcp",
-        auth: {Resolver, :invalid_options, []},
-        resource: "/mcp"
+        auth: {Resolver, :runtime_resource_options, [fixture]}
+      )
+
+    metadata =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> Server.Plug.call(runtime_resource)
+
+    assert metadata.status == 200
+    assert Jason.decode!(metadata.resp_body)["resource"] == @resource
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()],
+        audience: @resource
+      )
+
+    response =
+      "runtime-resource"
+      |> request()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> Server.Plug.call(runtime_resource)
+
+    assert response.status == 200
+    assert fixture_calls(fixture) == 2
+
+    deferred_invalid =
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: {Resolver, :invalid_options, []}
+      )
+
+    assert deferred_invalid.auth_opts == nil
+    assert (request() |> Server.Plug.call(deferred_invalid)).status == 500
+
+    path_origin =
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: {Resolver, :path_origin_options, []}
+      )
+
+    assert (request() |> Server.Plug.call(path_origin)).status == 500
+
+    assert_raise ArgumentError, ~r/HTTP origin without a path/, fn ->
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [issuer: "https://issuer.example"],
+        base_url: "https://mcp.example.com/base"
       )
     end
 
@@ -327,6 +411,49 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
                      )
                    end
     end
+  end
+
+  test "resolver auth may derive one canonical resource from a runtime base origin", %{
+    config: config,
+    server: server
+  } do
+    assert :ok = Server.register_tool(server, "runtime-origin", %{handler: fn _, _ -> "ok" end})
+
+    fixture =
+      start_fixture(%{
+        calls: 0,
+        config: config,
+        replay_check: AttestoMCP.Test.DPoPReplay.callback()
+      })
+
+    runtime_origin =
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: {Resolver, :runtime_origin_options, [fixture]}
+      )
+
+    metadata =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> Server.Plug.call(runtime_origin)
+
+    assert metadata.status == 200
+    assert Jason.decode!(metadata.resp_body)["resource"] == @resource
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()],
+        audience: @resource
+      )
+
+    response =
+      "runtime-origin"
+      |> request()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> Server.Plug.call(runtime_origin)
+
+    assert response.status == 200
+    assert fixture_calls(fixture) == 2
   end
 
   test "resolver accepts only external zero-arity callbacks or MFA and remains deferred", %{

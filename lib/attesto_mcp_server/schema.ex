@@ -6,6 +6,7 @@ defmodule AttestoMCP.Server.Schema do
   @max_json_depth 64
   @max_json_nodes 10_000
   @max_json_bytes 2_000_000
+  @max_default_applications 500
   @dialyzer {:nowarn_function,
              unevaluated_properties: 4,
              evaluated_keys: 4,
@@ -38,7 +39,17 @@ defmodule AttestoMCP.Server.Schema do
   @types ~w(null boolean object array number integer string)
   @formats ~w(date date-time duration email hostname ipv4 ipv6 regex time uri uri-reference)
 
-  @doc "Validates a JSON-compatible instance against a bounded schema subset."
+  @doc "Returns the hard byte ceiling used for bounded JSON Schema instances."
+  @spec max_instance_bytes() :: pos_integer()
+  def max_instance_bytes, do: @max_json_bytes
+
+  @doc """
+  Validates the original JSON-compatible instance against a bounded subset.
+
+  JSON Schema `default` values are annotations and are never inserted by this
+  function. Hosts that explicitly want direct property defaults can call
+  `apply_property_defaults/2` before invoking a handler.
+  """
   @spec validate(term(), term()) :: :ok | {:error, term()}
   def validate(_value, nil), do: :ok
   def validate(_value, true), do: :ok
@@ -53,6 +64,36 @@ defmodule AttestoMCP.Server.Schema do
   end
 
   def validate(_, _), do: {:error, :invalid_schema}
+
+  @doc """
+  Applies bounded, direct JSON Schema property defaults and validates the result.
+
+  Only defaults reached through literal `properties` entries are applied. The
+  helper recurses into existing object properties and objects supplied by an
+  explicit property default. It does not infer defaults through references,
+  combinators, conditionals, array items, or pattern properties, and it never
+  creates an absent parent object unless that property declares its own
+  `default`.
+
+  Presence is determined with `Map.has_key?/2`, so `nil`, `false`, zero, and an
+  empty string are never replaced. At most 500 defaults are applied, and the
+  completed value must satisfy the normal depth, node, byte, and schema bounds.
+  Server dispatch never calls this helper automatically.
+  """
+  @spec apply_property_defaults(map(), map() | boolean()) ::
+          {:ok, map()} | {:error, term()}
+  def apply_property_defaults(value, schema) when is_map(value) do
+    with :ok <- validate_schema(schema),
+         :ok <- json_value(value),
+         {:ok, completed, _remaining} <-
+           apply_property_defaults_node(value, schema, @max_default_applications, 0),
+         :ok <- json_value(completed),
+         :ok <- validate(completed, schema) do
+      {:ok, completed}
+    end
+  end
+
+  def apply_property_defaults(_value, _schema), do: {:error, :invalid_instance}
 
   @doc "Checks a schema without validating an instance. No network references are fetched."
   @spec validate_schema(term()) :: :ok | {:error, term()}
@@ -75,6 +116,50 @@ defmodule AttestoMCP.Server.Schema do
     case bounded_json_value(value, 0, @max_json_nodes, 0) do
       {:ok, _nodes, _bytes} -> :ok
       {:error, _} = error -> error
+    end
+  end
+
+  defp apply_property_defaults_node(value, schema, remaining, depth)
+       when is_map(value) and is_map(schema) and depth <= @max_depth do
+    case Map.get(schema, "properties") do
+      properties when is_map(properties) ->
+        Enum.reduce_while(properties, {:ok, value, remaining}, fn {property, property_schema},
+                                                                  {:ok, acc, left} ->
+          apply_property_default(acc, property, property_schema, left, depth)
+        end)
+
+      _other ->
+        {:ok, value, remaining}
+    end
+  end
+
+  defp apply_property_defaults_node(value, _schema, remaining, _depth),
+    do: {:ok, value, remaining}
+
+  defp apply_property_default(value, property, property_schema, remaining, depth) do
+    cond do
+      Map.has_key?(value, property) ->
+        current = Map.fetch!(value, property)
+
+        case apply_property_defaults_node(current, property_schema, remaining, depth + 1) do
+          {:ok, ^current, left} -> {:cont, {:ok, value, left}}
+          {:ok, completed, left} -> {:cont, {:ok, Map.put(value, property, completed), left}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+
+      is_map(property_schema) and Map.has_key?(property_schema, "default") and remaining > 0 ->
+        default = Map.fetch!(property_schema, "default")
+
+        case apply_property_defaults_node(default, property_schema, remaining - 1, depth + 1) do
+          {:ok, completed, left} -> {:cont, {:ok, Map.put(value, property, completed), left}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+
+      is_map(property_schema) and Map.has_key?(property_schema, "default") ->
+        {:halt, {:error, :default_application_limit}}
+
+      true ->
+        {:cont, {:ok, value, remaining}}
     end
   end
 

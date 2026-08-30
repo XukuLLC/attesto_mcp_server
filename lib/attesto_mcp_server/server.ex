@@ -14,10 +14,12 @@ defmodule AttestoMCP.Server do
     Error,
     HostCallback,
     JSONRPC,
+    Output,
     Registry,
     RequestState,
     Result,
     Schema,
+    ScopeMap,
     Session,
     Subscriptions,
     Tasks,
@@ -40,9 +42,6 @@ defmodule AttestoMCP.Server do
     :session_store
   ]
   @max_trace_state_bytes 4096
-  @max_output_depth 64
-  @max_output_nodes 10_000
-  @max_output_bytes 2_000_000
   @max_template_uri_bytes 4_096
   @max_template_value_bytes 2_048
   @max_template_query_pairs 32
@@ -50,6 +49,15 @@ defmodule AttestoMCP.Server do
   @max_resource_subscription_uri_bytes 4_096
   @max_resource_subscriptions_per_session 128
   @max_rate_buckets 10_000
+  @cluster_notification_version 2
+  @legacy_cluster_notification_version 1
+  @max_cluster_resource_scope_sets 8
+  @max_cluster_resource_scopes 128
+  @max_cluster_scope_bytes 256
+  @max_cluster_scopes_bytes 8_192
+  @max_cluster_combined_scope_sets 64
+  @max_cluster_combined_scope_memberships 2_048
+  @max_cluster_combined_scope_bytes 131_072
   @log_levels ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
   @traceparent_pattern ~r/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
   @primitive_types [:tool, :resource, :template, :prompt, :completion]
@@ -122,7 +130,8 @@ defmodule AttestoMCP.Server do
     :rate_buckets,
     :legacy_streams,
     :client_requests,
-    :definitions
+    :definitions,
+    :catalog_revision
   ]
 
   @type context :: map()
@@ -195,6 +204,13 @@ defmodule AttestoMCP.Server do
     do: GenServer.call(server, {:register_all, registrations})
 
   def register_all(_server, _registrations), do: {:error, :invalid_registrations}
+
+  @doc "Atomically replaces the complete primitive catalog from one bounded batch."
+  @spec replace_catalog(pid() | atom(), [Registry.registration()]) :: :ok | {:error, term()}
+  def replace_catalog(server, registrations) when is_list(registrations),
+    do: GenServer.call(server, {:replace_catalog, registrations})
+
+  def replace_catalog(_server, _registrations), do: {:error, :invalid_registrations}
 
   @doc "Returns a deterministic registry snapshot."
   @spec snapshot(pid() | atom()) :: map()
@@ -517,16 +533,25 @@ defmodule AttestoMCP.Server do
     GenServer.call(server, {:cancel_request, principal, request_id, owner})
   end
 
+  @spec publish(pid() | atom(), map(), keyword()) :: :ok | {:error, atom()}
   def publish(server, notification, opts \\ []) do
-    case normalize_public_notification(notification) do
-      {:ok, notification} ->
-        GenServer.call(server, {:publish_notification, notification, opts})
-
+    with {:ok, notification} <- normalize_public_notification(notification),
+         {:ok, opts} <- normalize_public_notification_opts(opts) do
+      GenServer.call(server, {:publish_notification, notification, opts})
+    else
       {:error, reason} = error ->
         Telemetry.execute([:notification, :reject], %{count: 1}, %{reason: reason})
         error
     end
   end
+
+  defp normalize_public_notification_opts([]), do: {:ok, []}
+
+  defp normalize_public_notification_opts([{:authorize, authorize}] = opts)
+       when is_function(authorize, 1),
+       do: {:ok, opts}
+
+  defp normalize_public_notification_opts(_opts), do: {:error, :invalid_options}
 
   defp normalize_public_notification(%{"type" => type} = notification)
        when type in [
@@ -555,8 +580,8 @@ defmodule AttestoMCP.Server do
     notification = catalog_notification(type)
 
     if notification do
-      state = publish_notification_local(state, notification, [])
-      broadcast_cluster_notification(state, notification, [])
+      state = publish_notification_local(state, notification, [], [])
+      broadcast_cluster_notification(state, notification, [], [])
 
       state_telemetry(state, [:cache, :invalidation], %{count: 1}, %{
         method: "catalog",
@@ -737,6 +762,7 @@ defmodule AttestoMCP.Server do
        rate_buckets: %{},
        legacy_streams: %{},
        client_requests: %{},
+       catalog_revision: Registry.revision(registry),
        definitions:
          remember_definitions(
            Map.new(@primitive_types, &{&1, %{}}),
@@ -797,8 +823,9 @@ defmodule AttestoMCP.Server do
   end
 
   def handle_call({:publish_notification, notification, opts}, _from, state) do
-    state = publish_notification_local(state, notification, opts)
-    broadcast_cluster_notification(state, notification, opts)
+    publisher_scope_sets = publisher_notification_scope_sets(state, notification)
+    state = publish_notification_local(state, notification, opts, :local)
+    broadcast_cluster_notification(state, notification, opts, publisher_scope_sets)
     {:reply, :ok, state}
   end
 
@@ -806,11 +833,41 @@ defmodule AttestoMCP.Server do
     case Registry.register_all(state.registry, registrations) do
       {:ok, normalized} ->
         definitions = remember_definitions(state.definitions, normalized)
-        state = %{state | definitions: definitions}
+
+        state = %{
+          state
+          | definitions: definitions,
+            catalog_revision: state.catalog_revision + length(normalized)
+        }
 
         state =
           normalized
           |> registration_invalidations()
+          |> Enum.reduce(state, &publish_catalog_invalidation_state(&2, &1))
+
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:replace_catalog, registrations}, _from, state) do
+    case Registry.replace_all(state.registry, registrations) do
+      {:ok, definitions, affected_types} ->
+        state = %{
+          state
+          | definitions: definitions,
+            catalog_revision:
+              if(affected_types == [],
+                do: state.catalog_revision,
+                else: state.catalog_revision + 1
+              )
+        }
+
+        state =
+          affected_types
+          |> catalog_invalidations()
           |> Enum.reduce(state, &publish_catalog_invalidation_state(&2, &1))
 
         {:reply, :ok, state}
@@ -1303,8 +1360,32 @@ defmodule AttestoMCP.Server do
     {:noreply, publish_legacy(state, notification)}
   end
 
+  def handle_cast({:cluster_publish, envelope}, state) do
+    case cluster_notification(envelope) do
+      {:ok, notification, opts, publisher_scope_sets} ->
+        {:noreply, publish_notification_local(state, notification, opts, publisher_scope_sets)}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
   def handle_cast({:cluster_publish, notification, opts}, state) do
-    {:noreply, publish_notification_local(state, notification, opts)}
+    # Older peers did not send publisher resource scopes. Keep their validated
+    # catalog invalidations working, but never guess at authorization metadata
+    # for resource notifications.
+    case normalize_public_notification(notification) do
+      {:ok, notification} ->
+        with false <- resource_notification?(notification),
+             {:ok, opts} <- validate_cluster_notification_opts(opts) do
+          {:noreply, publish_notification_local(state, notification, opts, [])}
+        else
+          _ -> {:noreply, state}
+        end
+
+      {:error, _reason} ->
+        {:noreply, state}
+    end
   end
 
   def handle_cast({:ack_legacy_stream, stream_ref}, state) do
@@ -1358,7 +1439,7 @@ defmodule AttestoMCP.Server do
       pid == state.registry ->
         case Registry.start_link([]) do
           {:ok, registry} ->
-            case restore_registry(registry, state.definitions) do
+            case restore_registry(registry, state.definitions, state.catalog_revision) do
               :ok ->
                 Telemetry.execute([:supervision, :restart], %{count: 1}, %{
                   method: "registry",
@@ -1581,7 +1662,7 @@ defmodule AttestoMCP.Server do
 
   defp defer_live_detached_completion(state, task_owned, _reason), do: {state, task_owned}
 
-  defp restore_registry(registry, definitions) do
+  defp restore_registry(registry, definitions, revision) do
     registrations =
       Enum.flat_map(@primitive_types, fn type ->
         Enum.map(definitions[type], fn {identity, definition} ->
@@ -1589,10 +1670,7 @@ defmodule AttestoMCP.Server do
         end)
       end)
 
-    case Registry.register_all(registry, registrations) do
-      {:ok, _normalized} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    Registry.restore_all(registry, registrations, revision)
   end
 
   defp remember_definitions(definitions, registrations) do
@@ -1603,6 +1681,12 @@ defmodule AttestoMCP.Server do
 
   defp registration_invalidations(registrations) do
     affected = MapSet.new(registrations, fn {type, _identity, _definition} -> type end)
+
+    catalog_invalidations(affected)
+  end
+
+  defp catalog_invalidations(affected) do
+    affected = MapSet.new(affected)
 
     [
       if(MapSet.member?(affected, :tool), do: :tool),
@@ -1790,8 +1874,6 @@ defmodule AttestoMCP.Server do
       :legacy_keepalive_ms,
       :session_idle_timeout,
       :session_absolute_timeout,
-      :max_body_bytes,
-      :max_message_bytes,
       :cursor_ttl,
       :subscription_timeout
     ]
@@ -1808,6 +1890,22 @@ defmodule AttestoMCP.Server do
         nil -> :ok
         value when is_integer(value) and value >= 0 -> :ok
         _ -> raise ArgumentError, "#{key} must be a non-negative integer"
+      end
+    end)
+
+    Enum.each([:max_body_bytes, :max_message_bytes], fn key ->
+      case Keyword.get(opts, key) do
+        nil ->
+          :ok
+
+        value when is_integer(value) and value > 0 ->
+          if value > Schema.max_instance_bytes() do
+            raise ArgumentError,
+                  "#{key} cannot exceed the #{Schema.max_instance_bytes()}-byte schema-instance ceiling"
+          end
+
+        _ ->
+          raise ArgumentError, "#{key} must be a positive integer"
       end
     end)
 
@@ -1918,20 +2016,7 @@ defmodule AttestoMCP.Server do
     :ok
   end
 
-  defp validate_scope_map!(nil), do: :ok
-
-  defp validate_scope_map!(scope_map) when is_map(scope_map) do
-    valid? =
-      Enum.all?(scope_map, fn {method, scopes} ->
-        valid_scope_map_key?(method) and is_list(scopes) and
-          Enum.all?(scopes, &(is_binary(&1) and byte_size(&1) > 0)) and
-          length(scopes) == length(Enum.uniq(scopes))
-      end)
-
-    if valid?, do: :ok, else: raise(ArgumentError, ":scope_map values must be lists of scopes")
-  end
-
-  defp validate_scope_map!(_), do: raise(ArgumentError, ":scope_map must be a map")
+  defp validate_scope_map!(scope_map), do: ScopeMap.validate!(scope_map)
 
   defp validate_default_scopes!(nil), do: :ok
 
@@ -1944,9 +2029,6 @@ defmodule AttestoMCP.Server do
 
   defp validate_default_scopes!(_scopes),
     do: raise(ArgumentError, ":default_scopes must be a non-empty list of unique scopes")
-
-  defp valid_scope_map_key?(key) when is_binary(key), do: byte_size(key) > 0
-  defp valid_scope_map_key?(_), do: false
 
   defp validate_capabilities!(nil), do: :ok
 
@@ -2933,29 +3015,63 @@ defmodule AttestoMCP.Server do
     _kind, _reason -> {:error, :session_store_unavailable}
   end
 
-  defp publish_notification_local(state, notification, opts) do
-    required_scopes = notification_scopes(state, notification)
+  defp publish_notification_local(state, notification, opts, publisher_scope_sets) do
+    with {:ok, required_scope_sets} <-
+           required_notification_scope_sets(state, notification, publisher_scope_sets) do
+      required_scopes = List.first(required_scope_sets) || []
 
-    :ok =
-      Subscriptions.publish(
-        state.subscriptions,
+      notification_opts =
+        opts
+        |> safe_notification_opts()
+        |> Keyword.put(:required_scope_sets, required_scope_sets)
+        |> Keyword.put(:required_scopes, required_scopes)
+
+      :ok =
+        Subscriptions.publish(
+          state.subscriptions,
+          notification,
+          notification_opts
+        )
+
+      publish_legacy(
+        state,
         notification,
-        Keyword.put(opts, :required_scopes, required_scopes)
+        publisher_scope_sets,
+        notification_authorizer(notification_opts)
       )
-
-    publish_legacy(state, notification)
+    else
+      :error -> state
+    end
   end
 
-  defp broadcast_cluster_notification(%{session_cluster_group: nil}, _notification, _opts),
-    do: :ok
+  defp broadcast_cluster_notification(
+         %{session_cluster_group: nil},
+         _notification,
+         _opts,
+         _publisher_scope_sets
+       ),
+       do: :ok
 
-  defp broadcast_cluster_notification(state, notification, opts) do
-    state.session_cluster_group
-    |> then(&:pg.get_members(@session_pg_scope, &1))
-    |> Enum.each(fn
-      pid when pid != self() -> GenServer.cast(pid, {:cluster_publish, notification, opts})
-      _pid -> :ok
-    end)
+  defp broadcast_cluster_notification(state, notification, opts, publisher_scope_sets) do
+    message =
+      if resource_notification?(notification) do
+        case cluster_notification_envelope(notification, opts, publisher_scope_sets) do
+          {:ok, envelope} -> {:cluster_publish, envelope}
+          :error -> nil
+        end
+      else
+        # Fixed-scope catalog invalidations remain compatible with older peers.
+        {:cluster_publish, notification, cluster_notification_opts(opts)}
+      end
+
+    if message do
+      state.session_cluster_group
+      |> then(&:pg.get_members(@session_pg_scope, &1))
+      |> Enum.each(fn
+        pid when pid != self() -> GenServer.cast(pid, message)
+        _pid -> :ok
+      end)
+    end
 
     :ok
   catch
@@ -3053,37 +3169,50 @@ defmodule AttestoMCP.Server do
     Enum.reduce(refs, state, &remove_legacy_stream(&2, &1))
   end
 
-  defp publish_legacy(state, notification) do
+  defp publish_legacy(
+         state,
+         notification,
+         publisher_scope_sets \\ :local,
+         notification_authorizer \\ nil
+       ) do
     event = legacy_event(notification)
 
-    state.legacy_streams
-    |> Enum.group_by(fn {_ref, stream} -> stream.session_id end)
-    |> Enum.reduce(state, fn {session_id, streams}, acc ->
-      case load_session(acc, session_id) do
-        {:ok, session} ->
-          if Session.valid?(session) and legacy_event_allowed?(event, session) do
-            required_scopes = legacy_event_required_scopes(acc, event)
-
-            case Enum.find(streams, fn {_ref, stream} ->
-                   Process.alive?(stream.sink) and
-                     legacy_authorized?(stream, event, required_scopes)
-                 end) do
-              {stream_ref, _stream} -> send_legacy_stream(acc, stream_ref, event)
-              nil -> acc
+    with {:ok, required_scope_sets} <-
+           legacy_event_required_scope_sets(state, event, publisher_scope_sets) do
+      state.legacy_streams
+      |> Enum.group_by(fn {_ref, stream} -> stream.session_id end)
+      |> Enum.reduce(state, fn {session_id, streams}, acc ->
+        case load_session(acc, session_id) do
+          {:ok, session} ->
+            if Session.valid?(session) and legacy_event_allowed?(event, session) do
+              case Enum.find(streams, fn {_ref, stream} ->
+                     Process.alive?(stream.sink) and
+                       legacy_authorized?(
+                         stream,
+                         event,
+                         required_scope_sets,
+                         notification_authorizer
+                       )
+                   end) do
+                {stream_ref, _stream} -> send_legacy_stream(acc, stream_ref, event)
+                nil -> acc
+              end
+            else
+              if Session.valid?(session),
+                do: acc,
+                else: close_legacy_streams_for_session(acc, session_id, :session_expired)
             end
-          else
-            if Session.valid?(session),
-              do: acc,
-              else: close_legacy_streams_for_session(acc, session_id, :session_expired)
-          end
 
-        {:error, :session_store_unavailable} ->
-          acc
+          {:error, :session_store_unavailable} ->
+            acc
 
-        _ ->
-          close_legacy_streams_for_session(acc, session_id, :session_expired)
-      end
-    end)
+          _ ->
+            close_legacy_streams_for_session(acc, session_id, :session_expired)
+        end
+      end)
+    else
+      :error -> state
+    end
   end
 
   defp send_legacy_stream(state, stream_ref, message) do
@@ -3114,49 +3243,65 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp legacy_authorized?(%{authorize: authorize} = stream, event, required_scopes)
-       when is_function(authorize, 1) do
-    authorize.(%{
+  defp legacy_authorized?(stream, event, required_scope_sets, notification_authorizer)
+       when is_map(stream) do
+    required_scopes = List.first(required_scope_sets) || []
+
+    context = %{
       principal: stream.principal,
       tenant: stream.tenant,
       event: event,
-      required_scopes: required_scopes
-    }) == true
+      required_scopes: required_scopes,
+      required_scope_sets: required_scope_sets
+    }
+
+    [stream[:authorize], notification_authorizer]
+    |> Enum.filter(&is_function(&1, 1))
+    |> Enum.all?(&(&1.(context) == true))
   rescue
     _ -> false
   catch
     _, _ -> false
   end
 
-  defp legacy_authorized?(_, _event, _required_scopes), do: true
-
-  defp legacy_event_required_scopes(state, %{
-         "method" => "notifications/resources/updated",
-         "params" => params
-       })
+  defp legacy_event_required_scope_sets(
+         state,
+         %{
+           "method" => "notifications/resources/updated",
+           "params" => params
+         },
+         publisher_scope_sets
+       )
        when is_map(params) do
     uri = resource_uri(params)
-    definition_scopes = resource_definition_scopes(state, uri)
-    Enum.uniq([AttestoMCP.Scopes.resources_read() | definition_scopes])
+
+    with {:ok, definition_scope_sets} <- resolve_resource_definition_scope_sets(state, uri),
+         {:ok, local_scope_sets} <-
+           prepend_scope_to_sets(AttestoMCP.Scopes.resources_read(), definition_scope_sets) do
+      case publisher_scope_sets do
+        :local -> {:ok, local_scope_sets}
+        scope_sets -> conjoin_cluster_scope_sets(scope_sets, local_scope_sets)
+      end
+    end
   end
 
-  defp legacy_event_required_scopes(_state, %{"method" => method})
+  defp legacy_event_required_scope_sets(_state, %{"method" => method}, _publisher_scope_sets)
        when method == "notifications/tools/list_changed",
-       do: [AttestoMCP.Scopes.tools_read()]
+       do: {:ok, [[AttestoMCP.Scopes.tools_read()]]}
 
-  defp legacy_event_required_scopes(_state, %{"method" => method})
+  defp legacy_event_required_scope_sets(_state, %{"method" => method}, _publisher_scope_sets)
        when method == "notifications/prompts/list_changed",
-       do: [AttestoMCP.Scopes.prompts_read()]
+       do: {:ok, [[AttestoMCP.Scopes.prompts_read()]]}
 
-  defp legacy_event_required_scopes(_state, %{"method" => method})
+  defp legacy_event_required_scope_sets(_state, %{"method" => method}, _publisher_scope_sets)
        when method == "notifications/resources/list_changed",
-       do: [AttestoMCP.Scopes.resources_read()]
+       do: {:ok, [[AttestoMCP.Scopes.resources_read()]]}
 
-  defp legacy_event_required_scopes(_state, _event), do: []
+  defp legacy_event_required_scope_sets(_state, _event, _publisher_scope_sets), do: {:ok, [[]]}
 
-  defp resource_definition_scopes(_state, nil), do: []
+  defp resolve_resource_definition_scope_sets(_state, uri) when not is_binary(uri), do: :error
 
-  defp resource_definition_scopes(state, uri) when is_binary(uri) do
+  defp resolve_resource_definition_scope_sets(state, uri) when is_binary(uri) do
     resources =
       state.definitions
       |> Map.get(:resource, %{})
@@ -3171,27 +3316,417 @@ defmodule AttestoMCP.Server do
 
     case Enum.find(resources, &(&1[:uri] == uri)) do
       definition when is_map(definition) ->
-        definition[:required_scopes] || []
+        definition_scope_sets(definition)
 
       nil ->
-        Enum.find_value(templates, [], fn definition ->
+        Enum.reduce_while(templates, {:ok, [[]]}, fn definition, _acc ->
           case match_uri_template(definition[:uri_template], uri) do
-            {:ok, _params} -> definition[:required_scopes] || []
-            _ -> nil
+            {:ok, _params} -> {:halt, definition_scope_sets(definition)}
+            :error -> {:cont, {:ok, [[]]}}
           end
         end)
     end
   rescue
-    _ -> []
+    _ -> :error
+  catch
+    _, _ -> :error
   end
+
+  defp definition_scope_sets(definition) when is_map(definition) do
+    case Registry.scope_sets(definition) do
+      scope_sets when is_list(scope_sets) and scope_sets != [] -> {:ok, scope_sets}
+      _ -> :error
+    end
+  end
+
+  defp definition_scope_sets(_definition), do: :error
 
   defp notification_scopes(state, %{"type" => type} = notification)
        when type in ["resource", "resourceUpdated", "resourceSubscriptions"] do
     uri = notification["uri"] || notification[:uri]
-    Enum.uniq([AttestoMCP.Scopes.resources_read() | resource_definition_scopes(state, uri)])
+
+    case resolve_resource_definition_scope_sets(state, uri) do
+      {:ok, definition_scope_sets} ->
+        case prepend_scope_to_sets(AttestoMCP.Scopes.resources_read(), definition_scope_sets) do
+          {:ok, [required_scopes | _]} -> required_scopes
+          _ -> []
+        end
+
+      :error ->
+        []
+    end
   end
 
   defp notification_scopes(_state, _notification), do: []
+
+  defp publisher_notification_scope_sets(state, notification) do
+    if resource_notification?(notification) do
+      case resolve_resource_definition_scope_sets(state, resource_notification_uri(notification)) do
+        {:ok, definition_scope_sets} ->
+          case prepend_scope_to_sets(
+                 AttestoMCP.Scopes.resources_read(),
+                 definition_scope_sets
+               ) do
+            {:ok, scope_sets} -> scope_sets
+            :error -> :error
+          end
+
+        :error ->
+          :error
+      end
+    else
+      [[]]
+    end
+  end
+
+  defp required_notification_scope_sets(state, notification, publisher_scope_sets) do
+    if resource_notification?(notification) do
+      with {:ok, definition_scope_sets} <-
+             resolve_resource_definition_scope_sets(
+               state,
+               resource_notification_uri(notification)
+             ),
+           {:ok, local_scope_sets} <-
+             prepend_scope_to_sets(
+               AttestoMCP.Scopes.resources_read(),
+               definition_scope_sets
+             ) do
+        case publisher_scope_sets do
+          :local -> {:ok, local_scope_sets}
+          scope_sets -> conjoin_cluster_scope_sets(scope_sets, local_scope_sets)
+        end
+      end
+    else
+      {:ok, [[]]}
+    end
+  end
+
+  defp prepend_scope_to_sets(scope, scope_sets)
+       when is_binary(scope) and is_list(scope_sets) and scope_sets != [] do
+    scope_sets = Enum.map(scope_sets, &ordered_uniq([scope | &1]))
+
+    if Enum.all?(scope_sets, &is_list/1), do: {:ok, scope_sets}, else: :error
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp prepend_scope_to_sets(_scope, _scope_sets), do: :error
+
+  defp resource_notification?(%{"type" => type})
+       when type in ["resource", "resourceUpdated", "resourceSubscriptions"],
+       do: true
+
+  defp resource_notification?(%{type: type})
+       when type in ["resource", "resourceUpdated", "resourceSubscriptions"],
+       do: true
+
+  defp resource_notification?(_notification), do: false
+
+  defp resource_notification_uri(notification) when is_map(notification),
+    do: notification["uri"] || notification[:uri]
+
+  defp ordered_uniq(values) when is_list(values) do
+    values
+    |> Enum.reduce({[], MapSet.new()}, fn value, {result, seen} ->
+      if MapSet.member?(seen, value),
+        do: {result, seen},
+        else: {[value | result], MapSet.put(seen, value)}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  defp conjoin_cluster_scope_sets(publisher_scope_sets, local_scope_sets) do
+    with {:ok, publisher_scope_sets} <-
+           validate_cluster_resource_scope_sets(publisher_scope_sets),
+         {:ok, local_scope_sets} <- validate_cluster_resource_scope_sets(local_scope_sets) do
+      combined =
+        for publisher_scopes <- publisher_scope_sets,
+            local_scopes <- local_scope_sets do
+          ordered_uniq(publisher_scopes ++ local_scopes)
+        end
+        |> dedupe_scope_sets()
+
+      validate_combined_cluster_scope_sets(combined)
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp dedupe_scope_sets(scope_sets) do
+    scope_sets
+    |> Enum.reduce({[], MapSet.new()}, fn scopes, {result, seen} ->
+      key = Enum.sort(scopes)
+
+      if MapSet.member?(seen, key),
+        do: {result, seen},
+        else: {[scopes | result], MapSet.put(seen, key)}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  defp cluster_notification_envelope(notification, opts, publisher_scope_sets) do
+    with {:ok, resource_scope_sets} <-
+           cluster_resource_scope_set_metadata(notification, publisher_scope_sets) do
+      {:ok,
+       %{
+         version: @cluster_notification_version,
+         notification: notification,
+         opts: cluster_notification_opts(opts),
+         resource_scope_sets: resource_scope_sets
+       }}
+    end
+  end
+
+  defp cluster_notification(
+         %{
+           version: @cluster_notification_version,
+           notification: notification,
+           opts: opts,
+           resource_scope_sets: resource_scope_sets
+         } = envelope
+       )
+       when map_size(envelope) == 4 do
+    with {:ok, notification} <- normalize_public_notification(notification),
+         {:ok, opts} <- validate_cluster_notification_opts(opts),
+         {:ok, resource_scope_sets} <-
+           cluster_resource_scope_set_metadata(notification, resource_scope_sets) do
+      {:ok, notification, opts, resource_scope_sets}
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp cluster_notification(
+         %{
+           version: @legacy_cluster_notification_version,
+           notification: notification,
+           opts: opts,
+           resource_scopes: resource_scopes
+         } = envelope
+       )
+       when map_size(envelope) == 4 do
+    with {:ok, notification} <- normalize_public_notification(notification),
+         {:ok, opts} <- validate_cluster_notification_opts(opts),
+         {:ok, resource_scopes} <-
+           legacy_cluster_resource_scope_metadata(notification, resource_scopes) do
+      {:ok, notification, opts, [resource_scopes]}
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp cluster_notification(_envelope), do: :error
+
+  defp cluster_resource_scope_set_metadata(notification, scope_sets) do
+    if resource_notification?(notification) do
+      validate_cluster_resource_scope_sets(scope_sets)
+    else
+      :error
+    end
+  end
+
+  defp legacy_cluster_resource_scope_metadata(notification, scopes) do
+    if resource_notification?(notification) do
+      with {:ok, scopes} <- validate_cluster_resource_scopes(scopes),
+           true <- List.first(scopes) == AttestoMCP.Scopes.resources_read() do
+        {:ok, scopes}
+      else
+        _ -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp validate_cluster_resource_scope_sets(scope_sets),
+    do:
+      validate_cluster_scope_sets(
+        scope_sets,
+        @max_cluster_resource_scope_sets,
+        @max_cluster_resource_scopes,
+        @max_cluster_scopes_bytes
+      )
+
+  defp validate_combined_cluster_scope_sets(scope_sets),
+    do:
+      validate_cluster_scope_sets(
+        scope_sets,
+        @max_cluster_combined_scope_sets,
+        @max_cluster_combined_scope_memberships,
+        @max_cluster_combined_scope_bytes
+      )
+
+  defp validate_cluster_scope_sets(scope_sets, max_sets, max_memberships, max_bytes) do
+    collect_cluster_scope_sets(
+      scope_sets,
+      0,
+      0,
+      0,
+      %{},
+      [],
+      max_sets,
+      max_memberships,
+      max_bytes
+    )
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp collect_cluster_scope_sets(
+         [],
+         count,
+         _memberships,
+         _bytes,
+         _seen,
+         scope_sets,
+         _max_sets,
+         _max_memberships,
+         _max_bytes
+       )
+       when count > 0,
+       do: {:ok, Enum.reverse(scope_sets)}
+
+  defp collect_cluster_scope_sets(
+         [scopes | rest],
+         count,
+         memberships,
+         bytes,
+         seen,
+         scope_sets,
+         max_sets,
+         max_memberships,
+         max_bytes
+       )
+       when count < max_sets do
+    with {:ok, scopes} <- validate_cluster_resource_scopes(scopes),
+         true <- List.first(scopes) == AttestoMCP.Scopes.resources_read(),
+         next_memberships <- memberships + length(scopes),
+         true <- next_memberships <= max_memberships,
+         next_bytes <- bytes + Enum.sum(Enum.map(scopes, &byte_size/1)),
+         true <- next_bytes <= max_bytes,
+         key <- Enum.sort(scopes),
+         false <- Map.has_key?(seen, key) do
+      collect_cluster_scope_sets(
+        rest,
+        count + 1,
+        next_memberships,
+        next_bytes,
+        Map.put(seen, key, true),
+        [scopes | scope_sets],
+        max_sets,
+        max_memberships,
+        max_bytes
+      )
+    else
+      _ -> :error
+    end
+  end
+
+  defp collect_cluster_scope_sets(
+         _scope_sets,
+         _count,
+         _memberships,
+         _bytes,
+         _seen,
+         _collected,
+         _max_sets,
+         _max_memberships,
+         _max_bytes
+       ),
+       do: :error
+
+  defp validate_cluster_resource_scopes(scopes) do
+    with {:ok, scopes} <-
+           collect_cluster_resource_scopes(scopes, 0, 0, %{}, []),
+         true <- Attesto.Scope.valid_list?(scopes, allow_empty?: true) do
+      {:ok, scopes}
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp collect_cluster_resource_scopes([], _count, _bytes, _seen, scopes),
+    do: {:ok, Enum.reverse(scopes)}
+
+  defp collect_cluster_resource_scopes(
+         [scope | rest],
+         count,
+         bytes,
+         seen,
+         scopes
+       )
+       when count < @max_cluster_resource_scopes do
+    scope_bytes = if is_binary(scope), do: byte_size(scope), else: 0
+    next_bytes = bytes + scope_bytes
+
+    cond do
+      not is_binary(scope) or scope_bytes not in 1..@max_cluster_scope_bytes ->
+        :error
+
+      next_bytes > @max_cluster_scopes_bytes ->
+        :error
+
+      Map.has_key?(seen, scope) ->
+        :error
+
+      true ->
+        copied_scope = :binary.copy(scope)
+
+        collect_cluster_resource_scopes(
+          rest,
+          count + 1,
+          next_bytes,
+          Map.put(seen, copied_scope, true),
+          [copied_scope | scopes]
+        )
+    end
+  end
+
+  defp collect_cluster_resource_scopes(_scopes, _count, _bytes, _seen, _collected),
+    do: :error
+
+  defp safe_notification_opts(opts) do
+    case normalize_public_notification_opts(opts) do
+      {:ok, opts} -> opts
+      {:error, _reason} -> []
+    end
+  end
+
+  defp notification_authorizer(opts) do
+    case Keyword.get(opts, :authorize) do
+      authorize when is_function(authorize, 1) -> authorize
+      _ -> nil
+    end
+  end
+
+  defp cluster_notification_opts(opts), do: safe_notification_opts(opts)
+
+  defp validate_cluster_notification_opts(opts) do
+    case normalize_public_notification_opts(opts) do
+      {:ok, opts} -> {:ok, opts}
+      {:error, _reason} -> :error
+    end
+  end
 
   defp stream_queue_limit(state),
     do: state.opts[:stream_queue_size] || state.opts[:max_queue] || @default_stream_queue
@@ -3275,17 +3810,24 @@ defmodule AttestoMCP.Server do
   defp encode_outcome(id, {:ok, result}, @modern, opts) when is_map(result) do
     result = stamp_server_info(result, opts)
 
-    if Map.has_key?(result, "resultType") do
-      case Schema.validate_modern_result(result) do
-        :ok -> JSONRPC.response(id, result)
-        _ -> JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
-      end
+    with true <- Map.has_key?(result, "resultType"),
+         :ok <- Schema.validate_modern_result(result),
+         {:ok, result} <- canonical_wire_value(result) do
+      JSONRPC.response(id, result)
     else
-      JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
+      _ -> JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
     end
   end
 
-  defp encode_outcome(id, {:ok, result}, _era, _opts), do: JSONRPC.response(id, result)
+  defp encode_outcome(id, {:ok, _result}, @modern, _opts),
+    do: JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
+
+  defp encode_outcome(id, {:ok, result}, _era, _opts) do
+    case canonical_wire_value(result) do
+      {:ok, result} -> JSONRPC.response(id, result)
+      _ -> JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
+    end
+  end
 
   defp encode_outcome(id, {:error, %Error{} = error}, _era, _opts) do
     Telemetry.execute([:protocol, :error], %{count: 1}, %{
@@ -5183,13 +5725,12 @@ defmodule AttestoMCP.Server do
            []
          ) do
       {:ok, result} ->
-        result = canonical_output(result)
-        {values, supplied_total, supplied_more} = completion_values(result)
-        values = if is_list(values), do: Enum.uniq(values), else: values
-
-        if is_list(values) and Enum.all?(values, &is_binary/1) and
-             valid_completion_metadata?(supplied_total, supplied_more) and
-             (is_nil(supplied_total) or supplied_total >= length(values)) do
+        with {:ok, result} <- canonical_wire_value(result),
+             {values, supplied_total, supplied_more} <- completion_values(result),
+             true <- is_list(values) and Enum.all?(values, &is_binary/1),
+             values <- Enum.uniq(values),
+             true <- valid_completion_metadata?(supplied_total, supplied_more),
+             true <- is_nil(supplied_total) or supplied_total >= length(values) do
           emitted = Enum.take(values, 100)
           total = supplied_total || length(values)
           has_more = supplied_more == true or total > length(emitted)
@@ -5201,7 +5742,7 @@ defmodule AttestoMCP.Server do
           {:ok,
            if(era == @modern, do: Map.put(response, "resultType", "complete"), else: response)}
         else
-          {:error, Error.internal(%{"reason" => "invalid_completion_result"})}
+          _ -> {:error, Error.internal(%{"reason" => "invalid_completion_result"})}
         end
 
       {:error, _reason} ->
@@ -5322,9 +5863,10 @@ defmodule AttestoMCP.Server do
   defp require_task_capability(_params, _opts, _era), do: :ok
 
   defp visible?(definition, context) do
-    required = definition[:required_scopes] || []
     scopes = Map.get(context, :scopes, Map.get(context, "scopes", [])) || []
-    scopes_grant?(required, scopes) and authorize_callback(definition[:authorize], context)
+
+    scope_sets_grant?(Registry.scope_sets(definition), scopes) and
+      authorize_callback(definition[:authorize], context)
   end
 
   defp definition_visible?(definition, context, opts) do
@@ -5338,20 +5880,28 @@ defmodule AttestoMCP.Server do
   defp definition_authorized?(definition, opts) do
     case Keyword.get(opts, :definition_authorizer) do
       authorizer when is_function(authorizer, 1) ->
-        required = List.wrap(definition[:required_scopes] || definition["required_scopes"] || [])
-
-        try do
-          authorizer.(required) == :ok
-        rescue
-          _ -> false
-        catch
-          _, _ -> false
-        end
+        definition
+        |> Registry.scope_sets()
+        |> Enum.any?(fn required ->
+          try do
+            authorizer.(required) == :ok
+          rescue
+            _ -> false
+          catch
+            _, _ -> false
+          end
+        end)
 
       _ ->
         true
     end
   end
+
+  defp scope_sets_grant?(scope_sets, granted)
+       when is_list(scope_sets) and scope_sets != [] and is_list(granted),
+       do: Enum.any?(scope_sets, &scopes_grant?(&1, granted))
+
+  defp scope_sets_grant?(_scope_sets, _granted), do: false
 
   defp scopes_grant?([], _granted), do: true
 
@@ -5629,124 +6179,18 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp valid_tool_result?(%{"content" => content} = result) when is_list(content) do
-    json_value?(result) and
-      is_boolean(Map.get(result, "isError", false)) and
-      json_value?(Map.get(result, "structuredContent")) and
-      Enum.all?(content, &valid_content_item?/1)
-  end
+  defp valid_tool_result?(result), do: match?({:ok, _}, Output.normalize_tool_result(result))
 
-  defp valid_tool_result?(_), do: false
+  defp valid_resource_result?(result),
+    do: match?({:ok, _}, Output.normalize_resource_result(result))
 
-  defp valid_resource_result?(%{"contents" => contents}) when is_list(contents),
-    do: Enum.all?(contents, &valid_resource_entry?/1)
+  defp valid_prompt_result?(result),
+    do: match?({:ok, _}, Output.normalize_prompt_result(result))
 
-  defp valid_resource_result?(_), do: false
-
-  defp valid_prompt_result?(%{"messages" => messages}) when is_list(messages) do
-    json_value?(messages) and
-      Enum.all?(messages, fn
-        %{"role" => role, "content" => content}
-        when role in ["user", "assistant"] ->
-          valid_content_item?(content)
-
-        _ ->
-          false
-      end)
-  end
-
-  defp valid_prompt_result?(_), do: false
-
-  defp valid_content_item?(%{"type" => "text", "text" => text} = item) when is_binary(text),
-    do: json_value?(item) and optional_annotations(item, "annotations")
-
-  defp valid_content_item?(%{"type" => type, "data" => data, "mimeType" => mime} = item)
-       when type in ["image", "audio"] and is_binary(data) and is_binary(mime),
-       do:
-         json_value?(item) and valid_base64?(data) and mime != "" and
-           optional_annotations(item, "annotations")
-
-  defp valid_content_item?(%{"type" => "resource_link", "uri" => uri, "name" => name} = item)
-       when is_binary(uri) and is_binary(name),
-       do:
-         json_value?(item) and safe_uri?(uri) and optional_binary(item, "name") and
-           optional_binary(item, "description") and optional_binary(item, "mimeType") and
-           optional_annotations(item, "annotations")
-
-  defp valid_content_item?(%{"type" => "resource", "resource" => resource} = item)
-       when is_map(resource),
-       do:
-         json_value?(item) and optional_annotations(item, "annotations") and
-           valid_resource_item?(resource)
-
-  defp valid_content_item?(_), do: false
-
-  defp valid_resource_item?(resource) when is_map(resource) do
-    if not json_value?(resource) do
-      false
-    else
-      if is_list(resource["contents"]) do
-        Enum.all?(resource["contents"], &valid_resource_content?/1)
-      else
-        valid_resource_content?(resource)
-      end
-    end
-  end
-
-  defp valid_resource_content?(resource) when is_map(resource) do
-    uri = resource["uri"]
-    text = resource["text"]
-    blob = resource["blob"]
-
-    not Map.has_key?(resource, "contents") and is_binary(uri) and safe_uri?(uri) and
-      is_nil(text) != is_nil(blob) and
-      optional_binary(resource, "mimeType") and valid_optional_annotations(resource) and
-      ((is_binary(text) and is_nil(blob)) or (is_binary(blob) and valid_base64?(blob)))
-  end
-
-  defp valid_resource_content?(_), do: false
-
-  defp optional_binary(map, key) when is_map(map) do
-    is_nil(Map.get(map, key)) or is_binary(Map.get(map, key))
-  end
-
-  defp optional_annotations(map, key) when is_map(map) do
-    case Map.fetch(map, key) do
-      :error -> true
-      {:ok, value} -> valid_annotations?(value)
-    end
-  end
-
-  defp valid_optional_annotations(map) when is_map(map),
-    do: optional_annotations(map, "annotations")
-
-  defp valid_annotations?(value) when is_map(value) do
-    json_value?(value) and
-      (is_nil(value["audience"]) or
-         (is_list(value["audience"]) and
-            Enum.all?(value["audience"], &(&1 in ["user", "assistant"])))) and
-      (is_nil(value["priority"]) or
-         (is_number(value["priority"]) and value["priority"] >= 0 and value["priority"] <= 1)) and
-      (is_nil(value["lastModified"]) or is_binary(value["lastModified"])) and
-      Enum.all?(["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"], fn key ->
-        not Map.has_key?(value, key) or is_boolean(value[key])
-      end)
-  end
-
-  defp valid_annotations?(_), do: false
+  defp valid_content_item?(item),
+    do: match?({:ok, _}, Output.normalize_content_item(item))
 
   defp json_value?(value), do: Schema.json_value(value) == :ok
-
-  defp valid_resource_entry?(item), do: valid_resource_content?(item)
-
-  defp valid_base64?(value) when is_binary(value) do
-    case Base.decode64(value) do
-      {:ok, decoded} -> Base.encode64(decoded) == value
-      :error -> false
-    end
-  rescue
-    _ -> false
-  end
 
   defp validate_prompt_call_arguments(definitions, arguments, input_keys)
        when is_list(definitions) and is_map(arguments) do
@@ -5797,26 +6241,7 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp safe_uri?(uri) do
-    if is_binary(uri) and String.valid?(uri) and
-         not String.contains?(uri, ["..", "\\", "\u0000", "\r", "\n"]) do
-      try do
-        parsed = URI.parse(uri)
-        scheme = parsed.scheme
-        host = parsed.host && String.downcase(parsed.host)
-
-        valid_scheme? = is_binary(scheme) and byte_size(scheme) > 0
-        safe_host? = host not in ["localhost", "127.0.0.1", "::1", "0.0.0.0"]
-
-        (valid_scheme? or String.starts_with?(uri, "/")) and
-          is_nil(parsed.userinfo) and safe_host?
-      rescue
-        _ -> false
-      end
-    else
-      false
-    end
-  end
+  defp safe_uri?(uri), do: Output.safe_uri?(uri)
 
   defp capabilities(opts) do
     base = opts[:capabilities] || %{}
@@ -5914,81 +6339,7 @@ defmodule AttestoMCP.Server do
   # reaches a wire encoder must be a bounded JSON value.  Canonicalize only
   # keys (never arbitrary terms) and reject collisions such as :method plus
   # "method" rather than silently dropping one of them.
-  defp canonical_wire_value(value) do
-    case canonical_wire_value_bounded(value, 0, @max_output_nodes, 0) do
-      {:ok, normalized, _left, _used} -> {:ok, normalized}
-      error -> error
-    end
-  end
-
-  defp canonical_wire_value_bounded(_value, depth, nodes, bytes)
-       when depth > @max_output_depth or nodes <= 0 or bytes > @max_output_bytes,
-       do: {:error, :not_json}
-
-  defp canonical_wire_value_bounded(value, depth, nodes, bytes) when is_map(value) do
-    Enum.reduce_while(value, {:ok, %{}, nodes - 1, bytes + 1}, fn {key, nested},
-                                                                  {:ok, acc, left, used} ->
-      with {:ok, key} <- canonical_wire_key(key),
-           key_bytes <- byte_size(key),
-           true <- used + key_bytes <= @max_output_bytes,
-           {:ok, nested, left, used} <-
-             canonical_wire_value_bounded(nested, depth + 1, left, used + key_bytes),
-           false <- Map.has_key?(acc, key) do
-        {:cont, {:ok, Map.put(acc, key, nested), left, used}}
-      else
-        _ -> {:halt, {:error, :not_json}}
-      end
-    end)
-    |> case do
-      {:ok, normalized, left, used} -> {:ok, normalized, left, used}
-      error -> error
-    end
-  end
-
-  defp canonical_wire_value_bounded(value, depth, nodes, bytes) when is_list(value) do
-    Enum.reduce_while(value, {:ok, [], nodes - 1, bytes + 1}, fn item, {:ok, acc, left, used} ->
-      case canonical_wire_value_bounded(item, depth + 1, left, used) do
-        {:ok, item, left, used} -> {:cont, {:ok, [item | acc], left, used}}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, items, left, used} -> {:ok, Enum.reverse(items), left, used}
-      error -> error
-    end
-  end
-
-  defp canonical_wire_value_bounded(value, _depth, nodes, bytes)
-       when is_binary(value) do
-    if String.valid?(value) and bytes + byte_size(value) <= @max_output_bytes,
-      do: {:ok, value, nodes - 1, bytes + byte_size(value)},
-      else: {:error, :not_json}
-  end
-
-  defp canonical_wire_value_bounded(value, _depth, nodes, bytes) when is_integer(value) do
-    scalar_bytes = byte_size(Integer.to_string(value))
-
-    if bytes + scalar_bytes <= @max_output_bytes,
-      do: {:ok, value, nodes - 1, bytes + scalar_bytes},
-      else: {:error, :not_json}
-  end
-
-  defp canonical_wire_value_bounded(value, _depth, nodes, bytes)
-       when is_boolean(value) or is_nil(value),
-       do: {:ok, value, nodes - 1, bytes + 1}
-
-  defp canonical_wire_value_bounded(value, _depth, nodes, bytes) when is_float(value) do
-    if value == value and value <= 1.7976931348623157e308 and
-         value >= -1.7976931348623157e308,
-       do: {:ok, value, nodes - 1, bytes + 8},
-       else: {:error, :not_json}
-  end
-
-  defp canonical_wire_value_bounded(_value, _depth, _nodes, _bytes), do: {:error, :not_json}
-
-  defp canonical_wire_key(key) when is_binary(key), do: {:ok, key}
-  defp canonical_wire_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
-  defp canonical_wire_key(_), do: {:error, :not_json}
+  defp canonical_wire_value(value), do: Output.canonicalize(value)
 
   defp canonical_output(value) do
     case canonical_wire_value(value) do

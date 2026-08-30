@@ -92,6 +92,32 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
     assert reports_response["scopes_supported"] == ["reports.read"]
   end
 
+  test "definition alternatives do not replace the configured narrow metadata scope", %{
+    server: server
+  } do
+    assert :ok =
+             Server.register_tool(server, "metadata-scope", %{
+               required_scopes: ["records.read"],
+               alternative_scope_sets: [["records.admin"]]
+             })
+
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        scopes_supported: ["records.read"],
+        auth: [issuer: "https://issuer.example", resource: "https://api.example/mcp"]
+      )
+
+    response =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(state)
+      |> Map.fetch!(:resp_body)
+      |> Jason.decode!()
+
+    assert response["scopes_supported"] == ["records.read"]
+  end
+
   test "metadata keeps the generic default and rejects conflicting scope declarations", %{
     server: server
   } do

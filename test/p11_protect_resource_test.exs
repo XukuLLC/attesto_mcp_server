@@ -6,6 +6,8 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
 
   alias AttestoMCP.Server
 
+  @concurrent_fallback_timeout_ms 30_000
+
   setup do
     {:ok, server} =
       DynamicSupervisor.start_child(
@@ -73,7 +75,7 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
   end
 
   test "a path-only audience without a pinned origin is rejected", %{server: server} do
-    assert_raise ArgumentError, ~r/auth must pin/, fn ->
+    assert_raise ArgumentError, ~r/resource_audience must be an absolute URL/, fn ->
       AttestoMCP.Server.Plug.init(
         server: server,
         path: "/mcp",
@@ -224,9 +226,19 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
         else: :persistent_term.erase(secret_key)
     end)
 
+    task_supervisor = start_supervised!(Task.Supervisor)
+    parent = self()
+    barrier = make_ref()
+
     tasks =
       for index <- 1..64 do
-        Task.async(fn ->
+        Task.Supervisor.async_nolink(task_supervisor, fn ->
+          send(parent, {barrier, :ready, self()})
+
+          receive do
+            {^barrier, :issue} -> :ok
+          end
+
           token =
             AttestoMCP.Server.RequestState.issue(
               "principal-#{index}",
@@ -234,7 +246,7 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
               "2026-07-28",
               "tools/call",
               %{"index" => index},
-              ttl: 5_000,
+              ttl: @concurrent_fallback_timeout_ms * 2,
               consume: false
             )
 
@@ -242,7 +254,10 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
         end)
       end
 
-    tokens = Enum.map(tasks, &Task.await(&1, 5_000))
+    deadline = deadline(@concurrent_fallback_timeout_ms)
+    await_task_barrier!(tasks, barrier, deadline)
+    Enum.each(tasks, &send(&1.pid, {barrier, :issue}))
+    tokens = await_task_results!(tasks, deadline)
     assert length(tokens) == 64
 
     for {token, index} <- Enum.zip(tokens, 1..64) do
@@ -348,4 +363,54 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
       eventually(fun, attempts - 1)
     end
   end
+
+  defp await_task_barrier!(tasks, barrier, deadline) do
+    pending = MapSet.new(tasks, & &1.pid)
+
+    case await_task_barrier(pending, barrier, deadline) do
+      :ok ->
+        :ok
+
+      {:timeout, pending} ->
+        Enum.each(tasks, &Task.shutdown(&1, :brutal_kill))
+
+        flunk(
+          "concurrent fallback workers did not reach the barrier: #{MapSet.size(pending)} pending"
+        )
+    end
+  end
+
+  defp await_task_barrier(pending, barrier, deadline) do
+    if MapSet.size(pending) == 0 do
+      :ok
+    else
+      receive do
+        {^barrier, :ready, pid} ->
+          await_task_barrier(MapSet.delete(pending, pid), barrier, deadline)
+      after
+        remaining(deadline) -> {:timeout, pending}
+      end
+    end
+  end
+
+  defp await_task_results!(tasks, deadline) do
+    results = Task.yield_many(tasks, remaining(deadline))
+
+    if Enum.any?(results, &match?({_task, nil}, &1)) do
+      Enum.each(results, fn
+        {task, nil} -> Task.shutdown(task, :brutal_kill)
+        _completed -> :ok
+      end)
+
+      flunk("concurrent fallback workers exceeded the absolute deadline")
+    end
+
+    Enum.map(results, fn
+      {_task, {:ok, value}} -> value
+      {_task, {:exit, reason}} -> flunk("concurrent fallback worker exited: #{inspect(reason)}")
+    end)
+  end
+
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 end

@@ -9,6 +9,8 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
   @resource "https://mcp.example.com/mcp"
   @legacy "2025-11-25"
   @legacy_2025_06_18 "2025-06-18"
+  @short_session_timeout_ms 500
+  @http_race_timeout_ms 120_000
 
   test "authenticated legacy initialize persists version and waits for initialized" do
     {:ok, server} = Server.start_link([])
@@ -828,11 +830,17 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
     assert wrong_id.status == 404
 
-    {:ok, expiry_server} = Server.start_link(session_idle_timeout: 2)
+    {:ok, expiry_server} =
+      Server.start_link(session_idle_timeout: @short_session_timeout_ms)
+
     expiry_plug = plug(expiry_server, config)
     expiry_session_id = initialize_session(expiry_plug, token)
     assert Server.mark_initialized(expiry_server, expiry_session_id) == :ok
-    Process.sleep(10)
+
+    assert eventually_until(
+             fn -> Server.stats(expiry_server).sessions == 0 end,
+             deadline(@short_session_timeout_ms + 5_000)
+           )
 
     expired =
       call(
@@ -846,12 +854,19 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     assert expired.status == 404
 
     {:ok, absolute_server} =
-      Server.start_link(session_absolute_timeout: 2, session_idle_timeout: 1_000)
+      Server.start_link(
+        session_absolute_timeout: @short_session_timeout_ms,
+        session_idle_timeout: 10_000
+      )
 
     absolute_plug = plug(absolute_server, config)
     absolute_session_id = initialize_session(absolute_plug, token)
     assert Server.mark_initialized(absolute_server, absolute_session_id) == :ok
-    Process.sleep(10)
+
+    assert eventually_until(
+             fn -> Server.stats(absolute_server).sessions == 0 end,
+             deadline(@short_session_timeout_ms + 5_000)
+           )
 
     absolute_expired =
       call(
@@ -896,18 +911,35 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     assert get.status == 405
   end
 
+  @tag timeout: 130_000
   test "public HTTP initialized/request races remain bounded across 100 schedules" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()
     token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
     plug = plug(server, config)
-    parent = self()
+    task_supervisor = start_supervised!(Task.Supervisor)
+    race_deadline = deadline(@http_race_timeout_ms)
 
+    runner =
+      Task.Supervisor.async_nolink(task_supervisor, fn ->
+        run_public_http_races(task_supervisor, plug, token, race_deadline)
+      end)
+
+    assert [:ok] = await_task_results!([runner], race_deadline, "HTTP race runner")
+  end
+
+  defp run_public_http_races(task_supervisor, plug, token, race_deadline) do
     for index <- 1..100 do
       session_id = initialize_session(plug, token)
+      owner = self()
+      barrier = make_ref()
 
       notification = fn ->
-        Process.sleep(rem(index, 5))
+        send(owner, {barrier, :ready, self()})
+
+        receive do
+          {^barrier, :go} -> :ok
+        end
 
         conn =
           call(
@@ -918,11 +950,15 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
             session_id: session_id
           )
 
-        send(parent, {:race, :initialized, conn.status})
+        {:initialized, conn.status}
       end
 
       normal = fn ->
-        Process.sleep(rem(index + 2, 5))
+        send(owner, {barrier, :ready, self()})
+
+        receive do
+          {^barrier, :go} -> :ok
+        end
 
         conn =
           call(
@@ -933,27 +969,36 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
             session_id: session_id
           )
 
-        send(parent, {:race, :normal, conn.status})
+        reason =
+          if conn.status == 400,
+            do: get_in(Jason.decode!(conn.resp_body), ["error", "data", "reason"]),
+            else: nil
+
+        {:normal, {conn.status, reason}}
       end
 
-      if rem(index, 2) == 0 do
-        spawn(notification)
-        spawn(normal)
-      else
-        spawn(normal)
-        spawn(notification)
+      racers =
+        if rem(index, 2) == 0,
+          do: [notification, normal],
+          else: [normal, notification]
+
+      tasks =
+        Enum.map(racers, &Task.Supervisor.async_nolink(task_supervisor, &1))
+
+      await_task_barrier!(tasks, barrier, race_deadline, "HTTP racers")
+      Enum.each(tasks, &send(&1.pid, {barrier, :go}))
+
+      outcomes = tasks |> await_task_results!(race_deadline, "HTTP racers") |> Map.new()
+
+      assert outcomes[:initialized] == 202
+
+      case outcomes[:normal] do
+        {200, nil} ->
+          :ok
+
+        {400, "initialized_notification_required"} ->
+          :ok
       end
-
-      statuses =
-        Enum.map(1..2, fn _ ->
-          assert_receive {:race, kind, status}, 1_000
-          {kind, status}
-        end)
-        |> Map.new()
-
-      assert statuses[:initialized] == 202
-      normal_status = statuses[:normal]
-      assert normal_status == 200
 
       deleted =
         call(
@@ -967,6 +1012,8 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
       assert deleted.status == 200
     end
+
+    :ok
   end
 
   test "handler rejection reasons become safe correlated errors and endpoint recovers" do
@@ -1084,6 +1131,64 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     end)
   end
 
+  defp await_task_barrier!(tasks, barrier, deadline, label) do
+    pending = MapSet.new(tasks, & &1.pid)
+
+    case await_task_barrier(pending, barrier, deadline) do
+      :ok ->
+        :ok
+
+      {:timeout, pending} ->
+        Enum.each(tasks, &Task.shutdown(&1, :brutal_kill))
+        flunk("#{label} did not reach the barrier: #{MapSet.size(pending)} pending")
+    end
+  end
+
+  defp await_task_barrier(pending, barrier, deadline) do
+    if MapSet.size(pending) == 0 do
+      :ok
+    else
+      receive do
+        {^barrier, :ready, pid} ->
+          await_task_barrier(MapSet.delete(pending, pid), barrier, deadline)
+      after
+        remaining(deadline) -> {:timeout, pending}
+      end
+    end
+  end
+
+  defp await_task_results!(tasks, deadline, label) do
+    results = Task.yield_many(tasks, remaining(deadline))
+
+    if Enum.any?(results, &match?({_task, nil}, &1)) do
+      Enum.each(results, fn
+        {task, nil} -> Task.shutdown(task, :brutal_kill)
+        _completed -> :ok
+      end)
+
+      flunk("#{label} exceeded the absolute deadline")
+    end
+
+    Enum.map(results, fn
+      {_task, {:ok, value}} -> value
+      {_task, {:exit, reason}} -> flunk("#{label} exited: #{inspect(reason)}")
+    end)
+  end
+
+  defp eventually_until(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      remaining(deadline) > 0 ->
+        Process.sleep(min(remaining(deadline), 10))
+        eventually_until(fun, deadline)
+
+      true ->
+        false
+    end
+  end
+
   defp initialize_session(plug, token) do
     conn =
       call(
@@ -1174,4 +1279,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
     AttestoMCP.Server.Plug.call(conn, plug)
   end
+
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 end

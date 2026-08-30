@@ -63,4 +63,7 @@ AttestoMCP.StdioExample.Boot.install!()
     handler: fn params, _context -> {:ok, params} end
   })
 
-AttestoMCP.Server.Stdio.run(server, context: %{principal: "stdio-example", tenant: "local"})
+AttestoMCP.Server.Stdio.run(server,
+  context: %{principal: "stdio-example", tenant: "local"},
+  eof_grace_ms: 5_000
+)

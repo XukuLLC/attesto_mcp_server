@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.Stdio do
   @moduledoc "Line-delimited stdio adapter over the shared protocol core."
 
-  alias AttestoMCP.Server.{Error, JSONRPC, Telemetry}
+  alias AttestoMCP.Server.{Error, JSONRPC, Schema, Telemetry}
 
   @legacy "2025-11-25"
   @legacy_versions [@legacy, "2025-06-18"]
@@ -21,6 +21,15 @@ defmodule AttestoMCP.Server.Stdio do
     Telemetry.execute([:stdio, :start], %{system_time: System.system_time()}, %{transport: :stdio})
 
     context = Keyword.get(opts, :context, stdio_context(opts))
+    # The default stays conservative because the live-pipe fallback reads one
+    # byte at a time to guarantee prompt newline delivery without retaining an
+    # unterminated peer frame. Hosts handling larger bounded frames must opt in.
+    max = Keyword.get(opts, :max_message_bytes, 64_000)
+
+    unless is_integer(max) and max > 0 and max <= Schema.max_instance_bytes() do
+      raise ArgumentError,
+            ":max_message_bytes must be between 1 and #{Schema.max_instance_bytes()}"
+    end
 
     {:ok, legacy_session} =
       AttestoMCP.Server.new_session(
@@ -30,10 +39,6 @@ defmodule AttestoMCP.Server.Stdio do
       )
 
     context = Map.put(context, :legacy_session_id, legacy_session.id)
-    # The default stays conservative because the live-pipe fallback reads one
-    # byte at a time to guarantee prompt newline delivery without retaining an
-    # unterminated peer frame. Hosts handling larger bounded frames must opt in.
-    max = Keyword.get(opts, :max_message_bytes, 64_000)
     parent = self()
     input = Keyword.get(opts, :input, fn -> read_bounded_frame(max) end)
 

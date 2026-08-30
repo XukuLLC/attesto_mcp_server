@@ -1,5 +1,8 @@
 # Usage and deployment
 
+For a checklist that maps an existing catalog and deployment onto this
+package, start with the [migration runbook](migration.md).
+
 ## Phoenix installation
 
 `attesto_mcp_server` owns the protected-resource protocol boundary. In a host
@@ -254,12 +257,18 @@ for unrelated upstream state.
 
 For advanced runtime integration, `:auth` may be an external zero-arity
 function or an MFA whose arguments are portable compile-time literals. The
-resolver must return a keyword list. Keep `:resource`/`:resource_audience` or
-`:base_url`/`:origin` pinned in the Plug's top-level options; runtime results
-cannot replace the mounted resource path or the boundary's canonical assign
-keys, and cannot enable non-header bearer-token locations. Resolution is
-deferred until an applicable request and failures return a generic 500
-response.
+resolver must return a keyword list. It may supply the canonical absolute
+`:resource`/`:resource_audience` or `:base_url`/`:origin` after runtime
+configuration has loaded. The value is validated on every applicable request:
+its path must exactly match the mounted Plug path, paired resource and origin
+values must agree, and only an `http` or `https` URL without user information,
+query, or fragment is accepted. The same resolved identifier drives RFC 9728
+metadata and token-audience verification. A static top-level pin remains
+supported and cannot conflict with a resolver result. Runtime results cannot
+replace the mounted resource path or canonical assign keys, and cannot enable
+non-header bearer-token locations. Resolution failure produces a generic 500
+response. `allow_dynamic_origin` remains only for explicitly local development;
+do not derive a production audience from an untrusted request Host header.
 
 The package requires `attesto_mcp ~> 1.2.1` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
@@ -267,15 +276,16 @@ directly. There is no sibling-path or pre-1.2 authentication fallback.
 
 Per-delivery subscription reauthorization requires an executable
 `%Attesto.Config{}` through `auth: [config: ...]`. It re-verifies the captured
-access token's validity, audience, sender binding, and required scopes before
-modern or legacy event delivery. Comparisons with the opening token actor,
-principal, and tenant preserve the authenticated stream's ownership snapshot;
-they do not re-run host policy. Host revocation and principal callbacks run
-when the stream is authenticated, not inside shared publish processes; a later
-host-policy change applies on the next request or reconnect. An `issuer:`
-without a verifier configuration is metadata-only: it may serve RFC 9728
-metadata, but protected traffic fails closed until the host supplies an
-executable Attesto configuration.
+access token's validity, audience, sender binding, applicable scopes, and any
+matched resource definition scopes before modern or legacy
+subscription-notification delivery.
+Comparisons with the opening token actor, principal, and tenant preserve the
+authenticated stream's ownership snapshot; they do not re-run host policy.
+Host revocation and principal callbacks run when the stream is authenticated,
+not inside shared publish processes; a later host-policy change applies on the
+next request or reconnect. An `issuer:` without a verifier configuration is
+metadata-only: it may serve RFC 9728 metadata, but protected traffic fails
+closed until the host supplies an executable Attesto configuration.
 
 ### Handler notifications and logging
 
@@ -336,20 +346,29 @@ truthful `total`/`hasMore` metadata.
 Callback inputs are deliberately explicit and primitive-specific:
 
 ```elixir
+alias AttestoMCP.Server.{Content, Result}
+
 # Tool
 handler: fn %{"left" => left, "right" => right}, _context ->
-  {:ok, %{"total" => left + right}}
+  total = left + right
+
+  {:ok,
+   Result.tool(Content.text("total: #{total}"),
+     structured_content: %{"total" => total}
+   )}
 end
 
 # Prompt whose definition declares "topic" as required
 handler: fn %{name: "review", arguments: %{"topic" => topic}}, _context ->
-  {:ok,
-   [%{"role" => "user", "content" => %{"type" => "text", "text" => topic}}]}
+  {:ok, [Content.prompt_message(:user, Content.text(topic))]}
 end
 
 # Resource or resource template
 handler: fn %{uri: uri, params: template_params}, _context ->
-  {:ok, [%{"uri" => uri, "text" => inspect(template_params)}]}
+  {:ok,
+   Result.resource(
+     Content.resource_text(uri, inspect(template_params), mime_type: "text/plain")
+   )}
 end
 
 # Completion
@@ -372,6 +391,44 @@ they reach the wire. Supported content includes text, Base64 image/audio,
 resource links, embedded resources, and structured tool output. Malformed
 handler output is converted to a safe protocol failure or `isError` tool
 result; business and upstream failures remain ordinary MCP error results.
+`AttestoMCP.Server.Content` constructs individual content and prompt values;
+`AttestoMCP.Server.Result.tool/2` and `resource/2` construct complete results.
+They emit canonical string-key maps, apply the same bounded validation as the
+wire path, and reject unknown or duplicate options. Image, audio, and blob
+arguments must already be canonical padded Base64. Valid handwritten maps
+remain supported for extensions.
+
+The server rechecks the complete result after adding `resultType`, cache
+metadata, and server identity. A constructor value at the standalone ceiling
+can therefore be refused when server-owned fields would make the final result
+too large. Legacy results receive the same final aggregate check.
+
+`AttestoMCP.Server.Schema.validate/2` treats JSON Schema `default` as an
+annotation and never changes the original request. A handler may explicitly
+call `Schema.apply_property_defaults/2` for optional direct properties:
+
+```elixir
+schema = %{
+  "type" => "object",
+  "properties" => %{
+    "format" => %{"type" => "string", "default" => "summary"}
+  }
+}
+
+handler: fn arguments, _context ->
+  with {:ok, arguments} <- AttestoMCP.Server.Schema.apply_property_defaults(arguments, schema) do
+    {:ok, AttestoMCP.Server.Result.tool(AttestoMCP.Server.Content.text(arguments["format"]))}
+  end
+end
+```
+
+The helper applies at most 500 defaults, never replaces a present value, and
+validates the completed object. It follows only literal `properties`, recursing
+into existing objects or an object supplied by an explicit property default;
+it does not infer values through references, combinators, conditionals, array
+items, or pattern properties. Dispatch never invokes it automatically, and a
+required property must pass the registered input schema before the handler can
+run.
 
 For deliberately client-visible business failures, return:
 
@@ -437,9 +494,33 @@ Attesto scopes. Use `authorize` for host business rules that need the
 authenticated context or `context.host_context`. When they are combined, every
 applicable check must permit access.
 
+`alternative_scope_sets` adds bounded alternatives to the primary all-of
+`required_scopes` clause. Any one complete clause permits the definition; a
+partial clause never does. For example:
+
+```elixir
+required_scopes: ["documents.read"],
+alternative_scope_sets: [
+  ["documents.admin"],
+  ["workspace.read", "documents.execute"]
+]
+```
+
+The primary clause must be non-empty when alternatives are present. Each
+alternative is non-empty and duplicate-free, and clauses that differ only by
+member order are duplicates. Registration accepts at most seven alternatives,
+128 total scope memberships across all clauses, 8,192 aggregate scope bytes,
+and 256 bytes per scope. Catalog filtering, selected lookups, templates,
+subscription scope snapshots, and both protocol eras use the same clauses.
+`authorize` is called once only after a clause succeeds. RFC 9728
+`scopes_supported` remains host-configured, so advertise the meaningful narrow
+scope clients should normally request rather than automatically exposing every
+alternative.
+
 Subscriptions are outside this callback contract. Establishment does not
-consult a resource definition's `authorize`, and delivery reauthorization
-checks the captured identity, sender binding, and required scopes rather than
+consult a resource definition's `authorize`, and subscription-notification
+delivery reauthorization checks the captured identity, sender binding,
+applicable scopes, and any matched resource definition scopes rather than
 re-running host business policy. Apply changed host policy on the next request
 or reconnect, and do not rely on `authorize` to suppress subscription updates.
 
@@ -458,6 +539,23 @@ defaults; absent or empty entries use `default_scopes` when configured and
 otherwise retain the fail-closed HTTP defaults. For
 `completion/complete`, one explicit method entry governs both prompt and
 resource references; without it, each reference uses its category read scope.
+The map accepts only the request methods implemented by this release:
+`server/discover`, `initialize`, `ping`, `logging/setLevel`, `tools/list`,
+`tools/call`, `resources/list`, `resources/templates/list`, `resources/read`,
+`resources/subscribe`, `resources/unsubscribe`, `prompts/list`, `prompts/get`,
+`completion/complete`, and `subscriptions/listen`. Notification names, task
+methods, atom keys, and arbitrary extension methods are rejected. Each method
+has at most 128 unique scopes, each scope is at most 256 bytes, and per-method
+and aggregate byte limits are enforced during initialization.
+
+`max_body_bytes` bounds the HTTP body and `max_message_bytes` bounds JSON-RPC
+decoding (and the complete stdio frame). Both must be positive and no greater
+than the schema instance ceiling returned by
+`AttestoMCP.Server.Schema.max_instance_bytes/0`, currently 2,000,000 bytes.
+The HTTP defaults are 2,000,000 body bytes and 1,000,000 message bytes. This
+keeps transport acceptance consistent with the bounded JSON value validator;
+raising either option above the effective schema ceiling is rejected during
+initialization.
 
 For hosts that issue definition scopes instead of generic method grants, add an
 explicit Plug-only `scope_policy`:
@@ -486,12 +584,16 @@ restarted servers. A definition with `required_scopes: []` is authenticated-only
 only on an explicitly policy-mapped method; defaults and empty-map methods keep
 requiring their generic scope.
 
-Subscriptions are deliberately outside this policy map. Their opening
-authorization uses the configured host default in place of category defaults,
-unless an explicit `subscriptions/listen` method entry takes precedence. An
-explicit `subscription_scopes` list is always additive. Without a host default,
-opening retains the generic category scopes. Delivery reauthorizes
-the captured principal and tenant with generic plus matched definition scopes.
+Subscriptions are deliberately outside this policy map. Modern
+`subscriptions/listen` opening uses configured `default_scopes` instead of
+generic category scopes when no non-empty method entry exists. A non-empty
+`scope_map["subscriptions/listen"]` entry is additive to the generic category
+scopes, and `subscription_scopes` are always additive. Modern delivery
+reauthorizes the captured principal and tenant with that opening union plus its
+notification requirements; resource updates also require the generic resource
+scope and any matched definition scopes. Legacy subscription-notification
+delivery reauthorizes catalog events with their generic category scope;
+resource-update notifications also require any matched definition scopes.
 Legacy resource subscriptions per session and modern resource filters per
 subscription have fixed defensive bounds of 128 unique URIs and 4,096 bytes
 per URI. Repeating an existing legacy subscription is idempotent,
@@ -516,6 +618,16 @@ server's `:registrations` option to make the complete catalog available before
 `start_link/1` returns. Named server child specs use the registered name as the
 supervision ID, allowing multiple independently named servers under one
 supervisor.
+
+`AttestoMCP.Server.replace_catalog/2` validates at most 1,000 tuples and then
+atomically replaces every primitive category, so definitions omitted from the
+batch are removed. A failed replacement leaves the prior definitions, revision,
+and notifications untouched. An identical replacement is a no-op. A changed
+replacement advances the catalog revision once and emits one list-changed
+notification for each affected advertised catalog category. Resources and
+templates share one category; completion-only changes emit none. Keep the
+host's generated or persisted catalog as the source of truth; this API does not
+introduce a second catalog store.
 
 `telemetry_metadata` is a map of at most 16 bounded scalar dimensions. Reserved
 protocol keys cannot be replaced. Handler spans include the registered
@@ -545,7 +657,9 @@ cannot reach their backend.
 
 For multiple Erlang nodes, add `session_clustered: true` with a genuinely
 shared adapter and explicit namespace. Requests on any peer can load the same
-session, and publishes fan out asynchronously once to each live peer. Use a
+session, and publishes fan out asynchronously once to each live peer. In
+0.12.0, peer catalog drift cannot reduce publisher-required scopes; drain mixed
+old/new clusters rather than rely on them for resource notifications. Use a
 globally unique namespace when unrelated deployments share the store or Erlang
 cluster. Streams remain local processes and reopen after failover; event replay
 and exactly-once delivery across a network partition are not promised.
@@ -601,9 +715,14 @@ request ID is the subscription ID. The stream begins with
 actual MCP method and carries the ID under
 `params._meta["io.modelcontextprotocol/subscriptionId"]`. Delivery is bounded,
 filtered, and reauthorized for the subscription owner. Protected HTTP opens
-require the union of the configured subscription scope(s) and the category
-scopes: `tools_read`, `prompts_read`, and/or `resources_read`; the same union is
-checked again before each delivery.
+require configured `default_scopes` plus additive `subscription_scopes` when no
+non-empty method entry exists. Without host defaults, the requested generic
+category scopes are used instead. A non-empty
+`scope_map["subscriptions/listen"]` entry requires the requested generic
+category scopes plus the method entry and `subscription_scopes`. Modern
+delivery rechecks that opening union plus its notification requirements;
+resource updates also require `resources_read` and any matched definition
+scopes.
 
 Modern tool, resource, and prompt handlers may return `{:input_required,
 requests}` where `requests` is a map of unique server keys to real

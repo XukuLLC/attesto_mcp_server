@@ -13,14 +13,16 @@ defmodule AttestoMCP.Server.Plug do
   `:auth` accepts either a keyword list or a zero-arity remote callback/MFA
   returning one. Resolver-backed authentication is evaluated for every
   applicable MCP or metadata request, so runtime authorization configuration
-  is not captured by router compilation. It requires a canonical resource or
-  origin in the Plug's top-level options and may not replace the boundary's
-  canonical assign keys; resolver failures fail the request closed.
+  is not captured by router compilation. The trusted resolver may supply the
+  canonical resource or origin at runtime; it is checked against the configured
+  Plug path and reused for metadata and audience verification. A resolver may
+  not replace the boundary's canonical assign keys, and failures fail the
+  request closed.
   """
   import Plug.Conn
 
   alias AttestoMCP.Server
-  alias AttestoMCP.Server.{Error, HostCallback, JSONRPC, Telemetry}
+  alias AttestoMCP.Server.{Error, HostCallback, JSONRPC, Schema, ScopeMap, Telemetry}
 
   @behaviour Plug
   @modern "2026-07-28"
@@ -183,23 +185,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp validate_path!(_), do: raise(ArgumentError, ":path must be an absolute string")
 
-  defp validate_scope_map_option!(nil), do: :ok
-
-  defp validate_scope_map_option!(scope_map) when is_map(scope_map) do
-    valid? =
-      Enum.all?(scope_map, fn {method, scopes} ->
-        is_binary(method) and byte_size(method) > 0 and is_list(scopes) and
-          Enum.all?(scopes, &(is_binary(&1) and byte_size(&1) > 0)) and
-          length(scopes) == length(Enum.uniq(scopes))
-      end)
-
-    if valid?,
-      do: :ok,
-      else: raise(ArgumentError, ":scope_map must use string methods and scopes")
-  end
-
-  defp validate_scope_map_option!(_),
-    do: raise(ArgumentError, ":scope_map must be a map")
+  defp validate_scope_map_option!(scope_map), do: ScopeMap.validate!(scope_map)
 
   defp validate_scope_policy_option!(nil), do: :ok
 
@@ -321,7 +307,7 @@ defmodule AttestoMCP.Server.Plug do
 
       resolver ->
         validate_auth_resolver!(resolver)
-        validate_resolver_resource_pin!(opts, path)
+        validate_resolver_static_resource_options!(opts, path)
         {nil, nil, resolver}
     end
   end
@@ -370,14 +356,13 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_auth_options!(auth_opts) do
     validate_auth_assign_keys!(auth_opts)
     validate_scope_list_option!(auth_opts, :scopes_supported, allow_empty: false)
+    validate_resource_configuration!(auth_opts)
 
     if not pinned_resource?(auth_opts) do
       raise ArgumentError,
             "auth must pin :resource/:resource_audience or :base_url/:origin; " <>
               "set :allow_dynamic_origin only for explicitly local development"
     end
-
-    validate_resource_configuration!(auth_opts)
 
     if not usable_auth_configuration?(auth_opts) do
       raise ArgumentError,
@@ -449,20 +434,12 @@ defmodule AttestoMCP.Server.Plug do
             ":auth resolver MFA arguments must be portable compile-time literals"
   end
 
-  defp validate_resolver_resource_pin!(opts, path) do
+  defp validate_resolver_static_resource_options!(opts, path) do
     top =
       [resource_path: path]
       |> Keyword.merge(Keyword.take(opts, [:resource, :resource_audience, :base_url, :origin]))
 
     validate_resource_configuration!(top)
-
-    if not pinned_resource?(top) do
-      raise ArgumentError,
-            "resolver-backed auth requires a statically pinned top-level " <>
-              ":resource/:resource_audience or :base_url/:origin"
-    end
-
-    :ok
   end
 
   defp resolve_authentication!(%{auth_resolver: nil} = state), do: state
@@ -1010,7 +987,7 @@ defmodule AttestoMCP.Server.Plug do
       cond do
         absolute_resource?(explicit_audience) -> explicit_audience
         absolute_resource?(explicit_resource) -> explicit_resource
-        absolute_resource?(auth_opts[:base_url] || auth_opts[:origin]) -> :resource
+        absolute_origin?(auth_opts[:base_url] || auth_opts[:origin]) -> :resource
         auth_opts[:allow_dynamic_origin] == true -> :resource
         true -> nil
       end
@@ -1028,7 +1005,7 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp maybe_pin_resource_origin(opts, resource) when is_binary(resource) do
-    if absolute_resource?(opts[:base_url] || opts[:origin]) do
+    if absolute_origin?(opts[:base_url] || opts[:origin]) do
       opts
     else
       %URI{scheme: scheme, host: host, port: port} = URI.parse(resource)
@@ -1671,11 +1648,23 @@ defmodule AttestoMCP.Server.Plug do
     initial_context = auth_context(conn)
 
     fn owner ->
-      required =
-        (legacy_event_scopes(owner[:event], state.opts) ++ List.wrap(owner[:required_scopes]))
-        |> Enum.uniq()
-
-      reauthorize_delivery?(token, config, canonical, initial_context, owner, required)
+      with {:ok, event_scope_sets} <- owner_required_scope_sets(owner),
+           {:ok, required_scope_sets} <-
+             prepend_required_scopes(
+               legacy_event_scopes(owner[:event], state.opts),
+               event_scope_sets
+             ) do
+        reauthorize_delivery?(
+          token,
+          config,
+          canonical,
+          initial_context,
+          owner,
+          required_scope_sets
+        )
+      else
+        _ -> false
+      end
     end
   end
 
@@ -2554,6 +2543,13 @@ defmodule AttestoMCP.Server.Plug do
       end
     end
 
+    for key <- [:max_body_bytes, :max_message_bytes], Keyword.has_key?(opts, key) do
+      if Keyword.fetch!(opts, key) > Schema.max_instance_bytes() do
+        raise ArgumentError,
+              ":#{key} cannot exceed the #{Schema.max_instance_bytes()}-byte schema-instance ceiling"
+      end
+    end
+
     :ok
   end
 
@@ -2633,7 +2629,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp pinned_resource?(opts) do
     absolute_resource?(opts[:resource]) or absolute_resource?(opts[:resource_audience]) or
-      absolute_resource?(opts[:base_url]) or absolute_resource?(opts[:origin]) or
+      absolute_origin?(opts[:base_url]) or absolute_origin?(opts[:origin]) or
       opts[:allow_dynamic_origin] == true
   end
 
@@ -2656,13 +2652,13 @@ defmodule AttestoMCP.Server.Plug do
       raise ArgumentError, ":resource_audience must be an absolute URL"
     end
 
-    if not is_nil(base_url) and not absolute_resource?(base_url),
-      do: raise(ArgumentError, ":base_url must be an absolute URL")
+    if not is_nil(base_url) and not absolute_origin?(base_url),
+      do: raise(ArgumentError, ":base_url must be an HTTP origin without a path")
 
-    if not is_nil(origin) and not absolute_resource?(origin),
-      do: raise(ArgumentError, ":origin must be an absolute URL")
+    if not is_nil(origin) and not absolute_origin?(origin),
+      do: raise(ArgumentError, ":origin must be an HTTP origin without a path")
 
-    if absolute_resource?(base_url) and absolute_resource?(origin) and
+    if absolute_origin?(base_url) and absolute_origin?(origin) and
          origin_key(base_url) != origin_key(origin) do
       raise ArgumentError, ":base_url and :origin must identify the same origin"
     end
@@ -2688,7 +2684,7 @@ defmodule AttestoMCP.Server.Plug do
 
     configured_origin = base_url || origin
 
-    if not is_nil(configured_absolute) and absolute_resource?(configured_origin) and
+    if not is_nil(configured_absolute) and absolute_origin?(configured_origin) and
          origin_key(configured_absolute) != origin_key(configured_origin) do
       raise ArgumentError, "canonical resource and base origin must agree"
     end
@@ -2719,7 +2715,7 @@ defmodule AttestoMCP.Server.Plug do
       absolute_resource?(configured) ->
         configured
 
-      absolute_resource?(opts[:base_url] || opts[:origin]) ->
+      absolute_origin?(opts[:base_url] || opts[:origin]) ->
         AttestoMCP.Metadata.resource_identifier(conn, opts[:resource_path] || "/mcp", opts)
 
       opts[:allow_dynamic_origin] == true ->
@@ -2756,6 +2752,16 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp absolute_resource?(_), do: false
+
+  defp absolute_origin?(value) do
+    if absolute_resource?(value) do
+      URI.parse(value).path in [nil, "", "/"]
+    else
+      false
+    end
+  rescue
+    _ -> false
+  end
 
   defp safe_uri_bytes?(value) do
     value
@@ -2906,16 +2912,19 @@ defmodule AttestoMCP.Server.Plug do
     canonical = canonical_resource(conn, state.auth_opts)
 
     Map.put(context, :subscription_authorize, fn owner ->
-      event_scopes = List.wrap(owner[:required_scopes] || owner["required_scopes"])
-
-      reauthorize_delivery?(
-        token,
-        config,
-        canonical,
-        context,
-        owner,
-        Enum.uniq(required ++ event_scopes)
-      )
+      with {:ok, event_scope_sets} <- owner_required_scope_sets(owner),
+           {:ok, required_scope_sets} <- prepend_required_scopes(required, event_scope_sets) do
+        reauthorize_delivery?(
+          token,
+          config,
+          canonical,
+          context,
+          owner,
+          required_scope_sets
+        )
+      else
+        _ -> false
+      end
     end)
   end
 
@@ -2925,7 +2934,14 @@ defmodule AttestoMCP.Server.Plug do
     match?(%Attesto.Config{}, auth_config(auth_opts))
   end
 
-  defp reauthorize_delivery?(token, config, canonical, initial_context, owner, required_scopes)
+  defp reauthorize_delivery?(
+         token,
+         config,
+         canonical,
+         initial_context,
+         owner,
+         required_scope_sets
+       )
        when is_binary(token) do
     claims = Map.get(initial_context, :attesto_mcp_claims) || %{}
     confirmation = Map.get(claims, "cnf", %{})
@@ -2943,7 +2959,7 @@ defmodule AttestoMCP.Server.Plug do
          current_scopes when is_list(current_scopes) <- token_scopes(current_claims),
          true <- Map.get(initial_context, :principal) == owner_value(owner, :principal),
          true <- current_tenant == owner_value(owner, :tenant),
-         true <- scopes_grant?(required_scopes, current_scopes) do
+         true <- scope_sets_grant?(required_scope_sets, current_scopes) do
       true
     else
       _ -> false
@@ -2953,6 +2969,36 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp reauthorize_delivery?(_, _, _, _, _, _), do: false
+
+  defp owner_required_scope_sets(owner) when is_map(owner) do
+    case owner[:required_scope_sets] || owner["required_scope_sets"] do
+      scope_sets when is_list(scope_sets) and scope_sets != [] ->
+        if Enum.all?(scope_sets, &is_list/1), do: {:ok, scope_sets}, else: :error
+
+      _ ->
+        case owner[:required_scopes] || owner["required_scopes"] do
+          scopes when is_list(scopes) -> {:ok, [scopes]}
+          _ -> :error
+        end
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp owner_required_scope_sets(_owner), do: :error
+
+  defp prepend_required_scopes(required, scope_sets)
+       when is_list(required) and is_list(scope_sets) and scope_sets != [] do
+    {:ok, Enum.map(scope_sets, &Enum.uniq(required ++ &1))}
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp prepend_required_scopes(_required, _scope_sets), do: :error
 
   defp sender_verification_opts(%{binding: :bearer}), do: []
 
@@ -3003,6 +3049,12 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp scopes_grant?(_, _), do: false
+
+  defp scope_sets_grant?(scope_sets, granted)
+       when is_list(scope_sets) and scope_sets != [] and is_list(granted),
+       do: Enum.any?(scope_sets, &scopes_grant?(&1, granted))
+
+  defp scope_sets_grant?(_scope_sets, _granted), do: false
 
   defp auth_config(auth_opts) do
     case Keyword.get(auth_opts, :config) do

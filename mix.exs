@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "0.11.1"
+  @version "0.12.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -22,7 +22,8 @@ defmodule AttestoMCP.Server.MixProject do
       test_coverage: [
         output: System.get_env("MIX_COVERAGE_OUTPUT", "cover"),
         summary: [threshold: 75]
-      ]
+      ],
+      test_ignore_filters: [&String.starts_with?(&1, "test/support/")]
     ]
   end
 
@@ -68,8 +69,10 @@ defmodule AttestoMCP.Server.MixProject do
       extras: [
         "README.md",
         "CHANGELOG.md",
+        "SECURITY.md",
         "CONFORMANCE.md",
         "docs/conformance.md",
+        "docs/migration.md",
         "docs/usage.md",
         "docs/sbom.md"
       ]

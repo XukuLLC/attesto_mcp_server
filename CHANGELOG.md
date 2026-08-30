@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.12.0 - 2026-08-29
+
+- Add bounded `alternative_scope_sets` to primitive definitions. The primary
+  `required_scopes` clause and each alternative remain all-of requirements,
+  while any complete clause can authorize the definition consistently across
+  catalogs, selected lookups, resource templates, subscriptions, and both
+  protocol eras.
+- Add typed, strict `AttestoMCP.Server.Content` constructors and complete tool
+  and resource constructors in `AttestoMCP.Server.Result`. They emit canonical
+  string-key maps and enforce the same content, URI, JSON, and padded-Base64
+  rules as handler-output validation; handwritten maps remain supported.
+- Revalidate every finalized success result after adding protocol, cache, and
+  server-identity fields. Oversized completion values and aggregate catalog or
+  handler results now fail closed with bounded protocol errors in both eras.
+- Align handler-output validation with the MCP content contracts. Embedded
+  resources now require one text or blob resource-content entry rather than a
+  nested `contents` array. Present optional string, map, list, and size members
+  must now have their declared types, so explicit null text/blob siblings,
+  null MIME/description/metadata members, malformed link titles, negative link
+  sizes, and invalid link/resource icons or annotations are rejected. Use the
+  public content constructors when migrating affected handlers.
+- Document that JSON Schema defaults are annotations, and add the bounded,
+  explicitly invoked `AttestoMCP.Server.Schema.apply_property_defaults/2`
+  helper for direct property defaults without changing dispatch behavior.
+- Add atomic `replace_catalog/2` for bounded generated catalogs. Failed and
+  no-op replacements leave the catalog revision unchanged; successful changes
+  emit one list-changed notification for each affected advertised catalog
+  category. Resources and templates share one category; completion-only
+  changes emit none.
+- Make the 2,000,000-byte schema-instance ceiling explicit across server,
+  Streamable HTTP, and stdio configuration. Oversized `max_body_bytes` or
+  `max_message_bytes` settings now fail during initialization, while the
+  message limit continues to govern JSON-RPC decoding.
+- Validate `scope_map` through one shared bounded policy: only supported MCP
+  request methods are accepted, and scope lists must be unique, valid,
+  length-bounded, and aggregate-byte-bounded in both server and Plug options.
+- Allow resolver-backed `:auth` to supply a strictly validated canonical
+  resource or base origin after runtime configuration loads. The resolved URL
+  must agree with the mounted path and any static pin, and the same identifier
+  drives RFC 9728 metadata and audience verification.
+- Require static and resolved `:base_url`/`:origin` values to be bare HTTP
+  origins without application paths. A static path-bearing value now fails
+  during Plug initialization, and a resolver-returned value fails closed when
+  the resolver is evaluated, instead of producing protected-resource metadata
+  that disagrees with the served route.
+- Add a migration runbook for registrations, handler contracts, schema
+  behavior, authorization ordering, Phoenix wiring, session continuity, and
+  safe result construction.
+- Bind clustered resource-notification delivery to a versioned, bounded
+  publisher scope snapshot and the recipient's current definition scopes.
+  Legacy cluster resource envelopes without publisher scopes fail closed, so
+  catalog drift during deployment cannot weaken modern or legacy delivery
+  authorization. Per-publish authorization callbacks now suppress both modern
+  and legacy delivery consistently.
+- Clarify the distinct modern and legacy subscription scope rules, including
+  additive `subscriptions/listen` and per-notification requirements.
+- Add explicit `2025-06-18` HTTP, stdio, initialization, and revision-filtering
+  regressions, and make live stdio tests wait for owned child processes before
+  removing isolated build directories.
+
 ## 0.11.1 - 2026-08-29
 
 - Document the existing per-definition `authorize` contract, including callback

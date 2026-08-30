@@ -22,7 +22,14 @@ not contain an OAuth authorization server or token issuer.
 
 :ok = AttestoMCP.Server.register_tool(server, "hello", %{
   description: "Say hello",
-  input_schema: %{"type" => "object"},
+  input_schema: %{
+    "type" => "object",
+    "properties" => %{
+      "name" => %{"type" => "string", "minLength" => 1}
+    },
+    "required" => ["name"],
+    "additionalProperties" => false
+  },
   handler: fn %{"name" => name}, _auth -> {:ok, "Hello #{name}!"} end
 })
 
@@ -51,12 +58,49 @@ string keys; resource MRTR retries additionally carry string-keyed response
 entries at the top level. An arity-2 handler's second argument is the
 authenticated request context; arity-1 and MFA forms are also supported.
 
+Public constructors catch malformed handler output at its source while keeping
+raw string-key maps available for extensions:
+
+```elixir
+alias AttestoMCP.Server.{Content, Result}
+
+{:ok,
+ Result.tool(Content.text("saved"),
+   structured_content: %{"id" => "document-7"}
+ )}
+
+{:ok,
+ Result.resource(
+   Content.resource_text("urn:document:7", "contents", mime_type: "text/plain")
+ )}
+
+{:ok, [Content.prompt_message(:user, Content.text("Review document 7"))]}
+```
+
+Image, audio, and resource-blob constructors take an already encoded canonical
+padded-Base64 string. Constructors emit canonical string-key maps and reject
+unknown or duplicate options. Server validation still accepts valid raw maps.
+
+JSON Schema `default` is an annotation: normal validation and dispatch do not
+insert it. A handler that explicitly wants defaults on optional direct
+properties can opt in with
+`AttestoMCP.Server.Schema.apply_property_defaults/2`. The bounded helper never
+overwrites a present value, validates the completed object, and does not infer
+defaults through references, combinators, conditionals, array items, or pattern
+properties. Required properties must still pass normal request validation
+before the handler runs.
+
 `scopes_supported` controls the public RFC 9728 document for that mount, while
 `default_scopes` controls protected operations without a non-empty
 method-specific `scope_map` entry. Keep the two aligned with grants actually
 issued by the Attesto authorization server. If an AttestoPhoenix router owns
 the metadata route via `--reuse-metadata-route`, configure its protected
 resource metadata there; the MCP Plug cannot alter a route it does not serve.
+A resolver-backed `:auth` may instead supply the canonical absolute resource or
+base origin after runtime configuration loads. Its path and origin must agree
+with the Plug mount and any static pin; the same resolved identifier drives
+metadata and audience verification. `allow_dynamic_origin` remains explicitly
+development-only.
 
 An optional `context_builder` function or MFA receives the authenticated
 `Plug.Conn` and contributes a map under `context.host_context`; it cannot
@@ -183,17 +227,49 @@ Definitions with `required_scopes: []` are authenticated-only only on methods
 explicitly mapped to this policy; default and empty-map methods still require
 their generic scope.
 
-Subscription establishment and delivery are unchanged: opening a stream keeps
-its generic category scopes, while each delivery reauthorizes the captured
-principal and tenant with the matched definition scopes. `subscriptions/listen`
-is intentionally not a definition-policy method.
+A definition can declare bounded alternative all-of clauses without moving
+scope logic into its business-policy callback:
+
+```elixir
+required_scopes: ["documents.read"],
+alternative_scope_sets: [
+  ["documents.admin"],
+  ["workspace.read", "documents.execute"]
+]
+```
+
+The primary `required_scopes` clause or any complete alternative permits the
+definition. The primary clause must be non-empty when alternatives are used;
+each clause is non-empty and duplicate-free, and clauses must be distinct
+regardless of member order. At most seven alternatives, 128 total scope
+memberships, and 8,192 aggregate scope bytes are accepted. Catalog filtering,
+selected lookups, resource templates, subscription scope snapshots, and both
+protocol eras use the same clauses. `authorize` runs once only after one clause
+succeeds. Alternatives do not rewrite RFC 9728 metadata: continue to advertise
+the meaningful scopes clients should request with `scopes_supported`.
+
+Modern `subscriptions/listen` opening uses configured `default_scopes` instead
+of generic category scopes when no non-empty method entry exists. A non-empty
+`scope_map["subscriptions/listen"]` entry is additive to the generic category
+scopes, and `subscription_scopes` are always additive. Each modern delivery
+reauthorizes the captured principal and tenant with that opening union plus its
+notification requirements; resource updates also require the generic resource
+scope and any matched definition scopes. Legacy subscription-notification
+delivery reauthorizes catalog events with their generic category scope;
+resource-update notifications also require any matched definition scopes.
+`subscriptions/listen` is intentionally not a definition-policy method.
 
 ## Operational notes
 
 Pin the public origin behind a trusted proxy, use TLS in deployment, and keep
 credentials/proofs/private content out of logs and Telemetry. Configure the
 documented `max_queue`, `stream_keepalive_ms`, `stream_queue_size`, and
-concurrency/timeout limits. `page_size` bounds catalog pages; `cache_ttl_ms`,
+concurrency/timeout limits. HTTP `max_body_bytes` and `max_message_bytes`, and
+stdio `max_message_bytes`, cannot exceed the 2,000,000-byte schema-instance
+ceiling; the message limit still governs JSON-RPC decoding. Successful results
+are checked again after the server adds protocol metadata, so aggregate pages
+or handler values that exceed the ceiling fail closed. `page_size` bounds
+catalog pages; `cache_ttl_ms`,
 `cache_scope`, and `allow_public_cache` control cache metadata, with public
 caching requiring both explicit opt-in and an authorization-independent result.
 Request `_meta` values must be JSON objects when present; malformed values
@@ -210,6 +286,13 @@ appear atomically. A failed batch changes neither the registry nor its catalog
 revision and emits no invalidation. One successful batch emits at most one
 invalidation per affected catalog.
 
+`replace_catalog/2` validates the same bounded registration tuples, then
+atomically makes that batch the complete catalog, including removals. Failure
+leaves the old catalog and revision intact. An identical replacement is a
+no-op; a changed replacement advances the revision once and emits one
+list-changed notification for each affected advertised catalog category.
+Resources and templates share one category; completion-only changes emit none.
+
 Legacy sessions use the private in-memory store by default. A durable host may
 provide `session_store: {Adapter, handle}` and an explicit
 `session_namespace`; the adapter implements
@@ -224,7 +307,9 @@ monitored process; other adapters fail closed when an operation cannot reach
 their backend. Use a globally unique `session_namespace` when unrelated
 deployments share the same store or Erlang cluster. Cross-node notification
 delivery is asynchronous and does not provide replay or exactly-once delivery
-across a network partition.
+across a network partition. In 0.12.0, peer catalog drift cannot reduce
+publisher-required scopes; drain mixed old/new clusters rather than rely on
+them for resource notifications.
 
 `telemetry_metadata` adds at most 16 bounded scalar host dimensions to emitted
 events without permitting reserved-key replacement. `handler_task_init` runs
@@ -237,4 +322,5 @@ Plug options override server defaults for that adapter, while its effective
 Optional task profiles are disabled for this release; their
 incomplete implementation cannot be enabled.
 
-See [docs/usage.md](docs/usage.md) and `SECURITY.md`.
+See the [migration runbook](docs/migration.md), [usage guide](docs/usage.md),
+and [security policy](SECURITY.md).

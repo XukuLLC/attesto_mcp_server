@@ -17,6 +17,10 @@ defmodule AttestoMCP.Server.Registry do
   @max_name_bytes 64
   @max_definition_depth 64
   @max_batch_size 1_000
+  @max_alternative_scope_sets 7
+  @max_alternative_scope_memberships 128
+  @max_alternative_scope_bytes 8_192
+  @max_scope_bytes 256
   @definition_key_aliases %{
     "name" => :name,
     "description" => :description,
@@ -27,6 +31,8 @@ defmodule AttestoMCP.Server.Registry do
     "annotations" => :annotations,
     "required_scopes" => :required_scopes,
     "requiredScopes" => :required_scopes,
+    "alternative_scope_sets" => :alternative_scope_sets,
+    "alternativeScopeSets" => :alternative_scope_sets,
     "handler" => :handler,
     "authorize" => :authorize,
     "arguments" => :arguments,
@@ -70,6 +76,33 @@ defmodule AttestoMCP.Server.Registry do
 
   def register_all(_pid, _registrations), do: {:error, :invalid_registrations}
 
+  @doc "Validates and atomically replaces the complete primitive catalog."
+  @spec replace_all(pid(), [registration()]) ::
+          {:ok, %{primitive() => %{optional(term()) => definition()}}, [primitive()]}
+          | {:error, term()}
+  def replace_all(pid, registrations)
+      when is_pid(pid) and is_list(registrations) and length(registrations) <= @max_batch_size do
+    with {:ok, normalized} <- normalize_registrations(registrations) do
+      GenServer.call(pid, {:replace_all, normalized})
+    end
+  end
+
+  def replace_all(_pid, registrations) when is_list(registrations),
+    do: {:error, :too_many_registrations}
+
+  def replace_all(_pid, _registrations), do: {:error, :invalid_registrations}
+
+  @doc false
+  @spec restore_all(pid(), [registration()], non_neg_integer()) :: :ok | {:error, term()}
+  def restore_all(pid, registrations, revision)
+      when is_pid(pid) and is_list(registrations) and is_integer(revision) and revision >= 0 do
+    with {:ok, normalized} <- normalize_registrations(registrations) do
+      GenServer.call(pid, {:restore_all, normalized, revision})
+    end
+  end
+
+  def restore_all(_pid, _registrations, _revision), do: {:error, :invalid_restore}
+
   @doc "Returns all normalized definitions grouped by primitive category."
   @spec snapshot(pid()) :: %{primitive() => %{optional(term()) => definition()}}
   def snapshot(pid), do: GenServer.call(pid, :snapshot)
@@ -81,6 +114,19 @@ defmodule AttestoMCP.Server.Registry do
   @doc "Returns definitions for one category in deterministic identity order."
   @spec list(pid(), primitive()) :: [definition()]
   def list(pid, type) when type in @types, do: GenServer.call(pid, {:list, type})
+
+  @doc false
+  @spec scope_sets(definition()) :: [[String.t()]]
+  def scope_sets(definition) when is_map(definition) do
+    required = definition[:required_scopes]
+    alternatives = definition[:alternative_scope_sets]
+
+    if is_list(required) and is_list(alternatives),
+      do: [required | alternatives],
+      else: []
+  end
+
+  def scope_sets(_definition), do: []
 
   @impl true
   def init(opts), do: {:ok, %{items: Map.new(@types, &{&1, %{}}), revision: 0, opts: opts}}
@@ -119,6 +165,35 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
+  def handle_call({:replace_all, registrations}, _from, state) do
+    case build_catalog(registrations) do
+      {:ok, items} ->
+        affected = Enum.filter(@types, &(state.items[&1] !== items[&1]))
+
+        if affected == [] do
+          {:reply, {:ok, state.items, []}, state}
+        else
+          {:reply, {:ok, items, affected}, %{state | items: items, revision: state.revision + 1}}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:restore_all, registrations, revision}, _from, state) do
+    empty = Map.new(@types, &{&1, %{}})
+
+    if state.items == empty and state.revision == 0 do
+      case build_catalog(registrations) do
+        {:ok, items} -> {:reply, :ok, %{state | items: items, revision: revision}}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :registry_not_empty}, state}
+    end
+  end
+
   def handle_call(:snapshot, _from, state), do: {:reply, state.items, state}
   def handle_call(:revision, _from, state), do: {:reply, state.revision, state}
 
@@ -144,6 +219,16 @@ defmodule AttestoMCP.Server.Registry do
       {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp build_catalog(registrations) do
+    Enum.reduce_while(registrations, {:ok, Map.new(@types, &{&1, %{}})}, fn registration,
+                                                                            {:ok, items} ->
+      case put_registration(items, registration) do
+        {:ok, items} -> {:cont, {:ok, items}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp put_registration(items, {type, identity, definition}) do
@@ -358,18 +443,8 @@ defmodule AttestoMCP.Server.Registry do
   defp canonical_json_value(value, depth) when is_map(value),
     do: canonical_json_map(Map.to_list(value), depth + 1)
 
-  defp canonical_json_value(value, depth) when is_list(value) do
-    Enum.reduce_while(value, {:ok, []}, fn item, {:ok, acc} ->
-      case canonical_json_value(item, depth + 1) do
-        {:ok, item} -> {:cont, {:ok, [item | acc]}}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, items} -> {:ok, Enum.reverse(items)}
-      error -> error
-    end
-  end
+  defp canonical_json_value(value, depth) when is_list(value),
+    do: canonical_json_list(value, depth, [])
 
   defp canonical_json_value(value, _depth)
        when is_binary(value) or is_boolean(value) or is_nil(value) or is_integer(value),
@@ -379,6 +454,17 @@ defmodule AttestoMCP.Server.Registry do
     do: {:ok, value}
 
   defp canonical_json_value(_value, _depth), do: {:error, :not_json}
+
+  defp canonical_json_list([], _depth, items), do: {:ok, Enum.reverse(items)}
+
+  defp canonical_json_list([item | rest], depth, items) do
+    case canonical_json_value(item, depth + 1) do
+      {:ok, item} -> canonical_json_list(rest, depth, [item | items])
+      {:error, _} = error -> error
+    end
+  end
+
+  defp canonical_json_list(_improper, _depth, _items), do: {:error, :not_json}
 
   defp maybe_put_string(map, _key, nil), do: map
   defp maybe_put_string(map, key, value), do: Map.put(map, key, value)
@@ -394,6 +480,7 @@ defmodule AttestoMCP.Server.Registry do
          output_schema: nil,
          annotations: %{},
          required_scopes: [],
+         alternative_scope_sets: [],
          handler: nil
        },
        definition
@@ -410,6 +497,7 @@ defmodule AttestoMCP.Server.Registry do
          mime_type: nil,
          annotations: %{},
          required_scopes: [],
+         alternative_scope_sets: [],
          handler: nil
        },
        definition
@@ -427,6 +515,7 @@ defmodule AttestoMCP.Server.Registry do
          mime_type: nil,
          annotations: %{},
          required_scopes: [],
+         alternative_scope_sets: [],
          handler: nil
        },
        definition
@@ -443,6 +532,7 @@ defmodule AttestoMCP.Server.Registry do
          annotations: %{},
          arguments: [],
          required_scopes: [],
+         alternative_scope_sets: [],
          handler: nil
        },
        definition
@@ -452,14 +542,25 @@ defmodule AttestoMCP.Server.Registry do
   defp defaults(:completion, identity, definition) do
     {:ok,
      Map.merge(
-       %{identity: identity, name: identity, annotations: %{}, required_scopes: [], handler: nil},
+       %{
+         identity: identity,
+         name: identity,
+         annotations: %{},
+         required_scopes: [],
+         alternative_scope_sets: [],
+         handler: nil
+       },
        definition
      )}
   end
 
   defp validate_common(value) do
     with :ok <- valid_text(value[:name], :name),
-         :ok <- valid_scopes(value[:required_scopes]),
+         :ok <-
+           valid_scope_requirements(
+             value[:required_scopes],
+             value[:alternative_scope_sets]
+           ),
          :ok <- valid_annotations(value[:annotations]),
          :ok <- valid_metadata(value),
          :ok <- valid_authorize(value[:authorize]),
@@ -781,6 +882,55 @@ defmodule AttestoMCP.Server.Registry do
   end
 
   defp valid_scopes(_), do: {:error, {:invalid_definition, :required_scopes}}
+
+  defp valid_scope_requirements(required, alternatives) do
+    with :ok <- valid_scopes(required),
+         :ok <- valid_alternative_scope_sets(required, alternatives) do
+      :ok
+    end
+  end
+
+  defp valid_alternative_scope_sets(_required, []), do: :ok
+
+  defp valid_alternative_scope_sets(required, alternatives)
+       when is_list(required) and required != [] and is_list(alternatives) and alternatives != [] do
+    scope_sets = [required | alternatives]
+
+    valid? =
+      length(alternatives) <= @max_alternative_scope_sets and
+        Enum.all?(alternatives, &valid_nonempty_scope_set?/1) and
+        unique_scope_sets?(scope_sets) and
+        Enum.sum(Enum.map(scope_sets, &length/1)) <= @max_alternative_scope_memberships and
+        Enum.all?(List.flatten(scope_sets), &(byte_size(&1) <= @max_scope_bytes)) and
+        Enum.sum(Enum.map(List.flatten(scope_sets), &byte_size/1)) <=
+          @max_alternative_scope_bytes
+
+    if valid?,
+      do: :ok,
+      else: {:error, {:invalid_definition, :alternative_scope_sets}}
+  rescue
+    _ -> {:error, {:invalid_definition, :alternative_scope_sets}}
+  catch
+    _, _ -> {:error, {:invalid_definition, :alternative_scope_sets}}
+  end
+
+  defp valid_alternative_scope_sets(_required, _alternatives),
+    do: {:error, {:invalid_definition, :alternative_scope_sets}}
+
+  defp valid_nonempty_scope_set?(scopes) when is_list(scopes) and scopes != [] do
+    Enum.uniq(scopes) == scopes and Attesto.Scope.valid_list?(scopes, allow_empty?: false)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp valid_nonempty_scope_set?(_scopes), do: false
+
+  defp unique_scope_sets?(scope_sets) do
+    canonical = Enum.map(scope_sets, &Enum.sort/1)
+    Enum.uniq(canonical) == canonical
+  end
 
   defp valid_handler(nil), do: :ok
   defp valid_handler(fun) when is_function(fun, 1) or is_function(fun, 2), do: :ok

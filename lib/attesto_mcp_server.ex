@@ -91,7 +91,10 @@ defmodule AttestoMCP.Server.API do
   @typedoc "Keyword options accepted by `start_link/1`; task flags are disabled in this release."
   @type server_opts :: [server_option()]
 
-  @typedoc "A registered primitive definition with JSON-compatible fields."
+  @typedoc "One conjunctive scope clause used by a primitive definition."
+  @type scope_set :: [String.t()]
+
+  @typedoc "A registered primitive definition with JSON-compatible fields. `required_scopes` is the primary all-of clause and `alternative_scope_sets` supplies bounded alternative all-of clauses."
   @type definition :: map() | keyword()
 
   @typedoc "Authorization and transport context passed to handlers."
@@ -123,6 +126,9 @@ defmodule AttestoMCP.Server.API do
 
   @typedoc "Modern subscription category/resource filters."
   @type subscription_filter :: %{optional(String.t()) => boolean() | [String.t()]}
+
+  @typedoc "A per-publication authorization callback applied to every matching subscriber."
+  @type publish_option :: {:authorize, (map() -> boolean())}
 
   @typedoc "Interactive request-state and input-response payloads."
   @type mrtr_payload :: %{optional(String.t()) => term()}
@@ -185,6 +191,10 @@ defmodule AttestoMCP.Server.API do
   @spec register_all(server(), [registration()]) :: :ok | {:error, term()}
   defdelegate register_all(server, registrations), to: AttestoMCP.Server
 
+  @doc "Atomically replaces the complete primitive catalog from one bounded batch."
+  @spec replace_catalog(server(), [registration()]) :: :ok | {:error, term()}
+  defdelegate replace_catalog(server, registrations), to: AttestoMCP.Server
+
   @doc "Dispatches one decoded request through the shared protocol core."
   @spec dispatch(server(), request(), handler_context(), keyword()) :: term()
   def dispatch(server, request, context \\ %{}, opts \\ []),
@@ -216,8 +226,16 @@ defmodule AttestoMCP.Server.API do
   @spec delete_session(server(), String.t()) :: :ok | {:error, term()}
   defdelegate delete_session(server, id), to: AttestoMCP.Server
 
-  @doc "Queues a filtered modern notification and publishes its legacy event."
-  @spec publish(server(), map(), keyword()) :: :ok | {:error, term()}
+  @doc """
+  Queues a filtered modern notification and publishes its legacy event.
+
+  An optional `:authorize` callback is combined with each stream's captured
+  delivery authorization for both modern and legacy subscribers. Only a
+  literal `true` permits delivery; callback failures suppress it. Its context
+  keeps `required_scopes` as the primary all-of clause and adds
+  `required_scope_sets` with every accepted clause.
+  """
+  @spec publish(server(), map(), [publish_option()]) :: :ok | {:error, term()}
   def publish(server, notification, opts \\ []),
     do: AttestoMCP.Server.publish(server, notification, opts)
 

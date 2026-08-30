@@ -364,6 +364,148 @@ defmodule AttestoMCP.Server.ScopePolicyAcceptanceTest do
     end
   end
 
+  test "HTTP definition policy accepts complete alternative scope clauses in both eras", %{
+    server: server,
+    config: config
+  } do
+    parent = self()
+    primary = ["alternative.definition.read"]
+    alternatives = [["workspace.admin"], ["alternative.team", "alternative.execute"]]
+
+    assert :ok =
+             Server.register_tool(server, "alternative-http", %{
+               required_scopes: primary,
+               alternative_scope_sets: alternatives,
+               handler: fn _arguments, _context ->
+                 send(parent, :alternative_http_tool)
+                 {:ok, "ok"}
+               end
+             })
+
+    assert :ok =
+             Server.register_resource_template(server, "urn:alternative-http/{id}", %{
+               required_scopes: primary,
+               alternative_scope_sets: alternatives,
+               handler: fn %{uri: uri}, _context ->
+                 send(parent, :alternative_http_template)
+                 {:ok, %{"contents" => [%{"uri" => uri, "text" => "ok"}]}}
+               end
+             })
+
+    assert :ok =
+             Server.register_resource(server, "alternative-http-exact", %{
+               uri: "urn:alternative-http/exact",
+               required_scopes: ["exact.read"],
+               alternative_scope_sets: [["exact.admin"]],
+               handler: fn _input, _context ->
+                 send(parent, :alternative_http_exact)
+                 {:ok, %{"contents" => []}}
+               end
+             })
+
+    assert :ok =
+             Server.register_resource_template(server, "urn:alternative-http/{value}", %{
+               required_scopes: primary,
+               alternative_scope_sets: [["workspace.admin"]],
+               handler: fn _input, _context ->
+                 send(parent, :alternative_http_fallback)
+                 {:ok, %{"contents" => []}}
+               end
+             })
+
+    plug = plug(server, config)
+    admin = token(config, ["workspace.admin"])
+
+    listed = http_call(plug, admin, @modern, "tools/list", %{})
+    assert listed.status == 200
+    assert names(listed, "tools") == ["alternative-http"]
+
+    templates = http_call(plug, admin, @modern, "resources/templates/list", %{})
+    assert templates.status == 200
+
+    assert uris(templates, "resourceTemplates") == [
+             "urn:alternative-http/{id}",
+             "urn:alternative-http/{value}"
+           ]
+
+    called =
+      http_call(plug, admin, @modern, "tools/call", %{
+        "name" => "alternative-http",
+        "arguments" => %{}
+      })
+
+    assert called.status == 200
+    assert Jason.decode!(called.resp_body)["result"]["isError"] == false
+    assert_receive :alternative_http_tool
+
+    read =
+      http_call(plug, admin, @modern, "resources/read", %{
+        "uri" => "urn:alternative-http/item"
+      })
+
+    assert read.status == 200
+    assert Jason.decode!(read.resp_body)["result"]["contents"] != []
+    assert_receive :alternative_http_template
+
+    exact =
+      http_call(plug, admin, @modern, "resources/read", %{
+        "uri" => "urn:alternative-http/exact"
+      })
+
+    assert exact.status == 200
+    assert Jason.decode!(exact.resp_body)["error"]["code"] == -32602
+    refute_receive :alternative_http_exact
+    refute_receive :alternative_http_fallback
+
+    partial = token(config, ["alternative.team"])
+    partial_list = http_call(plug, partial, @modern, "tools/list", %{})
+    assert partial_list.status == 200
+    assert names(partial_list, "tools") == []
+
+    partial_call =
+      http_call(plug, partial, @modern, "tools/call", %{
+        "name" => "alternative-http",
+        "arguments" => %{}
+      })
+
+    assert partial_call.status == 200
+    assert Jason.decode!(partial_call.resp_body)["error"]["code"] == -32602
+    refute_receive :alternative_http_tool
+
+    initialized =
+      http_call(plug, admin, @legacy, "initialize", %{
+        "protocolVersion" => @legacy,
+        "capabilities" => %{},
+        "clientInfo" => %{"name" => "alternative-scopes", "version" => "1"}
+      })
+
+    session = initialized |> get_resp_header("mcp-session-id") |> List.first()
+    assert is_binary(session)
+
+    assert http_call(plug, admin, @legacy, "notifications/initialized", %{},
+             session_id: session,
+             id: nil
+           ).status == 202
+
+    legacy_list = http_call(plug, admin, @legacy, "tools/list", %{}, session_id: session)
+    assert legacy_list.status == 200
+    assert names(legacy_list, "tools") == ["alternative-http"]
+
+    legacy_call =
+      http_call(
+        plug,
+        admin,
+        @legacy,
+        "tools/call",
+        %{"name" => "alternative-http", "arguments" => %{}},
+        session_id: session
+      )
+
+    assert legacy_call.status == 200
+    assert Jason.decode!(legacy_call.resp_body)["result"]["isError"] == false
+    assert_receive :alternative_http_tool
+  end
+
   test "selected authorization runs before MRTR retry-state consumption" do
     {:ok, server} = Server.start_link([])
     parent = self()
@@ -1028,11 +1170,8 @@ defmodule AttestoMCP.Server.ScopePolicyAcceptanceTest do
       )
     end
 
-    {:ok, configured_server} = Server.start_link(scope_map: %{"tools/call" => []})
-
-    on_exit(fn ->
-      if Process.alive?(configured_server), do: GenServer.stop(configured_server)
-    end)
+    configured_server =
+      start_supervised!({Server, scope_map: %{"tools/call" => []}})
 
     assert_raise ArgumentError, ~r/cannot overlap/, fn ->
       Server.Plug.init(
@@ -1097,6 +1236,129 @@ defmodule AttestoMCP.Server.ScopePolicyAcceptanceTest do
     assert "notifications/resources/updated" in stream_methods(union_conn)
 
     assert Process.alive?(server)
+    GenServer.stop(server)
+  end
+
+  test "modern and legacy delivery accept one complete alternative resource scope clause" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    parent = self()
+    generic = AttestoMCP.Scopes.resources_read()
+    primary = "notification.read"
+    admin = "notification.admin"
+    team = "notification.team"
+    execute = "notification.execute"
+    uri = "urn:alternative-notification"
+
+    assert :ok =
+             Server.register_resource(server, uri, %{
+               required_scopes: [primary],
+               alternative_scope_sets: [[admin], [team, execute]],
+               handler: fn _arguments, _context -> {:ok, %{"contents" => []}} end
+             })
+
+    plug =
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    partial_pid =
+      start_modern_stream(parent, plug, token(config, [generic, team]), 206, [uri])
+
+    assert :ok = await_subscriptions(server, 1)
+    assert :ok = Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri})
+    assert :ok = Server.close_subscription(server, 206, partial_pid)
+    assert_receive {:modern_stream_done, 206, partial_conn}, 2_000
+    refute "notifications/resources/updated" in stream_methods(partial_conn)
+
+    admin_pid =
+      start_modern_stream(parent, plug, token(config, [generic, admin]), 207, [uri])
+
+    assert :ok = await_subscriptions(server, 1)
+
+    assert :ok =
+             Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri},
+               authorize: fn context ->
+                 send(
+                   parent,
+                   {:alternative_notification_context, :modern, context.required_scopes,
+                    context.required_scope_sets}
+                 )
+
+                 true
+               end
+             )
+
+    assert :ok = Server.close_subscription(server, 207, admin_pid)
+    assert_receive {:modern_stream_done, 207, admin_conn}, 2_000
+    assert "notifications/resources/updated" in stream_methods(admin_conn)
+
+    expected_sets = [
+      [generic, primary],
+      [generic, admin],
+      [generic, team, execute]
+    ]
+
+    assert_receive {:alternative_notification_context, :modern, [^generic, ^primary],
+                    ^expected_sets},
+                   1_000
+
+    partial_session = initialize_legacy_session(plug, token(config, [generic, team]), @legacy)
+
+    assert :ok =
+             legacy_subscribe(
+               plug,
+               token(config, [generic, team]),
+               partial_session,
+               uri
+             )
+
+    _partial_legacy_pid =
+      start_legacy_stream(
+        parent,
+        plug,
+        token(config, [generic, team]),
+        partial_session,
+        208
+      )
+
+    assert :ok = await_legacy_streams(server, 1)
+    assert :ok = Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri})
+    assert :ok = Server.delete_session(server, partial_session)
+    assert_receive {:legacy_stream_done, 208, partial_legacy_conn}, 2_000
+    refute partial_legacy_conn.resp_body =~ "notifications/resources/updated"
+
+    admin_session = initialize_legacy_session(plug, token(config, [generic, admin]), @legacy)
+    assert :ok = legacy_subscribe(plug, token(config, [generic, admin]), admin_session, uri)
+
+    _admin_legacy_pid =
+      start_legacy_stream(parent, plug, token(config, [generic, admin]), admin_session, 209)
+
+    assert :ok = await_legacy_streams(server, 1)
+
+    assert :ok =
+             Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri},
+               authorize: fn context ->
+                 send(
+                   parent,
+                   {:alternative_notification_context, :legacy, context.required_scopes,
+                    context.required_scope_sets}
+                 )
+
+                 true
+               end
+             )
+
+    assert :ok = Server.delete_session(server, admin_session)
+    assert_receive {:legacy_stream_done, 209, admin_legacy_conn}, 2_000
+    assert admin_legacy_conn.resp_body =~ "notifications/resources/updated"
+
+    assert_receive {:alternative_notification_context, :legacy, [^generic, ^primary],
+                    ^expected_sets},
+                   1_000
+
     GenServer.stop(server)
   end
 

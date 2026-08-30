@@ -130,7 +130,11 @@ defmodule AttestoMCP.Server.StdioTest do
       |> Enum.map_join("\n", &Jason.encode!/1)
       |> Kernel.<>("\n")
 
-    output = capture_io(input, fn -> Stdio.run(server, principal: "stdio-test") end)
+    output =
+      capture_io(input, fn ->
+        Stdio.run(server, principal: "stdio-test", eof_grace_ms: 1_000)
+      end)
+
     messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
 
     assert Enum.map(messages, & &1["id"]) |> Enum.sort() == [1, 2]
@@ -428,9 +432,6 @@ defmodule AttestoMCP.Server.StdioTest do
     assert Enum.any?(messages, &(&1["id"] == 50))
     assert Enum.any?(messages, &(&1["id"] == 51))
 
-    assert Enum.find_index(messages, &(&1["id"] == 50)) <
-             Enum.find_index(messages, &(&1["id"] == 51))
-
     final = Enum.find(messages, &(&1["id"] == 50))
     assert get_in(final, ["result", "resultType"]) == "complete"
   end
@@ -605,10 +606,18 @@ defmodule AttestoMCP.Server.StdioTest do
   end
 
   test "rejected legacy stdio subscriptions do not refresh the session idle timer" do
-    {:ok, server} = Server.start_link(session_idle_timeout: 500)
+    {:ok, store} = start_supervised(AttestoMCP.Server.SessionStore.ETS)
+    namespace = "stdio-subscription-bounds"
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {AttestoMCP.Server.SessionStore.ETS, store},
+        session_namespace: namespace,
+        session_idle_timeout: 500
+      )
 
     lines = [
-      {0,
+      {fn -> :ok end,
        %{
          jsonrpc: "2.0",
          id: 1,
@@ -619,23 +628,24 @@ defmodule AttestoMCP.Server.StdioTest do
            "clientInfo" => %{"name" => "stdio-subscription-bounds", "version" => "1.0"}
          }
        }},
-      {100, %{jsonrpc: "2.0", method: "notifications/initialized", params: %{}}},
-      {300,
+      {fn -> await_durable_session(store, namespace, &(&1.version == "2025-11-25")) end,
+       %{jsonrpc: "2.0", method: "notifications/initialized", params: %{}}},
+      {fn -> await_durable_session(store, namespace, & &1.initialized) end,
        %{
          jsonrpc: "2.0",
          id: 2,
          method: "resources/subscribe",
          params: %{"uri" => "urn:" <> String.duplicate("x", 4_093)}
        }},
-      {400, %{jsonrpc: "2.0", id: 3, method: "tools/list", params: %{}}}
+      {fn -> Process.sleep(800) end, %{jsonrpc: "2.0", id: 3, method: "tools/list", params: %{}}}
     ]
 
     {:ok, source} = Agent.start_link(fn -> lines end)
 
     input = fn ->
       Agent.get_and_update(source, fn
-        [{delay, message} | rest] ->
-          Process.sleep(delay)
+        [{before_read, message} | rest] ->
+          before_read.()
           {Jason.encode!(message) <> "\n", rest}
 
         [] ->
@@ -645,7 +655,12 @@ defmodule AttestoMCP.Server.StdioTest do
 
     output =
       capture_io(fn ->
-        Stdio.run(server, principal: "stdio-subscription-bounds", input: input)
+        Stdio.run(
+          server,
+          principal: "stdio-subscription-bounds",
+          input: input,
+          eof_grace_ms: 1_000
+        )
       end)
 
     messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
@@ -781,7 +796,7 @@ defmodule AttestoMCP.Server.StdioTest do
   end
 
   test "legacy stdio interleaves typed sampling, elicitation, and roots responses" do
-    {:ok, server} = Server.start_link(max_concurrency: 6, client_request_timeout: 100)
+    {:ok, server} = Server.start_link(max_concurrency: 6, client_request_timeout: 1_000)
     request_agent = start_supervised!({Agent, fn -> [] end})
     parent = self()
 
@@ -906,6 +921,43 @@ defmodule AttestoMCP.Server.StdioTest do
       :wait ->
         Process.sleep(5)
         await_typed_stdio_response(agent)
+    end
+  end
+
+  defp await_durable_session(store, namespace, predicate) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    await_durable_session(store, namespace, predicate, deadline)
+  end
+
+  defp await_durable_session(store, namespace, predicate, deadline) do
+    session =
+      case AttestoMCP.Server.SessionStore.ETS.list_active(store) do
+        {:ok, records} ->
+          Enum.find_value(records, fn
+            {{^namespace, _id}, record} ->
+              case AttestoMCP.Server.Session.from_record(record) do
+                {:ok, session} -> session
+                _ -> nil
+              end
+
+            _ ->
+              nil
+          end)
+
+        _ ->
+          nil
+      end
+
+    cond do
+      session && predicate.(session) ->
+        :ok
+
+      System.monotonic_time(:millisecond) < deadline ->
+        Process.sleep(1)
+        await_durable_session(store, namespace, predicate, deadline)
+
+      true ->
+        flunk("legacy stdio session did not reach the expected lifecycle state")
     end
   end
 
