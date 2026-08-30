@@ -238,7 +238,7 @@ defmodule AttestoMCP.Server.P5BanditTest do
              Server.register_tool(server, "disconnect-slow", %{
                input_schema: %{"type" => "object"},
                handler: fn _arguments, _context ->
-                 send(parent, :disconnect_handler_started)
+                 send(parent, {:disconnect_handler_started, self()})
                  Process.sleep(5_000)
                  send(parent, :disconnect_handler_late)
                  {:ok, "late"}
@@ -284,7 +284,8 @@ defmodule AttestoMCP.Server.P5BanditTest do
 
     {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
     :ok = :gen_tcp.send(socket, stream_wire(token, "tools/call", "disconnect-slow", body))
-    assert_receive :disconnect_handler_started, 1_000
+    assert_receive {:disconnect_handler_started, handler}, 1_000
+    handler_monitor = Process.monitor(handler)
 
     peer_body =
       Jason.encode!(%{
@@ -308,7 +309,8 @@ defmodule AttestoMCP.Server.P5BanditTest do
 
     assert eventually(fn -> Server.stats(server).active_requests == 0 end)
     assert eventually(fn -> Server.stats(server).active == 0 end)
-    refute_receive :disconnect_handler_late, 750
+    assert_receive {:DOWN, ^handler_monitor, :process, ^handler, :killed}, 1_000
+    refute_receive :disconnect_handler_late, 50
 
     healthy_body =
       Jason.encode!(%{
