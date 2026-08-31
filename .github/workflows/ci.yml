@@ -10,8 +10,31 @@ permissions:
 jobs:
   installer-compat:
     runs-on: ubuntu-latest
+    env:
+      ATTESTO_MCP_PATH: "1"
+      ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/pre-release/attesto_mcp
+      ATTESTO_SOURCE_PATH: ${{ github.workspace }}/pre-release/attesto
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto
+          ref: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          path: pre-release/attesto
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto_mcp
+          ref: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+          path: pre-release/attesto_mcp
+          persist-credentials: false
+      - name: verify pre-release dependency commits
+        env:
+          ATTESTO_REF: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          ATTESTO_MCP_REF: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+        run: |
+          test "$(git -C pre-release/attesto rev-parse HEAD)" = "$ATTESTO_REF"
+          test "$(git -C pre-release/attesto_mcp rev-parse HEAD)" = "$ATTESTO_MCP_REF"
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: "1.18.3"
@@ -91,10 +114,33 @@ jobs:
           - elixir: "1.20.3"
             otp: "29.0.5"
     runs-on: ubuntu-latest
+    env:
+      ATTESTO_MCP_PATH: "1"
+      ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/pre-release/attesto_mcp
+      ATTESTO_SOURCE_PATH: ${{ github.workspace }}/pre-release/attesto
     steps:
       - uses: actions/checkout@v4
       - name: scan source for generic package hygiene violations
         run: scripts/check_source_hygiene.sh .
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto
+          ref: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          path: pre-release/attesto
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto_mcp
+          ref: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+          path: pre-release/attesto_mcp
+          persist-credentials: false
+      - name: verify pre-release dependency commits
+        env:
+          ATTESTO_REF: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          ATTESTO_MCP_REF: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+        run: |
+          test "$(git -C pre-release/attesto rev-parse HEAD)" = "$ATTESTO_REF"
+          test "$(git -C pre-release/attesto_mcp rev-parse HEAD)" = "$ATTESTO_MCP_REF"
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ matrix.elixir }}
@@ -135,10 +181,32 @@ jobs:
   official-interop:
     runs-on: ubuntu-latest
     env:
+      ATTESTO_MCP_PATH: "1"
+      ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/pre-release/attesto_mcp
+      ATTESTO_SOURCE_PATH: ${{ github.workspace }}/pre-release/attesto
       CONFORMANCE_COMMIT: 74edef34d674f563537be8c6587cebaa58e830ca
       CONFORMANCE_SHA256: 28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto
+          ref: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          path: pre-release/attesto
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto_mcp
+          ref: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+          path: pre-release/attesto_mcp
+          persist-credentials: false
+      - name: verify pre-release dependency commits
+        env:
+          ATTESTO_REF: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          ATTESTO_MCP_REF: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+        run: |
+          test "$(git -C pre-release/attesto rev-parse HEAD)" = "$ATTESTO_REF"
+          test "$(git -C pre-release/attesto_mcp rev-parse HEAD)" = "$ATTESTO_MCP_REF"
       - name: configure temporary paths
         run: |
           {
