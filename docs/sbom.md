@@ -1,9 +1,11 @@
-# Production dependency inventory
+# Production dependency inventory (0.12.2 baseline)
 
-Observed locally on 2026-08-30 from `mix.exs` with `mix deps.get` and checked with
-`mix deps.tree --only prod`. This library does not maintain or ship a project
-lockfile; the exact observed resolution is recorded below and must be refreshed
-when constraints or publication inputs change.
+This is the last recorded dependency evidence, observed locally on 2026-08-30
+from the 0.12.2 release candidate with `mix deps.get` and checked with `mix
+deps.tree --only prod`. It is not evidence for 0.13.0. Version 0.13.0 raises
+the direct `attesto_mcp` requirement to `>= 1.3.0 and < 2.0.0`; its dependency
+resolution must be refreshed after the coordinated packages are published.
+This library does not maintain or ship a project lockfile.
 
 | Component | Resolved version | License policy | Production path |
 |---|---:|---|---|
@@ -34,11 +36,12 @@ Igniter. `attesto_phoenix` is detected only when the host already declares it;
 it is not a root dependency of this package. The installer does not enable CIMD
 or add Req by default; with explicit `--enable-cimd`, the host receives a direct
 compatible Req dependency because the enabled default CIMD fetcher needs an
-HTTP client at runtime. The reusable and generated-host
-compatibility checks accept public-Hex `attesto_phoenix` requirements
+HTTP client at runtime. The reusable and generated-host compatibility checks in
+this baseline accepted public-Hex `attesto_phoenix` requirements
 overlapping `>= 2.14.1 and < 3.0.0` and Req requirements overlapping
 `>= 0.6.1 and < 1.0.0`; the exact floor check resolved `attesto_phoenix`
-2.14.1, while the generated host resolved 2.14.2 and Req 0.7.4. Automatic
+2.14.1, while the generated host resolved 2.14.2 and Req 0.7.4. These are
+0.12.2 observations, not 0.13.0 release evidence. Automatic
 routes call the public AttestoPhoenix
 protected-resource APIs at request time so replay, nonce, canonical-request,
 certificate, access-token revocation, and principal-loading policies remain

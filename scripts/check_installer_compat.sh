@@ -9,15 +9,30 @@ temp_root=${TMPDIR:-/tmp}
 host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-host.XXXXXX")
 phoenix_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-host.XXXXXX")
 phoenix_floor_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-floor-host.XXXXXX")
+phoenix_three_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-three-host.XXXXXX")
 absent_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-absent.XXXXXX")
 generated_root=$(mktemp -d "$temp_root/attesto-mcp-installer-generated.XXXXXX")
 generated_host_dir="$generated_root/installer_host"
 
 cleanup() {
-  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$absent_dir" "$generated_root"
+  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$phoenix_three_host_dir" "$absent_dir" "$generated_root"
 }
 
 trap cleanup EXIT HUP INT TERM
+
+phoenix_three_available=${ATTESTO_PHOENIX_THREE_AVAILABLE:-}
+case "$phoenix_three_available" in
+  1|true)
+    run_phoenix_three=true
+    ;;
+  ""|0|false)
+    run_phoenix_three=false
+    ;;
+  *)
+    echo "ATTESTO_PHOENIX_THREE_AVAILABLE must be 1, true, 0, or false" >&2
+    exit 64
+    ;;
+esac
 
 cp -R "$repo_dir/fixtures/installer_host/." "$host_dir"
 cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_host_dir"
@@ -28,6 +43,10 @@ cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_floor_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_floor_host_dir/mix.exs"
 cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_floor_host_dir/lib/installer_host_web/router.ex"
 cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_floor_host_dir/lib/installer_host_web/parsed_body_probe.ex"
+cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_three_host_dir"
+cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_three_host_dir/mix.exs"
+cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_three_host_dir/lib/installer_host_web/router.ex"
+cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_three_host_dir/lib/installer_host_web/parsed_body_probe.ex"
 
 digest_tree() {
   {
@@ -207,7 +226,10 @@ installed_http_smoke() {
   grep -Fq 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex
   test "$(grep -F -c 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex)" -eq 1
   test "$(grep -F -c 'Elixir.Phoenix.Router.forward("/mcp"' lib/installer_host_web/router.ex)" -eq 1
-  ! grep -Fq 'oauth-protected-resource' lib/installer_host_web/router.ex
+  if grep -Fq 'oauth-protected-resource' lib/installer_host_web/router.ex; then
+    echo "reused Phoenix metadata route was duplicated" >&2
+    exit 1
+  fi
 
   first_digest=$(digest_tree)
 
@@ -303,6 +325,67 @@ installed_http_smoke() {
   '
 
 )
+
+if [ "$run_phoenix_three" = true ]; then
+  (
+    cd "$phoenix_three_host_dir"
+    export ATTESTO_MCP_SERVER_PATH="$repo_dir"
+    INSTALLER_HOST_SIGNING_PEM=$(openssl genpkey -algorithm ED25519 2>/dev/null)
+    export INSTALLER_HOST_SIGNING_PEM
+
+    elixir -e '
+      path = "mix.exs"
+      source = File.read!(path)
+      marker = ~s({:attesto_phoenix, "~> 2.14"})
+
+      unless length(:binary.matches(source, marker)) == 1 do
+        raise("attesto_phoenix 3.x dependency marker was not unique")
+      end
+
+      File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "~> 3.0"})))
+    '
+
+    mix deps.get
+    mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
+    grep -Fq 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex
+    test "$(grep -F -c 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex)" -eq 1
+    test "$(grep -F -c 'Elixir.Phoenix.Router.forward("/mcp"' lib/installer_host_web/router.ex)" -eq 1
+    if grep -Fq 'oauth-protected-resource' lib/installer_host_web/router.ex; then
+      echo "reused Phoenix 3 metadata route was duplicated" >&2
+      exit 1
+    fi
+
+    first_digest=$(digest_tree)
+    mix format --check-formatted
+    mix compile --warnings-as-errors
+    mix test
+    mix run -e '
+      version = Application.spec(:attesto_phoenix, :vsn) |> to_string()
+      protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+      unless Version.match?(version, ">= 3.0.0 and < 4.0.0") do
+        raise("attesto_phoenix 3.x lane resolved an unsupported version")
+      end
+
+      unless match?(%Attesto.Config{}, protected[:config]) and
+               is_function(protected[:replay_check], 2) and
+               is_function(protected[:htu], 1) and
+               is_function(protected[:principal], 2) and
+               protected[:principal].(
+                 %{"sub" => "svc_installer", "client_id" => "installer"},
+                 %{binding: :bearer}
+               ) == {:ok, %{id: "svc_installer"}} do
+        raise("attesto_phoenix 3.x protected-resource integration failed")
+      end
+    '
+
+    mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
+    second_digest=$(digest_tree)
+    test "$first_digest" = "$second_digest"
+  )
+else
+  printf '%s\n' "Phoenix 3 automatic installer lane is pending coordinated dependency publication; set ATTESTO_PHOENIX_THREE_AVAILABLE=1 after attesto, attesto_mcp, and attesto_phoenix 3.x are published" >&2
+fi
 
 mix phx.new "$generated_host_dir" \
   --app installer_host \
@@ -463,4 +546,8 @@ mix phx.new "$generated_host_dir" \
   '
 )
 
-printf '%s\n' "installer compatibility checks passed"
+if [ "$run_phoenix_three" = true ]; then
+  printf '%s\n' "installer compatibility checks passed"
+else
+  printf '%s\n' "installer compatibility checks passed; Phoenix 3 lane pending coordinated dependency publication"
+fi

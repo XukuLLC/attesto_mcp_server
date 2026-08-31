@@ -20,7 +20,7 @@ authenticated MCP requests against it.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 2.14.1 and < 3.0.0`:
+version compatible with `>= 2.14.1 and < 4.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -255,7 +255,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 0.12.2"}]
+  [{:attesto_mcp_server, "~> 0.13"}]
 end
 ```
 
@@ -282,7 +282,8 @@ session-store adapters, clustered routing, cache policy, telemetry, and
 exception reporting are documented in the [usage guide](docs/usage.md).
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. Exact runner and SDK evidence is recorded in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 0.12.2;
+0.13.0 evidence is pending the release validation rerun in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

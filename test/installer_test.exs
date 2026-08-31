@@ -368,6 +368,33 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert diff =~
              ~s({:attesto_phoenix, ">= 2.14.1 and < 3.0.0"})
 
+    phoenix_three =
+      true
+      |> project(attesto_phoenix_requirement: "~> 3.0")
+      |> install(["--base-url", "https://mcp.example.com"])
+
+    assert phoenix_three.issues == []
+
+    phoenix_three_mix =
+      phoenix_three
+      |> apply_igniter!()
+      |> Map.fetch!(:rewrite)
+      |> Rewrite.source!("mix.exs")
+      |> Rewrite.Source.get(:content)
+
+    assert length(:binary.matches(phoenix_three_mix, ~s({:attesto_phoenix, "~> 3.0"}))) == 1
+    assert phoenix_three_mix =~ ~s({:attesto_phoenix, "~> 3.0"})
+
+    phoenix_ceiling =
+      true
+      |> project(attesto_phoenix_requirement: ">= 2.14.1 and < 5.0.0")
+      |> install(["--base-url", "https://mcp.example.com"])
+
+    assert phoenix_ceiling.issues == []
+
+    assert Igniter.Test.diff(phoenix_ceiling) =~
+             ~s({:attesto_phoenix, ">= 2.14.1 and < 4.0.0"})
+
     partial =
       true
       |> project(req_dependency: ~s({:req, ">= 0.6.0 and < 0.8.0"}))
@@ -435,7 +462,16 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       [req_dependency: ~s({:req, "~> 0.6.1-rc.0"})],
       [req_dependency: ~s({:req, "~> 0.7", [:not_a_keyword_option]})],
       [attesto_phoenix_requirement: "2.13.0"],
-      [attesto_phoenix_requirement: "< 2.14.1"]
+      [attesto_phoenix_requirement: "< 2.14.1"],
+      [attesto_phoenix_requirement: "~> 4.0"],
+      [
+        attesto_phoenix_dependency:
+          ~s({:attesto_phoenix, ">= 2.14.1 and < 4.0.0", git: "https://example.com/attesto_phoenix.git"})
+      ],
+      [
+        attesto_phoenix_dependency:
+          ~s({:attesto_phoenix, ">= 2.14.1 and < 4.0.0", path: "../attesto_phoenix"})
+      ]
     ]
 
     for options <- cases do
@@ -836,7 +872,11 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     phoenix_dependency =
       if attesto_phoenix?,
         do:
-          ~s({:attesto_phoenix, #{inspect(Keyword.get(options, :attesto_phoenix_requirement, "~> 2.0"))}}),
+          Keyword.get(
+            options,
+            :attesto_phoenix_dependency,
+            ~s({:attesto_phoenix, #{inspect(Keyword.get(options, :attesto_phoenix_requirement, "~> 2.0"))}})
+          ),
         else: ""
 
     dependencies =

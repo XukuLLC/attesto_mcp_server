@@ -69,7 +69,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 2.14.1 and < 3.0.0` and Req requirements that overlap
+overlap `>= 2.14.1 and < 4.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -276,9 +276,9 @@ non-header bearer-token locations. Resolution failure produces a generic 500
 response. `allow_dynamic_origin` remains only for explicitly local development;
 do not derive a production audience from an untrusted request Host header.
 
-The package requires `attesto_mcp ~> 1.2.1` and calls the public
+The package requires `attesto_mcp >= 1.3.0 and < 2.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
-directly. There is no sibling-path or pre-1.2 authentication fallback.
+directly. There is no automatic fallback to an older authentication boundary.
 
 Per-delivery subscription reauthorization requires an executable
 `%Attesto.Config{}` through `auth: [config: ...]`. It re-verifies the captured

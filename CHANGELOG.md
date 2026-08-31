@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.0 - 2026-08-31
+
+- Support the coordinated Attesto 2.x and AttestoPhoenix 3.x release train
+  through `attesto_mcp` 1.3 or later. Version 0.13 requires
+  `attesto_mcp >= 1.3.0 and < 2.0.0`.
+- Accept direct public-Hex `attesto_phoenix` requirements from the supported
+  2.14.1 floor through the 3.x line, retaining fail-closed intersection and
+  dependency-source validation.
+
 ## 0.12.2 - 2026-08-30
 
 - Reject `2026-07-28` request metadata paired with missing, duplicate, or

@@ -4,6 +4,10 @@ This file records reproducible evidence, not certification. The project does
 not claim an MCP SDK tier, certification, endorsement, or complete coverage of
 optional extensions.
 
+The evidence recorded below is for the 0.12.2 release candidate. No 0.13.0
+conformance or client-SDK results have been run or recorded yet; the 0.12.2
+fingerprint and totals must not be presented as 0.13.0 evidence.
+
 ## Frozen official server runner
 
 The official `modelcontextprotocol/conformance` runner was frozen at:

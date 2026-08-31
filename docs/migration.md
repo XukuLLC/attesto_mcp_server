@@ -5,6 +5,13 @@ This guide maps an existing MCP catalog and deployment onto
 authorization, and rollout safety. The [usage guide](usage.md) contains the
 complete option reference.
 
+## 0.13 dependency boundary
+
+Version 0.13 requires `attesto_mcp >= 1.3.0 and < 2.0.0`. Run `mix deps.get`
+after upgrading; direct Phoenix hosts may keep a compatible
+`attesto_phoenix` requirement from the supported `>= 2.14.1 and < 4.0.0`
+range.
+
 ## 1. Inventory the catalog
 
 Represent each primitive as one registration tuple:

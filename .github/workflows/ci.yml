@@ -21,6 +21,66 @@ jobs:
         run: mix archive.install hex phx_new 1.8.13 --force
       - run: scripts/check_installer_compat.sh
 
+  coordinated-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate lowercase immutable coordinated refs
+        env:
+          ATTESTO_REF: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          ATTESTO_PHOENIX_REF: 88d1e914faf0962f95dec13152714a8b38b29fd7
+          ATTESTO_MCP_REF: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+        run: |
+          for ref in "$ATTESTO_REF" "$ATTESTO_PHOENIX_REF" "$ATTESTO_MCP_REF"; do
+            if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "coordinated source refs must be full lowercase 40-character commit SHAs" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto
+          ref: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          path: coordinated/attesto
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto_phoenix
+          # Temporary exact candidate; update after the coordinated lock commit.
+          ref: 88d1e914faf0962f95dec13152714a8b38b29fd7
+          path: coordinated/attesto_phoenix
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: XukuLLC/attesto_mcp
+          ref: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+          path: coordinated/attesto_mcp
+          persist-credentials: false
+      - name: verify coordinated checkout commits
+        env:
+          ATTESTO_REF: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          ATTESTO_PHOENIX_REF: 88d1e914faf0962f95dec13152714a8b38b29fd7
+          ATTESTO_MCP_REF: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+        run: |
+          test "$(git -C coordinated/attesto rev-parse HEAD)" = "$ATTESTO_REF"
+          test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "$ATTESTO_PHOENIX_REF"
+          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "$ATTESTO_MCP_REF"
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.3"
+          otp-version: "29.0.5"
+          version-type: strict
+      - name: run coordinated source installer lane
+        env:
+          ATTESTO_MCP_PATH: "1"
+          ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_mcp
+          ATTESTO_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto
+          ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
+          ATTESTO_REF: e83e879fe84cdaaa878013ea60b5e92689b720fe
+          ATTESTO_PHOENIX_REF: 88d1e914faf0962f95dec13152714a8b38b29fd7
+          ATTESTO_MCP_REF: 42ae34beef35d1f8acffab36755fb6ee43a139c4
+        run: scripts/check_installer_coordinated.sh
+
   verify:
     strategy:
       fail-fast: false
@@ -33,6 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: scan source for generic package hygiene violations
+        run: scripts/check_source_hygiene.sh .
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ matrix.elixir }}
@@ -56,18 +118,15 @@ jobs:
       - run: |
           archive_dir="$(find . -maxdepth 1 -type d -name 'attesto_mcp_server-*' -print -quit)"
           test -n "$archive_dir"
-          ! find "$archive_dir" -type f -name 'mix.lock' -print -quit | grep -q .
-          ! find "$archive_dir" -type d \( -name _build -o -name cover -o -name doc -o -name deps \) -print -quit | grep -q .
-      - name: optional orchestrator supplied source-neutral scan
-        run: |
-          archive_dir="$(find . -maxdepth 1 -type d -name 'attesto_mcp_server-*' -print -quit)"
-          if [ -n "${FORBIDDEN_TERMS_FILE:-}" ]; then
-            while IFS= read -r term; do
-              [ -z "$term" ] || ! grep -R -n -F -- "$term" "$archive_dir"
-            done < "$FORBIDDEN_TERMS_FILE"
-          else
-            echo "final forbidden-term scan is supplied by the orchestrator"
+          if find "$archive_dir" -type f -name 'mix.lock' -print -quit | grep -q .; then
+            echo "package archive contains mix.lock" >&2
+            exit 1
           fi
+          if find "$archive_dir" -type d \( -name _build -o -name cover -o -name doc -o -name deps \) -print -quit | grep -q .; then
+            echo "package archive contains generated directories" >&2
+            exit 1
+          fi
+          scripts/check_source_hygiene.sh "$archive_dir" package
       - run: test -s CONFORMANCE.md && test -s docs/sbom.md
       - run: elixir examples/stdio.exs </dev/null
       - working-directory: examples/consumer
