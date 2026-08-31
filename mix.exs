@@ -39,7 +39,7 @@ defmodule AttestoMCP.Server.MixProject do
       {:telemetry, "~> 1.2"},
       {:igniter, "~> 0.6", optional: true, runtime: false},
       {:bandit, "~> 1.6", only: [:dev, :test], runtime: false},
-      {:phoenix, "~> 1.7.0", only: :test, runtime: false},
+      {:phoenix, ">= 1.7.0 and < 2.0.0", only: :test, runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false}
     ]
