@@ -9,8 +9,7 @@ See the root [`CONFORMANCE.md`](../CONFORMANCE.md) for the exact runner version,
 commit, archive digest, commands, observed scored and not-scored results,
 expected-failure status, client versions, and non-certification statement.
 
-The root record currently covers 0.12.2. It does not provide conformance
-evidence for the 0.13.0 release candidate.
+The root record covers the fingerprinted 0.13.0 release candidate.
 
 The frozen runner has no scored `2025-06-18` requirement set. Compatibility
 for that revision is therefore covered by package-owned HTTP, stdio, lifecycle,

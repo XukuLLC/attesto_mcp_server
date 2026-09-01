@@ -111,11 +111,10 @@ digest_tree() {
   export INSTALLER_HOST_SIGNING_PEM
 
   # The automatic Phoenix installer intentionally accepts only literal public
-  # Hex requirements. This pre-release lane therefore installs through the
+  # Hex requirements. This source-linked lane therefore installs through the
   # explicit callback path, then executes that callback through the real
-  # AttestoPhoenix 3 bridge below. Installer unit tests cover the automatic
-  # Phoenix rewrite; the published-dependency compatibility lane exercises the
-  # complete automatic path once coordinated releases exist on Hex.
+  # AttestoPhoenix 3 bridge below. The published-dependency compatibility lane
+  # separately exercises the complete automatic path against released packages.
 
   elixir -e '
     path = "mix.exs"

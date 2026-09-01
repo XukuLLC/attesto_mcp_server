@@ -1,4 +1,7 @@
-Mix.install([{:attesto_mcp_server, path: Path.expand("..", __DIR__)}, {:bandit, "~> 1.6"}])
+Mix.install(
+  [{:attesto_mcp_server, path: Path.expand("..", __DIR__)}, {:bandit, "~> 1.6"}],
+  force: true
+)
 
 {:ok, server} = AttestoMCP.Server.start_link(name: :attesto_mcp_bandit_example)
 

@@ -2,12 +2,13 @@
 
 ## 0.13.0 - 2026-08-31
 
-- Support the coordinated Attesto 2.x and AttestoPhoenix 3.x release train
-  through `attesto_mcp` 1.3 or later. Version 0.13 requires
-  `attesto_mcp >= 1.3.0 and < 2.0.0`.
+- Require `attesto_mcp >= 1.3.0 and < 2.0.0`, adding compatibility with the
+  Attesto 2.x authorization contracts.
 - Accept direct public-Hex `attesto_phoenix` requirements from the supported
   2.14.1 floor through the 3.x line, retaining fail-closed intersection and
   dependency-source validation.
+- Refresh path-based `Mix.install/2` examples so an existing install cache
+  cannot retain dependency versions from an earlier server release.
 
 ## 0.12.2 - 2026-08-30
 

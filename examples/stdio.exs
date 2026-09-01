@@ -29,7 +29,11 @@ defmodule AttestoMCP.StdioExample.Boot do
       System.delete_env("MIX_BUILD_PATH")
 
       try do
-        Mix.install([{:attesto_mcp_server, path: Path.expand("..", __DIR__)}], verbose: false)
+        Mix.install(
+          [{:attesto_mcp_server, path: Path.expand("..", __DIR__)}],
+          force: true,
+          verbose: false
+        )
       after
         if build_path, do: System.put_env("MIX_BUILD_PATH", build_path)
       end

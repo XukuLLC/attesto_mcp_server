@@ -209,7 +209,11 @@ at an intentional precedence point.
 The HTTP boundary is a normal Plug. A documented local launcher is:
 
 ```elixir
-Mix.install([{:attesto_mcp_server, path: "."}, {:bandit, "~> 1.6"}], verbose: false)
+Mix.install(
+  [{:attesto_mcp_server, path: "."}, {:bandit, "~> 1.6"}],
+  force: true,
+  verbose: false
+)
 {:ok, server} = AttestoMCP.Server.start_link(name: :bandit_example)
 plug = {AttestoMCP.Server.Plug, server: server, path: "/mcp", auth: [config: my_attesto_config, base_url: "http://127.0.0.1:4000"]}
 Bandit.start_link(plug: plug, scheme: :http, ip: {127, 0, 0, 1}, port: 4000)

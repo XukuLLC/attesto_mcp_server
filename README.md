@@ -282,8 +282,7 @@ session-store adapters, clustered routing, cache policy, telemetry, and
 exception reporting are documented in the [usage guide](docs/usage.md).
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 0.12.2;
-0.13.0 evidence is pending the release validation rerun in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 0.13.0 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

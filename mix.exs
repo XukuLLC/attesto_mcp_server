@@ -45,8 +45,8 @@ defmodule AttestoMCP.Server.MixProject do
     ]
   end
 
-  # Opt in explicitly while co-developing the coordinated Attesto release
-  # train. Package and publish tasks always resolve the Hex range, even if an
+  # Opt in explicitly for source-linked Attesto-family development. Package
+  # and publish tasks always resolve the Hex range, even if an
   # inherited shell environment still carries the development opt-in.
   defp attesto_mcp_dep do
     local_path =

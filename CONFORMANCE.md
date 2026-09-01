@@ -1,175 +1,40 @@
 # Conformance evidence
 
-This file records reproducible evidence, not certification. The project does
-not claim an MCP SDK tier, certification, endorsement, or complete coverage of
-optional extensions.
+This is reproducible test evidence for `attesto_mcp_server` 0.13.0, not a
+certification, endorsement, or claim of support for every optional MCP
+extension.
 
-The evidence recorded below is for the 0.12.2 release candidate. No 0.13.0
-conformance or client-SDK results have been run or recorded yet; the 0.12.2
-fingerprint and totals must not be presented as 0.13.0 evidence.
+## Tested candidate
 
-## Frozen official server runner
-
-The official `modelcontextprotocol/conformance` runner was frozen at:
-
-- runner package: `@modelcontextprotocol/conformance` `0.2.0-alpha.11`
-- commit: `74edef34d674f563537be8c6587cebaa58e830ca`
-- commit archive SHA-256:
+- source fingerprint:
+  `a0b9d409784fff0411d95544cd24422e04a8aa0b6ca02d5b16d1b8415e82eb06`
+- official runner: `@modelcontextprotocol/conformance` `0.2.0-alpha.11`
+- runner commit: `74edef34d674f563537be8c6587cebaa58e830ca`
+- runner archive SHA-256:
   `28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293`
-- evidence release: `0.12.2`
-- `0.10.0` release source fingerprint:
-  `35b985a6d0ffdc7ab7a0dd75983c69ae89d35000620a6f70079a711a586c6e32`
-- `0.10.1` patch-candidate source fingerprint:
-  `442e5e16946eb90149bef41acc0461f18f7d4fdd682dd40b226c3a9814d29543`
-- `0.10.2` patch-candidate source fingerprint:
-  `791e7308119c10261a579896efdb5a2b43c1c8dea944d5426cb3ab681c7a46a5`
-- `0.10.3` patch-candidate source fingerprint:
-  `c39c0cd59444d08ed1d356d836b05490caf13ec9bc0c511a43523fc98a7878c4`
-- `0.10.4` patch-candidate source fingerprint:
-  `4e40ffedc43508c726dccf9d67008dec9768fc304b830bb845c9806a349a70bb`
-- `0.11.0` release-candidate source fingerprint:
-  `0538b3fe409f75b58c03cfb3901b940d849303300c93c71c1f4f2db2b456e4d7`
-- `0.11.0` 2026 runner completed at: `2026-08-29T06:57:30Z`
-- `0.11.0` 2025 runner completed at: `2026-08-29T06:57:32Z`
-- `0.11.1` release-candidate source fingerprint:
-  `95e4d4c8266505544b6e88ef2635938efe0425a0caf8f6736f10483b55776b78`
-- `0.11.1` 2026 runner completed at: `2026-08-29T20:12:10Z`
-- `0.11.1` 2025 runner completed at: `2026-08-29T20:12:19Z`
-- `0.11.1` TypeScript SDK smoke gates completed at: `2026-08-29T20:12:36Z`
-- `0.11.1` Python SDK smoke gates completed at: `2026-08-29T20:12:54Z`
-- `0.12.0` release-candidate source fingerprint:
-  `e3240f02bba47ab414c00d39c8d27a332065f02688ae588c728d38afae837f0d`
-- `0.12.0` 2026 runner completed at: `2026-08-30T01:11:54Z`
-- `0.12.0` 2025 runner completed at: `2026-08-30T01:12:12Z`
-- `0.12.0` TypeScript SDK smoke gates completed at: `2026-08-30T01:14:55Z`
-- `0.12.0` Python SDK smoke gates completed at: `2026-08-30T01:15:43Z`
-- `0.12.1` release-candidate source fingerprint:
-  `ce98d7edadef2c68ed587b87eb3468203365f7b15f882debdd49b98a607d0ed4`
-- `0.12.1` 2026 runner completed at: `2026-08-30T15:10:39Z`
-- `0.12.1` 2025 runner completed at: `2026-08-30T15:10:50Z`
-- `0.12.1` TypeScript SDK smoke gates completed at: `2026-08-30T15:11:06Z`
-- `0.12.1` Python SDK smoke gates completed at: `2026-08-30T15:11:24Z`
-- `0.12.1` installer matrix completed at: `2026-08-30T15:15:29Z`
-- `0.12.1` complete local evidence set recorded at: `2026-08-30T15:15:29Z`
-- `0.12.2` release-candidate source fingerprint:
-  `92d2ab079c41ff4f4e0e841ef5f10914194eac45cb38c3582a90f70b922ba707`
-- `0.12.2` 2026 runner completed at: `2026-08-30T17:25:10Z`
-- `0.12.2` 2025 runner completed at: `2026-08-30T17:25:13Z`
-- `0.12.2` TypeScript SDK smoke gates completed at: `2026-08-30T17:25:18Z`
-- `0.12.2` Python SDK smoke gates completed at: `2026-08-30T17:25:28Z`
-- `0.12.2` installer matrix completed at: `2026-08-30T17:28:57Z`
-- `0.12.2` complete local evidence set recorded at: `2026-08-30T17:32:13Z`
-- `0.10.1` hosted official-interop job completed at: `2026-08-27T15:40:48Z`
-  in [run 33089002514](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33089002514)
-- `0.10.2` hosted official-interop job completed at: `2026-08-27T17:55:41Z`
-  in [run 33100777065](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33100777065)
-- `0.10.3` hosted official-interop job completed at: `2026-08-28T14:30:51Z`
-  in [run 33180401361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33180401361)
-- `0.10.4` hosted official-interop job completed at: `2026-08-28T16:29:34Z`
-  in [run 33190111361](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33190111361)
-- `0.12.2` hosted release matrix completed at: `2026-08-30T17:31:25Z`
-  in [run 33325161224](https://github.com/XukuLLC/attesto_mcp_server/actions/runs/33325161224)
+- expected-failure files or exemptions: none
 
-The runner was built and invoked with the following commands. `RUNNER_DIR` and
-`ARCHIVE` identify caller-owned locations outside the package so the record
-does not embed a workstation path.
-
-Each fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
-`scripts`, `test`, and reusable installer `fixtures` files in lexical order.
-The table below was rerun against the exact `0.12.2` release candidate; it is
-not inherited from an earlier release. The
-`0.10.1` patch candidate adds regressions for request bodies decoded or passed
-through by a host parser; its official runner and exact SDK client smokes were
-repeated successfully by the hosted release gate linked above.
-The `0.10.2` patch candidate clarifies primitive callback inputs and removes a
-hard-coded default server version. Its hosted release gate passed all four jobs
-at `2026-08-27T17:59:31Z` against implementation commit
-`81a1f7cfa5c6fbf291c8c6cf155faabdf4048545`.
-The `0.10.3` patch candidate hardens optional-installer dependency, route,
-callback, and generated-module ownership preflight; normalizes atom cache-scope
-options; keeps stdio adapter controls out of owned server startup; and exercises
-combined installers in a fresh Phoenix 1.8.13 host against released
-`attesto_mcp` 1.2.2 and `attesto_phoenix` 2.14.1. It also hardens completion
-scope enforcement, metadata handling, notification publication, retained
-request identifiers, and bounded legacy/modern resource subscriptions. Its
-local aggregate gate passed 312 checks (one doctest plus 311 tests), 81.54%
-coverage, zero-error/zero-skip Dialyzer, package construction, and the Hex
-advisory audit. Hosted run 33180401361 passed all four jobs at
-`2026-08-28T14:35:44Z` against implementation commit
-`d6492bb8184702859bb0160343fd92de647fbdf8`.
-The `0.10.4` patch candidate preserves Attesto's scheme-correct OAuth
-challenges and error details for invalid DPoP proofs, sender-bound tokens
-presented as Bearer, nonce requests, and insufficient scopes; keeps anonymous
-discovery challenges error-free; and pins challenge metadata to the configured
-canonical resource origin. Its hosted aggregate gate passed 312 checks (one
-doctest plus 311 tests), 81.59% coverage, zero-error/zero-skip Dialyzer,
-package construction, and the Hex advisory audit. Hosted run 33190111361
-passed all four jobs at `2026-08-28T16:34:28Z` against implementation commit
-`e7d19a02ad9b73ccdd19b9b7a583590bfa5fcf56`.
-The `0.11.0` release candidate adds host callbacks, explicit client-visible
-application errors, durable legacy-session storage, clustered publication,
-subscription reauthorization, trusted telemetry metadata, and a conservative
-Phoenix installer path. Its local aggregate gate passed 400 checks (one
-doctest plus 399 tests), 82.21% coverage, zero-error/zero-skip Dialyzer,
-package construction, and the Hex advisory audit. The full installer matrix
-also passed against released dependencies, the pinned `attesto_phoenix` floor,
-a freshly generated Phoenix 1.8.13 host, installer reruns, authenticated MCP
-traffic, and the no-Igniter fallback. The frozen official runner was repeated
-at the `0.11.0` fingerprint above with the same scored and raw totals shown in
-the table.
-The `0.11.1` patch candidate documents per-definition authorization, hardens
-Phoenix parser preflight and metadata-route diagnostics, clarifies host-owned
-custom-scope configuration, and adds focused regressions. Its isolated local
-suite at ExUnit seed `442413` passed 404 checks (one doctest plus 403 tests) and
-reported 82.48% coverage. Warnings-as-errors compilation, zero-error/zero-skip
-Dialyzer, package construction, and the Hex advisory audit also passed in that
-isolated environment. The frozen official runner and exact SDK client smokes
-were repeated at the `0.11.1` fingerprint above with the same scored and raw
-totals shown in the table.
-The `0.12.0` release candidate adds bounded alternative scope sets, typed
-content and result constructors, strict final-result validation, explicit
-schema-property defaults, atomic catalog replacement, bounded scope mapping,
-runtime canonical-resource resolution, and stronger clustered session and
-stdio lifecycle handling. Its local aggregate gate passed 464 checks (one
-doctest plus 463 tests), reported 82.86% coverage, completed Dialyzer with zero
-errors and zero skips, built the package, and passed the Hex advisory audit.
-The full installer matrix also passed against released dependencies, the
-supported `attesto_phoenix` floor, a freshly generated Phoenix 1.8.13 host,
-installer reruns, authenticated MCP traffic, and the no-Igniter fallback. The
-frozen official runner and exact SDK client smokes were repeated at the
-`0.12.0` fingerprint above with the scored and raw totals shown below.
-The `0.12.1` patch candidate adds bounded multi-expression resource URI
-templates and a configurable finite JSON budget that governs schema
-validation, handler-result normalization, and protocol encoding while bounding
-the configurable HTTP and stdio transport ceilings.
-Its local aggregate gate passed 506 checks (one doctest plus 505 tests),
-reported 82.90% coverage, completed Dialyzer with zero errors and zero skips,
-built the package, and passed the Hex advisory audit. The full installer matrix
-also passed against released dependencies, the supported `attesto_phoenix`
-floor, a freshly generated Phoenix 1.8.13 host, installer reruns, authenticated
-MCP traffic, and the no-Igniter fallback. The frozen official runner and exact
-SDK client smokes were repeated at the `0.12.1` fingerprint above with the
-scored and raw totals shown below.
-The `0.12.2` patch candidate rejects modern request metadata paired with
-missing, duplicate, or mismatched HTTP mirror headers before session-bound
-routing. It also adds an authenticated Livebook walkthrough, pins late-bound
-named-server transport-budget behavior with lifecycle regressions, and makes
-the real Bandit disconnect and stdio interleaving tests independent of loaded
-host timing while still proving worker termination and response delivery.
-Its local aggregate gate passed 509 checks (one doctest plus 508 tests),
-reported 82.98% coverage, completed Dialyzer with zero errors and zero skips,
-built the package, and passed the Hex advisory audit. The full installer matrix
-also passed against released dependencies, the supported `attesto_phoenix`
-floor, a freshly generated Phoenix 1.8.13 host, installer reruns, authenticated
-MCP traffic, and the no-Igniter fallback. The frozen official runner and exact
-SDK client smokes were repeated at the `0.12.2` fingerprint above with the
-scored and raw totals shown below.
+The fingerprint covers the tracked `mix.exs`, `config`, `lib`, `examples`,
+`scripts`, `test`, and `fixtures` files:
 
 ```sh
 git ls-files -z mix.exs config lib examples scripts test fixtures |
   xargs -0 shasum -a 256 |
   shasum -a 256
 ```
+
+## Official server runner
+
+| Requirements | Selected | Scored | Not scored | Raw assertions | Result |
+| --- | ---: | --- | --- | --- | --- |
+| `2026-07-28` | 50 | 37/37 passed | 4 passed, 9 failed | 161 passed, 30 failed | exit 0 |
+| `2025-11-25` | 33 | 30/30 passed | 3 passed, 0 failed | 80 passed, 0 failed | exit 0 |
+
+The 30 raw failures belong to nine Tasks-extension scenarios that the runner
+marks not scored. Tasks are disabled and are not advertised by this release.
+The unscored JSON Schema and HTTP-header scenarios passed.
+
+To reproduce the runner setup:
 
 ```sh
 curl -fsSL \
@@ -180,62 +45,37 @@ printf '%s  %s\n' \
   "$ARCHIVE" | sha256sum -c -
 mkdir -p "$RUNNER_DIR"
 tar -xzf "$ARCHIVE" -C "$RUNNER_DIR" --strip-components=1
-npx --yes npm@11.6.1 ci --prefix "$RUNNER_DIR"
-npx --yes npm@11.6.1 run build --prefix "$RUNNER_DIR"
+npx --yes npm@12.0.2 ci --prefix "$RUNNER_DIR"
+npx --yes npm@12.0.2 run build --prefix "$RUNNER_DIR"
 scripts/run_conformance_fixture.sh "$RUNNER_DIR" 2026-07-28
 scripts/run_conformance_fixture.sh "$RUNNER_DIR" 2025-11-25
 ```
 
-No expected-failure file, flag, baseline, or exemption was supplied.
+## Official client SDKs
 
-| Frozen requirements | Selected | Scored | Not scored | Raw assertions | Command result |
-| --- | ---: | --- | --- | --- | --- |
-| `2026-07-28` | 50 | 37/37 passed | 4 passed, 9 failed | 161 passed, 30 failed | exit 0 |
-| `2025-11-25` | 33 | 30/30 passed | 3 passed, 0 failed | 80 passed, 0 failed | exit 0 |
+The package fixture also negotiated each scored revision, listed tools, called
+`test_simple_text`, validated the response, and closed the connection with the
+exact released SDK versions below.
 
-All 30 raw failures in the 2026 run belong to nine not-scored Tasks-extension
-scenarios. Tasks are hard-disabled and are not advertised by this release. The
-not-scored JSON Schema and HTTP header scenarios passed. The 2025 not-scored
-session lifecycle, JSON Schema, and SSE polling scenarios passed.
-
-The following is historical `0.8.0` development context, not evidence for the
-candidate rerun. Compatibility review found two intermittent legacy stream races. An early full
-run routed a server-originated sampling request to a stale same-session stream;
-that led to deterministic newest-live-stream routing. A later full rerun began
-sampling and elicitation before the new connection's owned standing stream was
-registered, producing 78 passed and 2 failed raw assertions even though both
-scenarios passed in isolation. That led to a bounded stream-readiness wait and
-a regression test. Ten consecutive complete 2025-11-25 runs in that historical
-campaign then produced 80 passed and 0 failed assertions. The candidate table
-is based on a separate rerun. Neither failed historical run was hidden or
-converted to an expected failure.
-
-## Official client SDK smoke gates
-
-The package-owned authenticated fixture was also exercised with exact released
-official clients. Each gate negotiated the named era, listed tools, called
-`test_simple_text`, validated its text response, and closed the connection.
-These four gates were rerun against the fingerprinted `0.12.2` candidate at its
-recorded completion times. The package fixture wrapper inserts its own bearer
-token into each client transport. These gates therefore validate authenticated
-server protocol interoperability, not SDK OAuth discovery or token acquisition.
-
-| Client artifact | `2025-11-25` | `2026-07-28` |
+| Client | `2025-11-25` | `2026-07-28` |
 | --- | --- | --- |
 | `@modelcontextprotocol/client@2.0.0` | passed | passed |
 | `mcp==2.1.1` | passed | passed |
 
-The reproducible entrypoints are `scripts/client_smoke_ts.mjs`,
+The entrypoints are `scripts/client_smoke_ts.mjs`,
 `scripts/client_smoke_python.py`, and `scripts/run_client_smoke_fixture.sh`.
-The SDK packages and their build/download caches are installed outside the
-package; they are not runtime dependencies or package contents.
+They validate authenticated protocol interoperability, not OAuth discovery or
+token acquisition.
 
-## 2025-06-18 compatibility evidence
+## Package gates
 
-The frozen runner above does not score a `2025-06-18` requirement set, so this
-project does not attach those conformance totals to that revision. Package
-regressions instead exercise exact initialize version echo, initialized
-lifecycle enforcement, tool listing/calling over stdio, and authenticated HTTP
-session/header binding for `2025-06-18`. No official runner score or official
-client-SDK smoke result is recorded for that revision; this is package-owned
-regression evidence only.
+- 509 checks passed: one doctest and 508 tests.
+- Coverage was 82.98%; Dialyzer completed with zero errors and zero skips.
+- Package construction and the Hex advisory audit passed.
+- The installer matrix passed with AttestoMCP 1.3.0 across Attesto 1.15.0 and
+  2.0.0, AttestoPhoenix 2.14.1, 2.14.2, and 3.0.0, and a generated Phoenix
+  1.8.13 host.
+
+The frozen runner does not score `2025-06-18`. Package-owned HTTP, stdio,
+lifecycle, revision-filtering, and configuration regressions cover that
+revision without presenting an official runner score for it.
