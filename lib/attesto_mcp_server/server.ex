@@ -3517,7 +3517,9 @@ defmodule AttestoMCP.Server do
     do: true
 
   defp valid_session_store_result?(function, {:ok, value})
-       when function in [:load, :update, :update_ttl], do: is_map(value)
+       when function in [:load, :update, :update_ttl] do
+    is_map(value)
+  end
 
   defp valid_session_store_result?(function, {:ok, value})
        when function == :list_active,

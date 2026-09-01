@@ -7,7 +7,7 @@ extension.
 ## Tested candidate
 
 - source fingerprint:
-  `2377afb3909c8e2f5b6bf6dd97952ffc7a209d4cbf8b2547ddecb3cdc018136b`
+  `bf6ac5629eb02d7ea01135f3652cf1ba2c55fbe07a1457d549739b73adb01dfc`
 - official runner: `@modelcontextprotocol/conformance` `0.2.0-alpha.11`
 - runner commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - runner archive SHA-256:
