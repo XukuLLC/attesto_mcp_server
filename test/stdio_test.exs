@@ -6,6 +6,60 @@ defmodule AttestoMCP.Server.StdioTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Stdio
 
+  defmodule ErrorReplyServer do
+    @moduledoc false
+    use GenServer
+
+    def start_link(reason), do: GenServer.start_link(__MODULE__, reason)
+
+    @impl true
+    def init(reason), do: {:ok, reason}
+
+    @impl true
+    def handle_call(:options, _from, reason),
+      do: {:reply, [max_json_bytes: 1_000_000], reason}
+
+    @impl true
+    def handle_call({:new_session, _principal, _tenant, _opts}, _from, reason),
+      do: {:reply, {:error, reason}, reason}
+  end
+
+  defmodule RecoveringReadinessStore do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    alias AttestoMCP.Server.SessionStore.ETS
+
+    @impl true
+    def save(store, key, record), do: ETS.save(store.ets, key, record)
+
+    @impl true
+    def delete(store, key), do: ETS.delete(store.ets, key)
+
+    @impl true
+    def list_active(store), do: ETS.list_active(store.ets)
+
+    @impl true
+    def update_ttl(store, key, now), do: ETS.update_ttl(store.ets, key, now)
+
+    @impl true
+    def update(store, key, fun), do: ETS.update(store.ets, key, fun)
+
+    @impl true
+    def cleanup_expired(store), do: ETS.cleanup_expired(store.ets)
+
+    @impl true
+    def load(store, key) do
+      case Agent.get_and_update(store.first_load, fn
+             true -> {:unavailable, false}
+             false -> {:available, false}
+           end) do
+        :unavailable -> {:error, :session_store_unavailable}
+        :available -> ETS.load(store.ets, key)
+      end
+    end
+  end
+
   defmodule FailInitializationStore do
     @moduledoc false
     @behaviour AttestoMCP.Server.SessionStore
@@ -27,6 +81,13 @@ defmodule AttestoMCP.Server.StdioTest do
         end
       end)
     end
+  end
+
+  test "stdio startup maps an unrecognized session error to a neutral tuple" do
+    {:ok, server} = ErrorReplyServer.start_link({:private_failure, "do not expose"})
+
+    assert {:error, :session_store_unavailable} =
+             Stdio.run(server, input: fn -> :eof end)
   end
 
   test "legacy stdio accepts a structured principal" do
@@ -90,6 +151,49 @@ defmodule AttestoMCP.Server.StdioTest do
 
     assert get_in(Enum.find(messages, &(&1["id"] == 2)), ["error", "data", "reason"]) ==
              "initialized_notification_required"
+  end
+
+  test "legacy stdio pins a readiness outage through dispatch after store recovery" do
+    parent = self()
+    ets = start_supervised!(AttestoMCP.Server.SessionStore.ETS)
+    first_load = start_supervised!({Agent, fn -> true end})
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {RecoveringReadinessStore, %{ets: ets, first_load: first_load}},
+        scope_map: %{"tools/call" => ["stdio.call"]}
+      )
+
+    assert :ok =
+             Server.register_tool(server, "should_not_run", %{
+               input_schema: %{"type" => "object"},
+               handler: fn _arguments, _context ->
+                 send(parent, :stdio_handler_dispatched)
+                 {:ok, %{}}
+               end
+             })
+
+    input =
+      Jason.encode!(%{
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: %{"name" => "should_not_run", "arguments" => %{}}
+      }) <> "\n"
+
+    output =
+      capture_io(input, fn ->
+        Stdio.run(
+          server,
+          context: %{principal: "stdio-readiness", scopes: ["stdio.call"]}
+        )
+      end)
+
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    rejection = Enum.find(messages, &(&1["id"] == 2))
+    assert rejection["error"]["data"]["reason"] == "session_store_unavailable"
+    refute_received :stdio_handler_dispatched
   end
 
   test "interleaves modern request IDs and drains workers at EOF" do

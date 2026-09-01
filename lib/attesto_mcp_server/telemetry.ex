@@ -5,6 +5,12 @@ defmodule AttestoMCP.Server.Telemetry do
   The `[:attesto_mcp_server, :auth, :policy_failure]` event reports an invalid
   revocation result, a caught host-policy callback failure, or an HTTP verifier
   failure without including the callback reason, token claims, or principal.
+
+  The `[:attesto_mcp_server, :session_store, :failure]` event reports a
+  session-store operation that failed or a corrupt persisted row discarded by
+  the bundled Ecto adapter. Its failure-specific metadata contains only the
+  bounded operation atom in `:source` and a neutral `:unavailable` or
+  `:corrupt_discarded` outcome.
   """
 
   @prefix [:attesto_mcp_server]

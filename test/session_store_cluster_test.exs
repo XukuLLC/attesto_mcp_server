@@ -43,6 +43,89 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     def cleanup_expired({store, _gate}), do: ETS.cleanup_expired(store)
   end
 
+  defmodule RecordingStore do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    def save({store, _owner}, key, record), do: ETS.save(store, key, record)
+    def load({store, _owner}, key), do: ETS.load(store, key)
+
+    def delete({store, owner}, key) do
+      send(owner, {:session_store_delete, key})
+      ETS.delete(store, key)
+    end
+
+    def list_active({store, _owner}), do: ETS.list_active(store)
+    def update_ttl({store, _owner}, key, now), do: ETS.update_ttl(store, key, now)
+    def update({store, _owner}, key, fun), do: ETS.update(store, key, fun)
+    def cleanup_expired({store, _owner}), do: ETS.cleanup_expired(store)
+  end
+
+  defmodule ReplacingLoadStore do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    def save({store, _replacement}, key, record), do: ETS.save(store, key, record)
+
+    def load({store, replacement}, key) do
+      result = ETS.load(store, key)
+
+      if match?({:ok, _record}, result), do: :ok = ETS.save(store, key, replacement)
+      result
+    end
+
+    def delete({store, _replacement}, key), do: ETS.delete(store, key)
+    def list_active({store, _replacement}), do: ETS.list_active(store)
+
+    def update_ttl({store, _replacement}, key, now), do: ETS.update_ttl(store, key, now)
+    def update({store, _replacement}, key, fun), do: ETS.update(store, key, fun)
+    def cleanup_expired({store, _replacement}), do: ETS.cleanup_expired(store)
+  end
+
+  defmodule ReplacingInvalidLoadStore do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    alias AttestoMCP.Server.Session
+
+    def save({store, _replacement}, key, record), do: ETS.save(store, key, record)
+
+    def load({store, _replacement}, key) do
+      result = ETS.load(store, key)
+
+      case result do
+        {:ok, record} when is_map(record) ->
+          if Session.record_version_status(record) == :current and
+               not is_map_key(record, "principal"),
+             do: :ok = ETS.save(store, key, Map.put(record, "format_version", 99))
+
+        _ ->
+          :ok
+      end
+
+      result
+    end
+
+    def delete({store, _replacement}, key), do: ETS.delete(store, key)
+    def list_active({store, _replacement}), do: ETS.list_active(store)
+    def update_ttl({store, _replacement}, key, now), do: ETS.update_ttl(store, key, now)
+    def update({store, _replacement}, key, fun), do: ETS.update(store, key, fun)
+    def cleanup_expired({store, _replacement}), do: ETS.cleanup_expired(store)
+  end
+
+  defmodule FutureTouch do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    def save(_store, _key, _record), do: :ok
+    def load(_store, _key), do: :not_found
+    def delete(_store, _key), do: :ok
+    def list_active(_store), do: {:ok, []}
+    def update_ttl({_store, record}, _key, _now), do: {:ok, record}
+    def update(_store, _key, _fun), do: :not_found
+    def cleanup_expired(_store), do: {:ok, []}
+  end
+
   test "session records round-trip, preserve extensions on update, and fail closed" do
     principal = %{
       "sub" => "alice",
@@ -66,6 +149,15 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
 
     assert {:error, :unknown_record_version} =
              Session.from_record(Map.put(record, "format_version", 99))
+
+    for version <- [nil, "1", true, 1.0, 0, -1] do
+      invalid =
+        if is_nil(version),
+          do: Map.delete(record, "format_version"),
+          else: Map.put(record, "format_version", version)
+
+      assert {:error, :invalid_record} = Session.from_record(invalid)
+    end
 
     assert {:error, :invalid_record} = Session.from_record(Map.delete(record, "id"))
     assert {:error, :nonportable_binding} = Session.to_record(%{session | principal: self()})
@@ -93,6 +185,189 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert :ok = Server.touch_session(server, session.id)
     assert {:ok, updated} = ETS.load(store, {namespace, session.id})
     assert updated["future_extension"] == 42
+  end
+
+  test "safe restoration distinguishes an atom absent on this node" do
+    # Hand-built ETF keeps this fixture free of String.to_atom/1. The atom
+    # name is intentionally not loaded in the test VM.
+    missing_atom = "attesto_mcp_server_binding_absent_fixture_9f2c7e"
+
+    assert_raise ArgumentError, fn ->
+      :erlang.binary_to_existing_atom(missing_atom, :utf8)
+    end
+
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    missing_binding =
+      <<131, 119, byte_size(missing_atom), missing_atom::binary>>
+      |> Base.url_encode64(padding: false)
+
+    for field <- ["principal", "tenant"] do
+      assert {:error, :binding_unavailable} =
+               Session.from_record(Map.put(record, field, missing_binding))
+    end
+
+    malformed_binding = Base.url_encode64(<<131, 119, 4, "bad">>, padding: false)
+
+    assert {:error, :invalid_binding} =
+             Session.from_record(%{record | "principal" => malformed_binding})
+  end
+
+  test "safe restoration distinguishes an unavailable atom beside a byte-aligned bit binary" do
+    missing_atom = "attesto_mcp_server_binding_absent_bit_binary_fixture_9f2c7e"
+
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    bit_binary = <<77, 1::unsigned-big-32, 8, 255>>
+
+    unavailable_atom_with_bit_binary =
+      <<131, 104, 2, 119, byte_size(missing_atom), missing_atom::binary, bit_binary::binary>>
+      |> Base.url_encode64(padding: false)
+
+    assert {:error, :binding_unavailable} =
+             Session.from_record(Map.put(record, "principal", unavailable_atom_with_bit_binary))
+
+    malformed_bit_binary = <<77, 1::unsigned-big-32, 0, 255>>
+
+    malformed_binding =
+      <<131, 104, 2, 119, byte_size(missing_atom), missing_atom::binary,
+        malformed_bit_binary::binary>>
+      |> Base.url_encode64(padding: false)
+
+    assert {:error, :invalid_binding} =
+             Session.from_record(Map.put(record, "principal", malformed_binding))
+  end
+
+  test "safe restoration rejects atom names beyond the 255-character limit" do
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    for {tag, name} <- [
+          {100, String.duplicate("a", 256)},
+          {118, String.duplicate("é", 256)}
+        ] do
+      binding =
+        <<131, tag, byte_size(name)::unsigned-big-16, name::binary>>
+        |> Base.url_encode64(padding: false)
+
+      assert {:error, :invalid_binding} =
+               Session.from_record(Map.put(record, "principal", binding))
+    end
+
+    boundary_name = String.duplicate("a", 255)
+
+    boundary_binding =
+      <<131, 100, byte_size(boundary_name)::unsigned-big-16, boundary_name::binary>>
+      |> Base.url_encode64(padding: false)
+
+    assert {:error, :binding_unavailable} =
+             Session.from_record(Map.put(record, "principal", boundary_binding))
+  end
+
+  test "safe restoration rejects malformed scalar leaves instead of blaming an unavailable atom" do
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    missing_atom = "attesto_mcp_server_scalar_leaf_absent_fixture_9f2c7e"
+
+    unavailable_atom = <<119, byte_size(missing_atom), missing_atom::binary>>
+
+    paired_binding = fn leaf ->
+      <<131, 104, 2, unavailable_atom::binary, leaf::binary>>
+      |> Base.url_encode64(padding: false)
+    end
+
+    malformed_new_floats = [
+      <<70, 0x7FF8000000000000::unsigned-big-64>>,
+      <<70, 0x7FF0000000000000::unsigned-big-64>>,
+      <<70, 0xFFF0000000000000::unsigned-big-64>>
+    ]
+
+    malformed_leaves =
+      malformed_new_floats ++
+        [
+          <<99, String.duplicate("x", 31)::binary>>,
+          <<77, 0::unsigned-big-32, 8>>,
+          <<77, 1::unsigned-big-32, 0, 255>>,
+          <<107, 9_998::unsigned-big-16, String.duplicate("x", 9_998)::binary>>
+        ]
+
+    for leaf <- malformed_leaves do
+      assert {:error, :invalid_binding} =
+               Session.from_record(Map.put(record, "principal", paired_binding.(leaf)))
+    end
+
+    <<131, valid_new_float_leaf::binary>> = :erlang.term_to_binary(1.25)
+
+    <<131, valid_legacy_float_leaf::binary>> =
+      :erlang.term_to_binary(1.25, [{:minor_version, 0}])
+
+    for leaf <- [
+          valid_new_float_leaf,
+          valid_legacy_float_leaf,
+          <<77, 1::unsigned-big-32, 8, 255>>,
+          <<107, 9_997::unsigned-big-16, String.duplicate("x", 9_997)::binary>>
+        ] do
+      assert {:error, :binding_unavailable} =
+               Session.from_record(Map.put(record, "principal", paired_binding.(leaf)))
+    end
+  end
+
+  test "touch never rewinds a future activity timestamp" do
+    session = Session.new("alice", "tenant-a")
+    future = System.system_time(:millisecond) + 10_000
+
+    assert Session.touch(%{session | last_seen: future}).last_seen == future
+  end
+
+  test "an unavailable binding is neutral and never deletes the durable record" do
+    {:ok, store} = start_supervised(ETS)
+    namespace = unique_namespace()
+
+    {:ok, server} =
+      start_supervised({Server, session_store: {ETS, store}, session_namespace: namespace})
+
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    missing_atom = "attesto_mcp_server_binding_absent_fixture_9f2c7e"
+
+    missing_binding =
+      <<131, 119, byte_size(missing_atom), missing_atom::binary>>
+      |> Base.url_encode64(padding: false)
+
+    unavailable = %{record | "principal" => missing_binding}
+    key = {namespace, session.id}
+    assert :ok = ETS.save(store, key, unavailable)
+
+    assert {:error, :not_found} = Server.get_session(server, session.id, "alice", "tenant-a")
+    assert {:ok, preserved} = ETS.load(store, key)
+    assert preserved["principal"] == unavailable["principal"]
+
+    assert {:error, :not_found} = Server.touch_session(server, session.id)
+    assert {:ok, preserved} = ETS.load(store, key)
+    assert preserved["principal"] == unavailable["principal"]
+
+    assert :ok = Server.mark_initialized(server, session.id)
+    assert {:ok, preserved} = ETS.load(store, key)
+    assert preserved["principal"] == unavailable["principal"]
+  end
+
+  test "server accepts a store touch that retains a newer timestamp" do
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+    future = Map.put(record, "last_seen_ms", System.system_time(:millisecond) + 10_000)
+    namespace = unique_namespace()
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {FutureTouch, {self(), future}},
+        session_namespace: namespace
+      )
+
+    assert :ok = Server.touch_session(server, session.id)
   end
 
   test "shared store survives a server restart and rejects binding changes" do
@@ -139,10 +414,13 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
       )
 
     assert {:ok, session} = Server.new_session(server, "alice", "tenant-a")
-    assert {:error, :not_found} = Server.get_session(server, session.id, "alice", "tenant-a")
-    assert {:error, :write_failed} = Server.touch_session(server, session.id)
-    assert {:error, :write_failed} = Server.mark_initialized(server, session.id)
-    assert {:error, :write_failed} = Server.delete_session(server, session.id)
+
+    assert {:error, :session_store_unavailable} =
+             Server.get_session(server, session.id, "alice", "tenant-a")
+
+    assert {:error, :session_store_unavailable} = Server.touch_session(server, session.id)
+    assert {:error, :session_store_unavailable} = Server.mark_initialized(server, session.id)
+    assert {:error, :session_store_unavailable} = Server.delete_session(server, session.id)
     assert {:ok, _record} = ETS.load(store, {server_namespace(server), session.id})
   end
 
@@ -165,6 +443,47 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
 
     assert :ok = ETS.save(store, key, expired)
     assert :not_found = ETS.update_ttl(store, key, 10)
+    assert :not_found = ETS.load(store, key)
+  end
+
+  test "ETS TTL refresh never rewinds a newer activity timestamp" do
+    {:ok, store} = start_supervised(ETS)
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    key = {unique_namespace(), session.id}
+    assert :ok = ETS.save(store, key, record)
+
+    newer = record["last_seen_ms"] + 1_000
+    stale = newer - 500
+
+    assert {:ok, %{"last_seen_ms" => ^newer}} = ETS.update_ttl(store, key, newer)
+    assert {:ok, %{"last_seen_ms" => ^newer}} = ETS.update_ttl(store, key, stale)
+    assert {:ok, %{"last_seen_ms" => ^newer}} = ETS.load(store, key)
+  end
+
+  test "queued ETS TTL refresh cannot revive a session that expires while waiting" do
+    {:ok, store} = start_supervised(ETS)
+    now = System.system_time(:millisecond)
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    expiring =
+      record
+      |> Map.put("created_at_ms", now)
+      |> Map.put("last_seen_ms", now)
+      |> Map.put("absolute_timeout_ms", 100)
+      |> Map.put("idle_timeout_ms", 100)
+
+    key = {unique_namespace(), session.id}
+    assert :ok = ETS.save(store, key, expiring)
+    :ok = :sys.suspend(store)
+
+    refresh = Task.async(fn -> ETS.update_ttl(store, key, now) end)
+    Process.sleep(150)
+    :ok = :sys.resume(store)
+
+    assert :not_found = Task.await(refresh, 1_000)
     assert :not_found = ETS.load(store, key)
   end
 
@@ -233,9 +552,188 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
 
     key = {namespace, "corrupt"}
 
-    assert :ok = ETS.save(store, key, %{"format_version" => 999})
+    assert :ok = ETS.save(store, key, %{"format_version" => 1})
     assert :ok = Server.mark_initialized(server, "corrupt")
     assert :not_found = ETS.load(store, key)
+  end
+
+  test "unknown future records survive non-destructive lookups and updates" do
+    {:ok, store} = start_supervised(ETS)
+    namespace = unique_namespace()
+
+    {:ok, server} =
+      start_supervised(
+        {Server, session_store: {RecordingStore, {store, self()}}, session_namespace: namespace}
+      )
+
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+    future = Map.put(record, "format_version", 99)
+    key = {namespace, session.id}
+    assert :ok = ETS.save(store, key, future)
+
+    assert {:error, :not_found} = Server.get_session(server, session.id, "alice", "tenant-a")
+    assert {:ok, ^future} = ETS.load(store, key)
+    refute_receive {:session_store_delete, ^key}, 50
+
+    assert {:error, :not_found} = Server.peek_session(server, session.id, "alice", "tenant-a")
+    assert {:ok, ^future} = ETS.load(store, key)
+    refute_receive {:session_store_delete, ^key}, 50
+
+    assert {:error, :not_found} = Server.touch_session(server, session.id)
+    assert {:ok, ^future} = ETS.load(store, key)
+    refute_receive {:session_store_delete, ^key}, 50
+
+    assert {:ok, []} = ETS.cleanup_expired(store)
+    assert {:ok, [{^key, ^future}]} = ETS.list_active(store)
+    refute_receive {:session_store_delete, ^key}, 50
+
+    # Update paths return the opaque record so callers can distinguish
+    # preservation from an absent row. The public operation remains neutral.
+    assert {:ok, ^future} = ETS.update(store, key, fn current -> {:ok, current} end)
+    assert {:ok, ^future} = ETS.update_ttl(store, key, System.system_time(:millisecond))
+    assert :ok = Server.mark_initialized(server, session.id)
+    assert {:ok, ^future} = ETS.load(store, key)
+    refute_receive {:session_store_delete, ^key}, 50
+
+    assert :ok = Server.delete_session(server, session.id)
+    assert_receive {:session_store_delete, ^key}, 1_000
+    assert :not_found = ETS.load(store, key)
+  end
+
+  test "future replacement during legacy publication preserves the live stream" do
+    {:ok, store} = start_supervised(ETS)
+    namespace = unique_namespace()
+
+    {:ok, server} =
+      start_supervised(
+        {Server,
+         session_store: {ReplacingInvalidLoadStore, {store, nil}}, session_namespace: namespace}
+      )
+
+    assert {:ok, created} = Server.new_session(server, "alice", "tenant-a")
+    assert :ok = Server.negotiate_session(server, created.id, "alice", "tenant-a", @legacy, %{})
+    assert :ok = Server.mark_initialized(server, created.id)
+
+    assert {:ok, stream} =
+             Server.open_legacy_stream(server, created.id, "alice", "tenant-a", self())
+
+    assert {:ok, record} = Session.to_record(created)
+    invalid = Map.delete(record, "principal")
+    assert :ok = ETS.save(store, {namespace, created.id}, invalid)
+
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    refute_receive {:mcp_legacy_close, ^stream, _reason}, 100
+    assert {:ok, future} = ETS.load(store, {namespace, created.id})
+    assert future["format_version"] == 99
+  end
+
+  test "ETS treats malformed version markers as corrupt and removes them atomically" do
+    {:ok, store} = start_supervised(ETS)
+
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+
+    for version <- [nil, "1", true, 1.0, 0, -1] do
+      key = {unique_namespace(), "invalid-version-#{System.unique_integer([:positive])}"}
+
+      invalid =
+        if is_nil(version),
+          do: Map.delete(record, "format_version"),
+          else: Map.put(record, "format_version", version)
+
+      invalid = Map.put(invalid, "id", elem(key, 1))
+      assert :ok = ETS.save(store, key, invalid)
+      assert :not_found = ETS.update_ttl(store, key, System.system_time(:millisecond))
+      assert :not_found = ETS.load(store, key)
+
+      key = {unique_namespace(), "invalid-load-#{System.unique_integer([:positive])}"}
+      invalid = Map.put(invalid, "id", elem(key, 1))
+      assert :ok = ETS.save(store, key, invalid)
+      assert :not_found = ETS.load(store, key)
+    end
+  end
+
+  test "invalid lookup cleanup preserves a concurrent valid or future replacement" do
+    {:ok, store} = start_supervised(ETS)
+    session = Session.new("alice", "tenant-a")
+    assert {:ok, record} = Session.to_record(session)
+    invalid = Map.delete(record, "principal")
+
+    for replacement <- [record, Map.put(record, "format_version", 99)] do
+      namespace = unique_namespace()
+      key = {namespace, session.id}
+      assert :ok = ETS.save(store, key, invalid)
+
+      {:ok, server} =
+        start_supervised(%{
+          Server.child_spec(
+            session_store: {ReplacingLoadStore, {store, replacement}},
+            session_namespace: namespace
+          )
+          | id: make_ref()
+        })
+
+      assert {:error, :not_found} = Server.peek_session(server, session.id, "alice", "tenant-a")
+      assert {:ok, ^replacement} = ETS.load(store, key)
+    end
+  end
+
+  test "startup rejects zero session timeouts because records require positive values" do
+    {:ok, default_server} = Server.start_link([])
+    assert :ok = GenServer.stop(default_server)
+
+    for key <- [:session_idle_timeout, :session_absolute_timeout] do
+      previous = Process.flag(:trap_exit, true)
+
+      try do
+        assert {:error, _reason} = Server.start_link([{key, 0}])
+      after
+        Process.flag(:trap_exit, previous)
+      end
+    end
+  end
+
+  test "startup and per-session timeouts share the signed BIGINT-safe range" do
+    max = Session.max_timeout_ms()
+
+    for key <- [:session_idle_timeout, :session_absolute_timeout] do
+      previous = Process.flag(:trap_exit, true)
+
+      try do
+        assert {:error, _reason} = Server.start_link([{key, max + 1}])
+      after
+        Process.flag(:trap_exit, previous)
+      end
+    end
+
+    {:ok, server} = start_supervised(%{Server.child_spec([]) | id: make_ref()})
+
+    for {key, option} <- [
+          {:absolute_timeout, :absolute_timeout},
+          {:idle_timeout, :idle_timeout}
+        ] do
+      assert {:error, {:invalid_session_timeout, ^option}} =
+               Server.new_session(server, "invalid-#{key}", nil, [{key, max + 1}])
+    end
+
+    assert {:error, {:invalid_session_timeout, :idle_timeout}} =
+             Server.new_session(server, "invalid-zero", nil, idle_timeout: 0)
+
+    assert {:error, {:invalid_session_timeout, :options}} =
+             Server.new_session(server, "invalid-options", nil, [:not_a_pair])
+
+    assert {:ok, session} =
+             Server.new_session(server, "valid-large", nil,
+               absolute_timeout: max,
+               idle_timeout: max
+             )
+
+    assert session.absolute_timeout == max
+    assert session.idle_timeout == max
+
+    assert {:error, :invalid_session_timeout} =
+             Session.new("direct", nil, absolute_timeout: max + 1) |> Session.to_record()
   end
 
   test "unnamed servers use the documented default namespace and preserve missing-session init" do
@@ -304,6 +802,121 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert_receive {:mcp_subscription, :peer, "modern", catalog_event}, 1_000
     assert catalog_event["method"] == "notifications/tools/list_changed"
     assert_receive {:mcp_legacy_event, ^legacy_stream, 2, _catalog_event}, 1_000
+  end
+
+  test "clustered session deletion and expiry close legacy streams on peers" do
+    {:ok, store} = start_supervised(ETS)
+    namespace = unique_namespace()
+
+    opts = [
+      session_store: {ETS, store},
+      session_namespace: namespace,
+      session_clustered: true
+    ]
+
+    {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+    {:ok, second} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+
+    assert {:ok, deleted_session} = Server.new_session(first, "alice", "tenant-a")
+
+    assert :ok =
+             Server.negotiate_session(
+               first,
+               deleted_session.id,
+               "alice",
+               "tenant-a",
+               @legacy,
+               %{}
+             )
+
+    assert :ok = Server.mark_initialized(first, deleted_session.id)
+
+    assert {:ok, deleted_stream} =
+             Server.open_legacy_stream(second, deleted_session.id, "alice", "tenant-a", self())
+
+    assert :ok = ETS.delete(store, {namespace, deleted_session.id})
+    assert :ok = Server.delete_session(first, deleted_session.id)
+    assert_receive {:mcp_legacy_close, ^deleted_stream, :session_deleted}, 1_000
+
+    assert {:ok, expired_session} = Server.new_session(first, "alice", "tenant-a")
+
+    assert :ok =
+             Server.negotiate_session(
+               first,
+               expired_session.id,
+               "alice",
+               "tenant-a",
+               @legacy,
+               %{}
+             )
+
+    assert :ok = Server.mark_initialized(first, expired_session.id)
+
+    assert {:ok, expired_stream} =
+             Server.open_legacy_stream(second, expired_session.id, "alice", "tenant-a", self())
+
+    {:ok, expired_record} = Session.to_record(expired_session)
+
+    assert :ok =
+             ETS.save(
+               store,
+               {namespace, expired_session.id},
+               expired_record
+               |> Map.put("created_at_ms", 1)
+               |> Map.put("last_seen_ms", 1)
+             )
+
+    send(first, :cleanup_sessions)
+    assert_receive {:mcp_legacy_close, ^expired_stream, :session_expired}, 1_000
+  end
+
+  test "clustered session close envelopes reject malformed data and deduplicate ids" do
+    {:ok, store} = start_supervised(ETS)
+    namespace = unique_namespace()
+
+    opts = [
+      session_store: {ETS, store},
+      session_namespace: namespace,
+      session_clustered: true
+    ]
+
+    {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+    {:ok, second} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+    assert {:ok, session} = Server.new_session(first, "alice", "tenant-a")
+    assert :ok = Server.negotiate_session(first, session.id, "alice", "tenant-a", @legacy, %{})
+    assert :ok = Server.mark_initialized(first, session.id)
+
+    assert {:ok, stream} =
+             Server.open_legacy_stream(second, session.id, "alice", "tenant-a", self())
+
+    envelope = fn overrides ->
+      Map.merge(
+        %{version: 1, namespace: namespace, reason: :session_deleted, ids: [session.id]},
+        overrides
+      )
+    end
+
+    malformed = [
+      envelope.(%{version: 2}),
+      envelope.(%{namespace: "wrong-namespace"}),
+      envelope.(%{reason: :other}),
+      envelope.(%{ids: [session.id | :improper]}),
+      envelope.(%{ids: [<<255>>]}),
+      envelope.(%{ids: [String.duplicate("a", 257)]}),
+      envelope.(%{ids: Enum.map(1..129, &"session-#{&1}")})
+    ]
+
+    Enum.each(malformed, &GenServer.cast(second, {:cluster_session_close, &1}))
+    _ = :sys.get_state(second)
+    refute_receive {:mcp_legacy_close, ^stream, _reason}, 200
+
+    GenServer.cast(
+      second,
+      {:cluster_session_close, envelope.(%{ids: [session.id, session.id]})}
+    )
+
+    assert_receive {:mcp_legacy_close, ^stream, :session_deleted}, 1_000
+    refute_receive {:mcp_legacy_close, ^stream, _reason}, 200
   end
 
   test "cluster resource notifications union divergent static and template scopes" do
@@ -1056,6 +1669,24 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert_invalid_start(session_clustered: true, session_store: {ETS, store})
   end
 
+  test "session namespaces require valid UTF-8 without NUL bytes and allow 256-byte values" do
+    {:ok, store} = start_supervised(ETS)
+    base_opts = [session_clustered: true, session_store: {ETS, store}]
+
+    assert_invalid_namespace_start(Keyword.put(base_opts, :session_namespace, <<255>>))
+    assert_invalid_namespace_start(Keyword.put(base_opts, :session_namespace, <<0>>))
+
+    namespace = String.duplicate("a", 256)
+
+    {:ok, server} =
+      start_supervised(%{
+        Server.child_spec(Keyword.merge(base_opts, session_namespace: namespace))
+        | id: make_ref()
+      })
+
+    assert server_namespace(server) == namespace
+  end
+
   test "loss of a session store stops the server instead of falling back" do
     {:ok, store} = ETS.start_link([])
 
@@ -1113,5 +1744,11 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     {_pid, monitor} = spawn_monitor(fn -> Server.start_link(opts) end)
     assert_receive {:DOWN, ^monitor, :process, _pid, reason}, 1_000
     assert inspect(reason) =~ "requires an explicit shared"
+  end
+
+  defp assert_invalid_namespace_start(opts) do
+    {_pid, monitor} = spawn_monitor(fn -> Server.start_link(opts) end)
+    assert_receive {:DOWN, ^monitor, :process, _pid, reason}, 1_000
+    assert inspect(reason) =~ "session_namespace"
   end
 end

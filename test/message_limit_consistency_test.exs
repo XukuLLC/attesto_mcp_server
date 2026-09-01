@@ -467,13 +467,13 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
         registrations: [registration]
       )
 
-    on_exit(fn -> if Process.alive?(startup_server), do: GenServer.stop(startup_server) end)
+    on_exit(fn -> stop_if_running(startup_server) end)
 
     assert [%{name: "startup-large-schema"}] =
              Server.snapshot(startup_server).tool |> Map.values()
 
     {:ok, dynamic_server} = Server.start_link(max_json_bytes: @large_budget)
-    on_exit(fn -> if Process.alive?(dynamic_server), do: GenServer.stop(dynamic_server) end)
+    on_exit(fn -> stop_if_running(dynamic_server) end)
 
     assert :ok =
              Server.register_tool(dynamic_server, "dynamic-large-schema", %{
@@ -1037,6 +1037,12 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     end)
 
     server
+  end
+
+  defp stop_if_running(server) do
+    GenServer.stop(server)
+  catch
+    :exit, _reason -> :ok
   end
 
   defp request(body, token, method \\ "tools/call", name \\ "bounded") do

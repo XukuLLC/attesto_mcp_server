@@ -8,6 +8,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
   @attesto_phoenix_requirement ">= 2.14.1 and < 4.0.0"
   @req_requirement ">= 0.6.1 and < 1.0.0"
   @max_version_component 99_999_999_999_999
+  @max_session_namespace_bytes 256
   @requirement_atom_pattern ~r/\A\s*(?<operator>~>|>=|<=|>|<|==)?\s*(?<major>[0-9]+)(?:\.(?<minor>[0-9]+))?(?:\.(?<patch>[0-9]+))?(?<suffix>[+-].*)?\s*\z/
   @static_path_pattern ~r/\A\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\z/
   @safe_dependency_options [:override, :runtime, :optional, :app, :hex, :manager, :env]
@@ -92,6 +93,9 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
         attesto_config: :string,
         reuse_metadata_route: :boolean,
         enable_cimd: :boolean,
+        session_store: :string,
+        repo: :string,
+        schema_prefix: :string,
         allow_http_loopback: :boolean
       ],
       defaults: [
@@ -114,6 +118,8 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
            validate_base_url(options[:base_url], options[:allow_http_loopback]),
          {:ok, server_module} <-
            module_option(options[:server_module], default_server_module(igniter)),
+         {:ok, igniter, session_config} <-
+           session_store_configuration(igniter, options, app, server_module),
          {:ok, auth_source} <- auth_source(igniter, options[:attesto_config], app),
          :ok <- validate_cimd_source(auth_source, options[:enable_cimd] == true),
          :ok <-
@@ -165,11 +171,11 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
           auth_dependencies,
           options[:enable_cimd] == true
         )
-        |> configure_server(app, server_module)
-        |> Igniter.Project.Application.add_new_child(server_module)
+        |> configure_server(app, server_module, session_config)
+        |> add_server_child(server_module, session_config)
         |> add_routes(router, server_module, path, base_url, auth_source, metadata_mode)
         |> create_starter_test(server_module)
-        |> add_notices(auth_source, path, base_url, metadata_mode, router)
+        |> add_notices(auth_source, path, base_url, metadata_mode, router, session_config)
       else
         igniter
       end
@@ -194,6 +200,1183 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
 
   defp module_option(_value, _default),
     do: {:error, "module options must use a fully qualified Elixir module name"}
+
+  # 2025-era session-bound MCP requests default to the private ETS store when
+  # no host Repo is available. Phoenix applications with one statically
+  # confirmed PostgreSQL Repo get the bundled Ecto adapter automatically;
+  # multiple Repos are never guessed because that would make the generated
+  # migration instructions disagree with runtime. If the sole Repo cannot be
+  # proven to use PostgreSQL, automatic selection stays on private ETS; an
+  # explicit Ecto choice remains fail-closed. This also keeps known
+  # non-PostgreSQL Repos from breaking the default installer path.
+  defp session_store_configuration(igniter, options, app, server_module) do
+    with {:ok, requested} <- normalize_session_store(options[:session_store]),
+         {:ok, schema_prefix} <- session_schema_prefix(options[:schema_prefix]),
+         {:ok, repo_option} <- module_option(options[:repo], nil),
+         {:ok, igniter, existing} <- configured_session_store(igniter, app, server_module) do
+      case existing do
+        :none ->
+          case {requested, repo_option, schema_prefix} do
+            {:ets, nil, nil} ->
+              {:ok, igniter, %{mode: :ets, requested: :ets}}
+
+            {:ets, _repo, _prefix} ->
+              {:error,
+               "--repo and --schema-prefix require an Ecto session store; remove them or omit --session-store ets"}
+
+            {_mode, repo, prefix} ->
+              select_session_repo(igniter, requested, repo, prefix, app, server_module)
+          end
+
+        %{mode: :ecto} = existing ->
+          existing_ecto_session_config(
+            igniter,
+            existing,
+            requested,
+            repo_option,
+            schema_prefix,
+            app,
+            server_module
+          )
+
+        %{mode: :ets} = existing ->
+          if requested in [:auto, :ets] and is_nil(repo_option) and is_nil(schema_prefix) do
+            {:ok, igniter, existing}
+          else
+            {:error,
+             "the host already configures an ETS session store; remove that session_store setting before selecting Ecto"}
+          end
+
+        %{mode: :custom} ->
+          if requested == :auto and is_nil(repo_option) and is_nil(schema_prefix) do
+            {:ok, igniter, existing}
+          else
+            {:error,
+             "the host already configures a custom session store; remove that session_store setting before selecting another backend"}
+          end
+      end
+    end
+  end
+
+  defp normalize_session_store(nil), do: {:ok, :auto}
+  defp normalize_session_store("auto"), do: {:ok, :auto}
+  defp normalize_session_store("ecto"), do: {:ok, :ecto}
+  defp normalize_session_store("ets"), do: {:ok, :ets}
+
+  defp normalize_session_store(_value),
+    do: {:error, "--session-store must be one of: auto, ecto, ets"}
+
+  defp session_schema_prefix(nil), do: {:ok, nil}
+
+  defp session_schema_prefix(prefix) when is_binary(prefix) do
+    cond do
+      prefix == "" ->
+        {:error,
+         "invalid --schema-prefix: expected a non-empty lowercase PostgreSQL schema identifier"}
+
+      not String.valid?(prefix) ->
+        {:error, "invalid --schema-prefix: expected valid UTF-8"}
+
+      byte_size(prefix) > 63 ->
+        {:error, "invalid --schema-prefix: expected at most 63 bytes"}
+
+      prefix == "information_schema" or String.starts_with?(prefix, "pg_") ->
+        {:error,
+         "invalid --schema-prefix: #{inspect(prefix)} is a reserved PostgreSQL system schema"}
+
+      Regex.match?(~r/\A[a-z_][a-z0-9_]*\z/, prefix) ->
+        {:ok, prefix}
+
+      true ->
+        {:error, "invalid --schema-prefix: expected a lowercase PostgreSQL schema identifier"}
+    end
+  end
+
+  defp session_schema_prefix(_value),
+    do: {:error, "invalid --schema-prefix: expected a lowercase PostgreSQL schema identifier"}
+
+  defp select_session_repo(igniter, requested, repo, schema_prefix, app, server_module) do
+    {igniter, repos} = project_ecto_repos(igniter)
+    repos = Enum.sort_by(repos, &inspect/1)
+    supervised_repos = supervised_project_repos(igniter, repos)
+    selectable_repos = if is_nil(repo), do: supervised_repos, else: repos
+
+    cond do
+      not is_nil(repo) and repo in repos and repo not in supervised_repos ->
+        unsupervised_repo_result(igniter, requested, schema_prefix, repo)
+
+      not is_nil(repo) and repo in repos ->
+        case select_postgres_session_repo(
+               igniter,
+               repo,
+               schema_prefix,
+               app,
+               server_module,
+               requested
+             ) do
+          {:unverified, failed_igniter, message} ->
+            {:error, failed_igniter, message}
+
+          {:unsupported, failed_igniter, message} ->
+            {:error, failed_igniter, message}
+
+          result ->
+            result
+        end
+
+      not is_nil(repo) ->
+        {:error,
+         "Ecto Repo #{inspect(repo)} was not found; pass --repo for an existing Repo module"}
+
+      is_nil(repo) and length(repos) > 1 ->
+        names = Enum.map_join(repos, ", ", &inspect/1)
+        {:error, "multiple Ecto Repos were found (#{names}); choose one with --repo"}
+
+      length(repos) == 1 and supervised_repos == [] and
+          (requested == :ecto or not is_nil(schema_prefix)) ->
+        {:error, unsupervised_repo_message(List.first(repos))}
+
+      requested == :ecto and selectable_repos == [] ->
+        {:error, "--session-store ecto requires an existing Ecto Repo; pass --repo RepoModule"}
+
+      requested == :auto and is_nil(schema_prefix) and length(repos) == 1 and
+          supervised_repos == [] ->
+        {:ok, igniter,
+         %{
+           mode: :ets,
+           requested: :auto,
+           fallback: :repo_not_statically_supervised,
+           repo: List.first(repos)
+         }}
+
+      length(selectable_repos) == 1 ->
+        repo = List.first(selectable_repos)
+
+        case select_postgres_session_repo(
+               igniter,
+               repo,
+               schema_prefix,
+               app,
+               server_module,
+               requested
+             ) do
+          {:unverified, failed_igniter, _message}
+          when requested == :auto and is_nil(schema_prefix) ->
+            {:ok, failed_igniter,
+             %{mode: :ets, requested: :auto, fallback: :unverified_repo, repo: repo}}
+
+          {:unsupported, failed_igniter, _message}
+          when requested == :auto and is_nil(schema_prefix) ->
+            {:ok, failed_igniter,
+             %{mode: :ets, requested: :auto, fallback: :unsupported_repo, repo: repo}}
+
+          {:unverified, failed_igniter, message} ->
+            {:error, failed_igniter, message}
+
+          {:unsupported, failed_igniter, message} ->
+            {:error, failed_igniter, message}
+
+          result ->
+            result
+        end
+
+      length(selectable_repos) > 1 ->
+        names = Enum.map_join(selectable_repos, ", ", &inspect/1)
+        {:error, "multiple Ecto Repos were found (#{names}); choose one with --repo"}
+
+      not is_nil(schema_prefix) ->
+        {:error, "--schema-prefix requires an existing Ecto Repo; pass --repo RepoModule"}
+
+      true ->
+        {:ok, igniter, %{mode: :ets, requested: :auto}}
+    end
+  end
+
+  defp unsupervised_repo_result(_igniter, :auto, nil, repo) do
+    {:error, unsupervised_repo_message(repo)}
+  end
+
+  defp unsupervised_repo_result(_igniter, _requested, _schema_prefix, repo),
+    do: {:error, unsupervised_repo_message(repo)}
+
+  defp unsupervised_repo_message(repo) do
+    "Ecto Repo #{inspect(repo)} exists but could not be statically confirmed as supervised by the application. Add #{inspect(repo)} as a literal supervised application child or choose `--session-store ets`; the installer will not configure the Ecto session store until the Repo is proven supervised."
+  end
+
+  defp select_postgres_session_repo(
+         igniter,
+         repo,
+         schema_prefix,
+         app,
+         server_module,
+         requested
+       ) do
+    case find_project_module_source(igniter, repo) do
+      {:ok, {igniter, _source, module_ast}} ->
+        case postgres_repo_status(module_ast) do
+          :postgres ->
+            {:ok, igniter,
+             ecto_session_config(repo, schema_prefix, app, server_module, requested)}
+
+          :unsupported ->
+            {:unsupported, igniter,
+             "Ecto Repo #{inspect(repo)} is not statically configured with Ecto.Adapters.Postgres; the bundled durable session store supports PostgreSQL only. Select a PostgreSQL Repo or use --session-store ets"}
+
+          :unverified ->
+            {:unverified, igniter,
+             "Ecto Repo #{inspect(repo)} could not be statically confirmed as PostgreSQL; the bundled durable session store supports PostgreSQL only. Select a statically proven PostgreSQL Repo or use --session-store ets"}
+        end
+
+      {:error, igniter} ->
+        {:unverified, igniter,
+         "Ecto Repo #{inspect(repo)} could not be inspected; select an inspectable PostgreSQL Repo or use --session-store ets"}
+    end
+  end
+
+  # Repo selection is source-only. `Igniter.Project.Module.find_module/2` may
+  # consult a compiled module before searching the project, which is not
+  # appropriate for an installer that must never trigger host `@on_load`
+  # callbacks merely to inspect an adapter declaration.
+  defp find_project_module_source(igniter, module) do
+    {igniter, sources} = project_lib_sources(igniter)
+
+    sources
+    |> Enum.reduce_while({:error, igniter}, fn source, not_found ->
+      result =
+        try do
+          source
+          |> Rewrite.Source.get(:quoted)
+          |> find_module_ast(module)
+        rescue
+          _exception -> :error
+        catch
+          _kind, _reason -> :error
+        end
+
+      case result do
+        {:ok, module_ast} -> {:halt, {:ok, {igniter, source, module_ast}}}
+        :error -> {:cont, not_found}
+      end
+    end)
+  end
+
+  # Walk source AST directly so a nested declaration such as
+  # `defmodule MyApp do; defmodule Repo do ... end; end` is resolved as
+  # `MyApp.Repo`. This is deliberately a data-only walk: host modules are
+  # never loaded or evaluated while the installer inspects adapter settings.
+  defp find_module_ast(ast, module), do: find_module_ast(ast, module, [])
+
+  defp find_module_ast({:defmodule, _meta, [module_ast, options]} = node, module, prefix)
+       when is_list(options) do
+    current = literal_module_ast(module_ast)
+    full_module = nested_module_name(prefix, current)
+
+    cond do
+      full_module == module ->
+        {:ok, node}
+
+      is_nil(current) ->
+        :error
+
+      true ->
+        case keyword_value(options, :do) do
+          {:ok, body} -> find_module_ast(body, module, full_module)
+          :error -> :error
+        end
+    end
+  end
+
+  defp find_module_ast({form, _meta, args}, module, prefix) when is_atom(form) and is_list(args),
+    do: find_module_ast(args, module, prefix)
+
+  defp find_module_ast(list, module, prefix) when is_list(list) do
+    Enum.find_value(list, :error, fn child -> find_module_ast(child, module, prefix) end)
+  end
+
+  defp find_module_ast(_other, _module, _prefix), do: :error
+
+  defp nested_module_name(_prefix, nil), do: nil
+  defp nested_module_name([], module), do: module
+  defp nested_module_name(prefix, module), do: Module.concat(prefix, module)
+
+  defp application_children({:defmodule, _meta, [_module_ast, options]}) when is_list(options) do
+    with {:ok, body} <- keyword_value(options, :do),
+         {:ok, {start_body, aliases}} <- application_start_body(body),
+         {:ok, children} <- application_supervised_children(start_body, aliases) do
+      literal_child_modules(children, aliases)
+    else
+      _other -> []
+    end
+  end
+
+  defp application_children(_module_ast), do: []
+
+  defp application_start_body(body) do
+    body
+    |> top_level_alias_contexts()
+    |> Enum.find_value(:error, fn
+      {{:def, _meta, [{:start, _head_meta, arguments}, options]}, aliases}
+      when is_list(arguments) and length(arguments) == 2 and is_list(options) ->
+        case keyword_value(options, :do) do
+          {:ok, start_body} -> {:ok, {start_body, aliases}}
+          :error -> false
+        end
+
+      _other ->
+        false
+    end)
+  end
+
+  defp application_supervised_children(start_body, aliases) do
+    calls =
+      start_body
+      |> top_level_expressions()
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {expression, index} ->
+        case supervisor_start_call_args(expression, aliases) do
+          {:ok, arguments} -> [{index, arguments}]
+          :error -> []
+        end
+      end)
+
+    case calls do
+      [{call_index, [children | _rest]}] ->
+        application_children_argument(start_body, call_index, children)
+
+      _ambiguous_or_missing ->
+        :error
+    end
+  end
+
+  defp supervisor_start_call_args(
+         {{:., _dot_meta, [module_ast, function]}, _call_meta, arguments},
+         aliases
+       )
+       when function in [:start_link, :start_supervisor] and is_list(arguments) and
+              arguments != [] do
+    if canonical_ast(module_ast, aliases) == Supervisor, do: {:ok, arguments}, else: :error
+  end
+
+  defp supervisor_start_call_args(_expression, _aliases), do: :error
+
+  defp application_children_argument(start_body, call_index, {name, _meta, nil})
+       when is_atom(name) do
+    expressions = top_level_expressions(start_body)
+
+    assignments =
+      expressions
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {expression, index} ->
+        case direct_variable_assignment(expression, name) do
+          {:ok, children} -> [{index, children}]
+          :error -> []
+        end
+      end)
+
+    assignment_count =
+      Enum.reduce(expressions, 0, fn expression, count ->
+        count + count_variable_assignments(expression, name)
+      end)
+
+    case assignments do
+      [{assignment_index, children}]
+      when assignment_index < call_index and assignment_count == 1 ->
+        {:ok, children}
+
+      _ambiguous_or_missing ->
+        :error
+    end
+  end
+
+  defp application_children_argument(_start_body, _call_index, children)
+       when is_list(children),
+       do: {:ok, children}
+
+  defp application_children_argument(
+         _start_body,
+         _call_index,
+         {:__block__, _meta, [children]} = wrapped
+       ) do
+    if is_list(children), do: {:ok, wrapped}, else: :error
+  end
+
+  defp application_children_argument(_start_body, _call_index, _children), do: :error
+
+  defp direct_variable_assignment({:=, _meta, [{name, _var_meta, nil}, children]}, name),
+    do: {:ok, children}
+
+  defp direct_variable_assignment(_expression, _name), do: :error
+
+  defp count_variable_assignments(ast, name) do
+    {_ast, count} =
+      Macro.prewalk(ast, 0, fn
+        {:=, _meta, [{candidate, _var_meta, nil}, _children]} = node, count
+        when candidate == name ->
+          {node, count + 1}
+
+        node, count ->
+          {node, count}
+      end)
+
+    count
+  end
+
+  defp literal_child_modules(children, aliases) when is_list(children) do
+    Enum.flat_map(children, fn
+      {:__block__, _meta, [child]} ->
+        literal_child_modules(child, aliases)
+
+      {:__aliases__, _meta, _parts} = module_ast ->
+        case canonical_ast(module_ast, aliases) do
+          module when is_atom(module) -> [module]
+          _other -> []
+        end
+
+      {:{}, _meta, [module_ast, options]} ->
+        literal_child_spec_module(module_ast, options, aliases)
+
+      {module_ast, options} ->
+        literal_child_spec_module(module_ast, options, aliases)
+
+      module when is_atom(module) ->
+        [module]
+
+      _other ->
+        []
+    end)
+  end
+
+  defp literal_child_modules({:__block__, _meta, [children]}, aliases),
+    do: literal_child_modules(children, aliases)
+
+  # Sourceror represents a literal two-tuple directly as `{module_ast,
+  # options}`; the regular quoted AST uses a `:{}` node instead.
+  defp literal_child_modules({module_ast, options}, aliases),
+    do: literal_child_spec_module(module_ast, options, aliases)
+
+  defp literal_child_modules(_children, _aliases), do: []
+
+  defp literal_child_spec_module(module_ast, options, aliases) do
+    if literal_list_ast?(options) do
+      case canonical_ast(module_ast, aliases) do
+        module when is_atom(module) -> [module]
+        _other -> []
+      end
+    else
+      []
+    end
+  end
+
+  # Sourceror wraps list literals in a one-element `__block__` node to retain
+  # their source location. A dynamic child-spec options expression is not a
+  # literal list and must not prove Repo supervision.
+  defp literal_list_ast?(value) when is_list(value), do: true
+
+  defp literal_list_ast?({:__block__, _meta, [value]}) when is_list(value), do: true
+
+  defp literal_list_ast?(_value), do: false
+
+  defp postgres_repo_status(module_ast) do
+    case repo_status_ast(module_ast) do
+      :none -> :unverified
+      status -> status
+    end
+  end
+
+  # Inspect only runtime modules under lib. Igniter 0.6's generic Ecto helper
+  # scans every configured source, including tests and configuration files,
+  # through an unbounded module traversal. Apart from unnecessary work, that
+  # can make a test-only Repo alter production installer output.
+  defp project_ecto_repos(igniter) do
+    {igniter, sources} = project_lib_sources(igniter)
+
+    repos = sources |> Enum.flat_map(&repo_modules_in_source/1) |> Enum.uniq()
+
+    {igniter, repos}
+  end
+
+  # Automatic persistence is only safe for a Repo that the host application
+  # actually starts. A source declaration by itself may belong to a library,
+  # a migration-only module, or a disabled deployment. Explicit `--repo`
+  # selection is also conservative: the selected Repo must be a literal child
+  # in the application's `start/2` list. Automatic mode can fall back to ETS
+  # when that proof is unavailable.
+  defp supervised_project_repos(igniter, repos) do
+    app_module =
+      case Igniter.Project.Application.app_module(igniter) do
+        module when is_atom(module) -> module
+        {module, _options} when is_atom(module) -> module
+        _other -> nil
+      end
+
+    supervised =
+      with module when is_atom(module) <- app_module,
+           {:ok, {_igniter, _source, module_ast}} <- find_project_module_source(igniter, module) do
+        application_children(module_ast)
+      else
+        _other -> []
+      end
+
+    Enum.filter(repos, &(&1 in supervised))
+  end
+
+  defp project_lib_sources(igniter) do
+    # Igniter.Test preloads its virtual files, but a real installer invocation
+    # starts with only the sources touched by earlier task steps. Load the
+    # runtime tree explicitly so Repo discovery and supervision checks behave
+    # the same in generated applications as they do in focused unit tests.
+    # The shared walker reads regular files only and never follows symlinks.
+    igniter = include_project_elixir_tree(igniter, "lib", ".ex")
+
+    sources =
+      igniter.rewrite
+      |> Rewrite.sources()
+      |> Enum.filter(&project_lib_source?/1)
+
+    {igniter, sources}
+  end
+
+  defp project_lib_source?(%Rewrite.Source{path: path, filetype: %Rewrite.Source.Ex{}})
+       when is_binary(path) do
+    relative_path =
+      case Path.type(path) do
+        :absolute -> Path.relative_to_cwd(path)
+        _relative -> path
+      end
+
+    case Path.split(relative_path) do
+      ["lib" | parts] when parts != [] ->
+        ".." not in parts and Path.extname(List.last(parts)) == ".ex"
+
+      _other ->
+        false
+    end
+  end
+
+  defp project_lib_source?(_source), do: false
+
+  defp repo_modules_in_source(source) do
+    try do
+      source
+      |> Rewrite.Source.get(:quoted)
+      |> collect_repo_modules([])
+    rescue
+      _exception -> []
+    catch
+      _kind, _reason -> []
+    end
+  end
+
+  defp collect_repo_modules({:defmodule, _meta, [module_ast, options]}, prefix)
+       when is_list(options) do
+    current = literal_module_ast(module_ast)
+    full_module = nested_module_name(prefix, current)
+
+    own_repo =
+      if is_nil(full_module) or
+           repo_status_ast(options) not in [:postgres, :unsupported, :unverified],
+         do: [],
+         else: [full_module]
+
+    nested_repos =
+      case keyword_value(options, :do) do
+        {:ok, body} when not is_nil(current) -> collect_repo_modules(body, full_module)
+        _other -> []
+      end
+
+    own_repo ++ nested_repos
+  end
+
+  defp collect_repo_modules({form, _meta, args}, prefix)
+       when is_atom(form) and is_list(args),
+       do: collect_repo_modules(args, prefix)
+
+  defp collect_repo_modules(list, prefix) when is_list(list) do
+    Enum.flat_map(list, &collect_repo_modules(&1, prefix))
+  end
+
+  defp collect_repo_modules(_other, _prefix), do: []
+
+  defp repo_status_ast({:defmodule, _meta, [_module_ast, options]}) when is_list(options),
+    do: repo_status_ast(options)
+
+  defp repo_status_ast(options) when is_list(options) do
+    case keyword_value(options, :do) do
+      {:ok, body} -> body |> top_level_alias_contexts() |> repo_use_status()
+      :error -> :unverified
+    end
+  end
+
+  defp repo_status_ast(_options), do: :unverified
+
+  defp repo_use_status(contexts) do
+    statuses = Enum.flat_map(contexts, &repo_use_context_status/1)
+
+    cond do
+      :postgres in statuses -> :postgres
+      :unsupported in statuses -> :unsupported
+      statuses != [] -> :unverified
+      true -> :none
+    end
+  end
+
+  defp repo_use_context_status({{:use, _meta, [module_ast | arguments]}, aliases}) do
+    case canonical_ast(module_ast, aliases) do
+      AshPostgres.Repo ->
+        ash_postgres_repo_status(arguments, aliases)
+
+      module when module in [AshSqlite.Repo, AshMysql.Repo] ->
+        [:unsupported]
+
+      Ecto.Repo ->
+        [ecto_repo_options_status(arguments, aliases)]
+
+      _other ->
+        []
+    end
+  end
+
+  defp repo_use_context_status(_context), do: []
+
+  defp ash_postgres_repo_status([options], _aliases) when is_list(options) do
+    case keyword_value(options, :define_ecto_repo?) do
+      :error ->
+        [:postgres]
+
+      {:ok, value} ->
+        case literal_boolean(value) do
+          true -> [:postgres]
+          false -> []
+          nil -> [:unverified]
+        end
+    end
+  end
+
+  defp ash_postgres_repo_status(_arguments, _aliases), do: [:unverified]
+
+  defp ecto_repo_options_status([options], aliases) when is_list(options) do
+    case keyword_value(options, :adapter) do
+      {:ok, adapter_ast} ->
+        case canonical_ast(adapter_ast, aliases) do
+          Ecto.Adapters.Postgres -> :postgres
+          adapter when is_atom(adapter) -> :unsupported
+          _dynamic -> :unverified
+        end
+
+      :error ->
+        :unverified
+    end
+  end
+
+  defp ecto_repo_options_status(_arguments, _aliases), do: :unverified
+
+  defp ecto_session_config(repo, schema_prefix, app, server_module, requested) do
+    %{
+      mode: :ecto,
+      requested: requested,
+      repo: repo,
+      schema_prefix: schema_prefix,
+      namespace: session_namespace(app, server_module)
+    }
+  end
+
+  defp session_namespace(app, server_module) do
+    module_name = server_module |> Module.split() |> Enum.map_join("-", &Macro.underscore/1)
+    module_name = String.replace_prefix(module_name, "#{app}-", "")
+    readable_prefix = "#{app}-#{module_name}"
+    digest = :crypto.hash(:sha256, :erlang.term_to_binary({app, server_module}))
+    digest = Base.url_encode64(digest, padding: false)
+    namespace = "#{readable_prefix}-#{digest}"
+
+    if byte_size(namespace) <= @max_session_namespace_bytes do
+      namespace
+    else
+      "mcp-#{digest}"
+    end
+  end
+
+  defp existing_ecto_session_config(
+         igniter,
+         existing,
+         requested,
+         repo_option,
+         schema_prefix,
+         app,
+         server_module
+       ) do
+    cond do
+      requested == :ets ->
+        {:error,
+         "the host already configures the Ecto session store; use its existing backend or remove that session_store setting before selecting ETS"}
+
+      not is_nil(repo_option) and repo_option != existing.repo ->
+        {:error,
+         "the host already configures Ecto session Repo #{inspect(existing.repo)}; remove that session_store setting before selecting #{inspect(repo_option)}"}
+
+      not is_nil(schema_prefix) and schema_prefix != existing.schema_prefix ->
+        {:error,
+         "the host already configures Ecto session schema prefix #{inspect(existing.schema_prefix)}; remove that session_store setting before selecting #{inspect(schema_prefix)}"}
+
+      true ->
+        namespace = existing.namespace || session_namespace(app, server_module)
+        {:ok, igniter, %{existing | requested: :preserve, namespace: namespace}}
+    end
+  end
+
+  # Config is read as data so installer execution never evaluates host code.
+  # A literal session_store identifies a possible prior installer run (or a
+  # deliberate ETS opt-out). Bundled Ecto candidates are statically
+  # revalidated below; dynamic or custom values remain opaque host
+  # configuration and are never announced as newly selected Ecto.
+  defp configured_session_store(igniter, app, server_module) do
+    config_path = Igniter.Project.Application.config_path(igniter)
+    config_dir = Path.dirname(config_path)
+    igniter = include_project_elixir_tree(igniter, config_dir, ".exs")
+    config_dir_parts = config_dir |> Path.expand() |> Path.split()
+
+    results =
+      igniter.rewrite
+      |> Rewrite.sources()
+      |> Enum.flat_map(fn source ->
+        if session_config_source?(source.path, config_dir_parts) do
+          configured_session_store_in_source(source.content, app, server_module)
+        else
+          []
+        end
+      end)
+
+    case results do
+      [] ->
+        {:ok, igniter, :none}
+
+      [%{mode: :ambiguous, message: message}] ->
+        {:error, igniter, message}
+
+      [entry] ->
+        case validate_preserved_session_store(igniter, entry) do
+          :ok ->
+            {:ok, igniter, entry}
+
+          {:error, message} ->
+            {:error, igniter, message}
+        end
+
+      _entries ->
+        {:error,
+         "multiple #{inspect(server_module)} session_store configurations were found; keep one literal backend before installation"}
+    end
+  end
+
+  # A literal Ecto handle is emitted by this installer, so reruns must
+  # revalidate the referenced Repo from source before treating it as an
+  # idempotent prior installation. The check is deliberately source-only:
+  # loading a compiled host module could execute arbitrary application code
+  # during installation. Opaque custom stores remain untouched.
+  defp validate_preserved_session_store(_igniter, %{mode: mode}) when mode in [:ets, :custom],
+    do: :ok
+
+  defp validate_preserved_session_store(igniter, %{mode: :ecto, repo: repo}) do
+    case find_project_module_source(igniter, repo) do
+      {:ok, {_igniter, _source, module_ast}} ->
+        case postgres_repo_status(module_ast) do
+          :postgres ->
+            :ok
+
+          :unsupported ->
+            {:error,
+             "the existing AttestoMCP.Server.SessionStore.Ecto handle references Repo #{inspect(repo)}, which is not statically configured with Ecto.Adapters.Postgres; remove or correct that session_store setting before installation"}
+
+          :unverified ->
+            {:error,
+             "the existing AttestoMCP.Server.SessionStore.Ecto handle references Repo #{inspect(repo)}, which could not be statically confirmed as PostgreSQL; remove or correct that session_store setting before installation"}
+        end
+
+      {:error, _igniter} ->
+        {:error,
+         "the existing AttestoMCP.Server.SessionStore.Ecto handle references Repo #{inspect(repo)}, but its source could not be inspected; remove or correct that session_store setting before installation"}
+    end
+  end
+
+  defp validate_preserved_session_store(_igniter, _entry), do: :ok
+
+  defp session_config_source?(path, config_dir_parts) do
+    source_path = Path.expand(path)
+
+    Path.extname(path) == ".exs" and
+      Enum.take(Path.split(source_path), length(config_dir_parts)) == config_dir_parts
+  end
+
+  # Igniter's older glob reader may traverse far beyond the intended project
+  # subtree for recursive patterns. Enumerate regular files ourselves and add
+  # each explicit path instead. Symlinked directories are deliberately skipped
+  # so installer discovery cannot escape the selected runtime/config tree.
+  # Igniter.Test already carries its virtual files in Rewrite, so touching the
+  # caller's real filesystem in test mode would be both unnecessary and wrong.
+  defp include_project_elixir_tree(igniter, root, extension) do
+    if igniter.assigns[:test_mode?] do
+      igniter
+    else
+      root
+      |> regular_project_files(extension)
+      |> Enum.reduce(igniter, fn path, current ->
+        Igniter.include_existing_file(current, path, required?: false)
+      end)
+    end
+  end
+
+  defp regular_project_files(root, extension) do
+    case File.lstat(root) do
+      {:ok, %File.Stat{type: :directory}} ->
+        walk_project_directory(root, extension)
+
+      _other ->
+        []
+    end
+  end
+
+  defp walk_project_directory(directory, extension) do
+    case File.ls(directory) do
+      {:ok, entries} ->
+        entries
+        |> Enum.sort()
+        |> Enum.flat_map(fn entry ->
+          path = Path.join(directory, entry)
+
+          case File.lstat(path) do
+            {:ok, %File.Stat{type: :directory}} ->
+              walk_project_directory(path, extension)
+
+            {:ok, %File.Stat{type: :regular}} ->
+              if Path.extname(path) == extension, do: [path], else: []
+
+            _symlink_or_unreadable ->
+              []
+          end
+        end)
+
+      _unreadable ->
+        []
+    end
+  end
+
+  defp configured_session_store_in_source(content, app, server_module)
+       when is_binary(content) do
+    case Code.string_to_quoted(content, emit_warnings: false) do
+      {:ok, ast} -> configured_session_store_ast(ast, app, server_module)
+      {:error, _error} -> []
+    end
+  end
+
+  defp configured_session_store_ast(ast, app, server_module) do
+    contexts = top_level_alias_contexts(ast)
+
+    entries =
+      Enum.flat_map(contexts, fn {expression, aliases} ->
+        case config_call_args(expression, aliases) do
+          {:ok, [configured_app, module_ast, options]} when configured_app == app ->
+            if canonical_ast(module_ast, aliases) == server_module do
+              case configured_session_store_config(options, aliases) do
+                :not_found -> []
+                entry -> [entry]
+              end
+            else
+              []
+            end
+
+          _other ->
+            []
+        end
+      end)
+
+    if Enum.any?(contexts, fn {expression, aliases} ->
+         nested_session_store_config?(expression, app, server_module, aliases)
+       end) do
+      [
+        %{
+          mode: :ambiguous,
+          message:
+            "could not safely inspect #{inspect(server_module)} session_store configuration inside a conditional or runtime config; move it to a literal top-level config before installation"
+        }
+        | entries
+      ]
+    else
+      entries
+    end
+  end
+
+  defp nested_session_store_config?(expression, app, server_module, aliases) do
+    {found?, _aliases} =
+      nested_session_store_walk(expression, aliases, true, app, server_module)
+
+    found?
+  end
+
+  defp nested_session_store_walk(
+         {:quote, _meta, _arguments},
+         aliases,
+         _root?,
+         _app,
+         _server_module
+       ),
+       do: {false, aliases}
+
+  defp nested_session_store_walk(
+         {:alias, _meta, _arguments} = expression,
+         aliases,
+         _root?,
+         _app,
+         _server_module
+       ),
+       do: {false, aliases_after_expression(expression, aliases)}
+
+  defp nested_session_store_walk(expression, aliases, root?, app, server_module) do
+    case config_call_args(expression, aliases) do
+      {:ok, [configured_app, module_ast, options]} ->
+        found? =
+          not root? and configured_app == app and
+            canonical_ast(module_ast, aliases) == server_module and
+            session_store_config_possible?(options, aliases)
+
+        if found? do
+          {true, aliases}
+        else
+          nested_session_store_children(expression, aliases, app, server_module)
+        end
+
+      :error ->
+        nested_session_store_children(expression, aliases, app, server_module)
+    end
+  end
+
+  defp nested_session_store_children(
+         {:__block__, _meta, expressions},
+         aliases,
+         app,
+         server_module
+       )
+       when is_list(expressions),
+       do: nested_session_store_sequence(expressions, aliases, app, server_module)
+
+  defp nested_session_store_children({form, _meta, arguments}, aliases, app, server_module)
+       when is_atom(form) and is_list(arguments),
+       do: nested_session_store_sequence(arguments, aliases, app, server_module)
+
+  defp nested_session_store_children({key, value}, aliases, app, server_module)
+       when is_atom(key),
+       do: nested_session_store_walk(value, aliases, false, app, server_module)
+
+  defp nested_session_store_children(expressions, aliases, app, server_module)
+       when is_list(expressions),
+       do: nested_session_store_sequence(expressions, aliases, app, server_module)
+
+  defp nested_session_store_children(_expression, aliases, _app, _server_module),
+    do: {false, aliases}
+
+  defp nested_session_store_sequence(expressions, aliases, app, server_module) do
+    Enum.reduce_while(expressions, {false, aliases}, fn expression, {false, aliases} ->
+      {found?, aliases} =
+        nested_session_store_walk(expression, aliases, false, app, server_module)
+
+      if found?, do: {:halt, {true, aliases}}, else: {:cont, {false, aliases}}
+    end)
+  end
+
+  defp config_call_args({:config, _meta, arguments}, _aliases)
+       when is_list(arguments) and length(arguments) == 3,
+       do: {:ok, arguments}
+
+  defp config_call_args(
+         {{:., _dot_meta, [module_ast, :config]}, _call_meta, arguments},
+         aliases
+       )
+       when is_list(arguments) and length(arguments) == 3 do
+    if canonical_ast(module_ast, aliases) == Config, do: {:ok, arguments}, else: :error
+  end
+
+  defp config_call_args(_expression, _aliases), do: :error
+
+  defp session_store_config_possible?(options, aliases) when is_list(options) do
+    case config_option(options, :server_options) do
+      :not_found ->
+        false
+
+      {:found, server_options} ->
+        nested_server_options_include_session_store?(server_options, aliases)
+    end
+  end
+
+  defp session_store_config_possible?(_options, _aliases), do: true
+
+  defp nested_server_options_include_session_store?(options, _aliases) when is_list(options) do
+    config_option(options, :session_store) != :not_found
+  end
+
+  defp nested_server_options_include_session_store?(_options, _aliases), do: true
+
+  defp configured_session_store_config(options, aliases) when is_list(options) do
+    case config_option(options, :server_options) do
+      :not_found -> :not_found
+      {:found, server_options} -> configured_session_store_options(server_options, aliases)
+    end
+  end
+
+  defp configured_session_store_config(_options, _aliases),
+    do: %{mode: :custom, requested: :preserve}
+
+  defp configured_session_store_options(options, aliases) when is_list(options) do
+    case config_option(options, :session_store) do
+      :not_found -> :not_found
+      {:found, value} -> configured_session_store_value(value, options, aliases)
+    end
+  end
+
+  defp configured_session_store_options(_options, _aliases),
+    do: %{mode: :custom, requested: :preserve}
+
+  defp configured_session_store_value(nil, _options, _aliases),
+    do: %{mode: :ets, requested: :preserve}
+
+  defp configured_session_store_value(value, options, aliases) do
+    case configured_ecto_session_store(value, aliases) do
+      {:ok, repo, schema_prefix, store_namespace} ->
+        case configured_session_namespace(options) do
+          {:ok, namespace} when store_namespace == namespace ->
+            %{
+              mode: :ecto,
+              requested: :preserve,
+              existing?: true,
+              repo: repo,
+              schema_prefix: schema_prefix,
+              namespace: namespace
+            }
+
+          {:ok, namespace} ->
+            %{
+              mode: :custom,
+              requested: :preserve,
+              consistency_warning:
+                "Preserved the existing Ecto session store as custom configuration, but its handle namespace #{inspect(store_namespace)} does not match session_namespace #{inspect(namespace)}. The server will reject this configuration at startup; align the two values or remove the session_store setting before rerunning the installer."
+            }
+
+          _uninspectable_namespace ->
+            unvalidated_ecto_session_config()
+        end
+
+      :error ->
+        if bundled_ecto_session_store?(value, aliases) do
+          unvalidated_ecto_session_config()
+        else
+          %{mode: :custom, requested: :preserve}
+        end
+    end
+  end
+
+  defp bundled_ecto_session_store?({module_ast, _handle_ast}, aliases) do
+    canonical_ast(module_ast, aliases) == AttestoMCP.Server.SessionStore.Ecto
+  end
+
+  defp bundled_ecto_session_store?(_value, _aliases), do: false
+
+  defp unvalidated_ecto_session_config do
+    %{
+      mode: :custom,
+      requested: :preserve,
+      consistency_warning:
+        "Preserved the existing bundled Ecto session store as custom configuration, but its handle could not be statically validated; startup may reject this configuration. Verify the Ecto handle and session_namespace before deploying."
+    }
+  end
+
+  defp configured_session_namespace(options) do
+    case config_option(options, :session_namespace) do
+      :not_found ->
+        :error
+
+      {:found, value} ->
+        configured_namespace_value(value)
+    end
+  end
+
+  defp configured_ecto_session_store({module_ast, handle_ast}, aliases) do
+    if canonical_ast(module_ast, aliases) == AttestoMCP.Server.SessionStore.Ecto do
+      configured_ecto_session_handle(handle_ast, aliases)
+    else
+      :error
+    end
+  end
+
+  defp configured_ecto_session_store(_value, _aliases), do: :error
+
+  defp configured_ecto_session_handle({:%{}, _meta, pairs}, aliases) when is_list(pairs) do
+    with {:found, repo_ast} <- config_option(pairs, :repo),
+         repo when is_atom(repo) <- canonical_ast(repo_ast, aliases),
+         {:found, namespace_ast} <- config_option(pairs, :namespace),
+         {:ok, namespace} <- configured_namespace_value(namespace_ast),
+         {:ok, schema_prefix} <- configured_ecto_schema_prefix(pairs) do
+      {:ok, repo, schema_prefix, namespace}
+    else
+      _ -> :error
+    end
+  end
+
+  defp configured_ecto_session_handle(_value, _aliases), do: :error
+
+  defp configured_namespace_value(value) do
+    case literal_string(value) do
+      namespace when is_binary(namespace) ->
+        if namespace != "" and byte_size(namespace) <= @max_session_namespace_bytes and
+             String.valid?(namespace) and :binary.match(namespace, <<0>>) == :nomatch do
+          {:ok, namespace}
+        else
+          :error
+        end
+
+      _invalid ->
+        :error
+    end
+  end
+
+  defp configured_ecto_schema_prefix(pairs) do
+    case config_option(pairs, :schema_prefix) do
+      :not_found ->
+        {:ok, nil}
+
+      {:found, prefix_ast} ->
+        prefix = literal_string_or_nil(prefix_ast)
+
+        case session_schema_prefix(prefix) do
+          {:ok, validated} -> {:ok, validated}
+          {:error, _message} -> :error
+        end
+    end
+  end
+
+  defp config_option(options, key) when is_list(options) do
+    case Enum.find(options, fn
+           {option, _value} when option == key -> true
+           _other -> false
+         end) do
+      nil -> :not_found
+      {_option, value} -> {:found, value}
+    end
+  end
+
+  defp config_option(_options, _key), do: :not_found
+
+  defp literal_module_ast({:__aliases__, _meta, parts}) when is_list(parts),
+    do: Module.concat(parts)
+
+  defp literal_module_ast(value) when is_atom(value), do: value
+  defp literal_module_ast(_value), do: nil
+
+  defp literal_string_or_nil(value) do
+    case value do
+      nil -> nil
+      {:__block__, _meta, [nil]} -> nil
+      {:__block__, _meta, [value]} when is_binary(value) -> value
+      value when is_binary(value) -> value
+      _ -> :invalid
+    end
+  end
 
   defp auth_source(igniter, nil, app) do
     if Igniter.Project.Deps.has_dep?(igniter, :attesto_phoenix),
@@ -1708,16 +2891,61 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
     "#{inspect(module)}.#{function}()"
   end
 
-  defp configure_server(igniter, app, server_module) do
+  defp configure_server(igniter, app, server_module, session_config) do
     server_options = [server_name: "#{app}-mcp"]
 
-    Igniter.Project.Config.configure_new(
-      igniter,
-      "config.exs",
-      app,
-      [server_module, :server_options],
-      server_options
-    )
+    igniter =
+      Igniter.Project.Config.configure_new(
+        igniter,
+        "config.exs",
+        app,
+        [server_module, :server_options],
+        server_options
+      )
+
+    case session_config do
+      %{mode: :ecto, existing?: true} ->
+        igniter
+
+      %{mode: :ecto, repo: repo, schema_prefix: schema_prefix, namespace: namespace} ->
+        igniter
+        |> Igniter.Project.Config.configure_new(
+          "config.exs",
+          app,
+          [server_module, :server_options, :session_store],
+          {:code,
+           quote do
+             {AttestoMCP.Server.SessionStore.Ecto,
+              %{
+                repo: unquote(repo),
+                namespace: unquote(namespace),
+                schema_prefix: unquote(schema_prefix)
+              }}
+           end}
+        )
+        |> Igniter.Project.Config.configure_new(
+          "config.exs",
+          app,
+          [server_module, :server_options, :session_namespace],
+          namespace
+        )
+
+      %{mode: :ets, requested: :ets} ->
+        # ETS is the server default. Keep an explicit opt-out source-neutral so
+        # it does not add a misleading `session_store: nil` to host config.
+        igniter
+
+      _other ->
+        igniter
+    end
+  end
+
+  defp add_server_child(igniter, server_module, %{mode: :ecto, repo: repo}) do
+    Igniter.Project.Application.add_new_child(igniter, server_module, after: [repo])
+  end
+
+  defp add_server_child(igniter, server_module, _session_config) do
+    Igniter.Project.Application.add_new_child(igniter, server_module)
   end
 
   defp configure_authorization_server(
@@ -4621,6 +5849,10 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
   defp literal_atom({:__block__, _meta, [value]}) when is_atom(value), do: value
   defp literal_atom(_value), do: nil
 
+  defp literal_boolean(value) when is_boolean(value), do: value
+  defp literal_boolean({:__block__, _meta, [value]}) when is_boolean(value), do: value
+  defp literal_boolean(_value), do: nil
+
   defp literal_integer(value) when is_integer(value), do: value
   defp literal_integer({:__block__, _meta, [value]}) when is_integer(value), do: value
   defp literal_integer(_value), do: nil
@@ -4674,7 +5906,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
     """
   end
 
-  defp add_notices(igniter, auth_source, path, base_url, metadata_mode, _router) do
+  defp add_notices(igniter, auth_source, path, base_url, metadata_mode, _router, session_config) do
     auth_notice =
       case auth_source do
         {:attesto_phoenix, _app} ->
@@ -4693,12 +5925,93 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
           "The generated metadata route is public; keep it and the protected MCP forward outside browser session and CSRF pipelines."
       end
 
+    session_notice = session_store_notice(session_config)
+
     igniter
     |> Igniter.add_notice("Configured protected MCP for #{base_url}#{path}.")
     |> Igniter.add_notice(auth_notice)
     |> Igniter.add_notice(metadata_notice)
+    |> then(fn igniter ->
+      if session_notice, do: Igniter.add_notice(igniter, session_notice), else: igniter
+    end)
     |> Igniter.add_notice(
       "Review the generated server_status tool, replace it with application tools, and keep the MCP forward outside browser session and CSRF pipelines."
     )
   end
+
+  defp session_store_notice(%{
+         mode: :ecto,
+         existing?: true,
+         repo: repo,
+         schema_prefix: schema_prefix,
+         namespace: namespace
+       }) do
+    migration_command = session_migration_command(repo, schema_prefix)
+
+    """
+    Preserved the existing bundled Ecto session store with #{inspect(repo)} and namespace #{inspect(namespace)}. Ensure its table has already been migrated. If no migration has been generated, run:
+
+        #{migration_command}
+
+    Then run `mix ecto.migrate` in the host application. The installer does not run either command.
+    """
+  end
+
+  defp session_store_notice(%{
+         mode: :ecto,
+         repo: repo,
+         schema_prefix: schema_prefix,
+         namespace: namespace
+       }) do
+    migration_command = session_migration_command(repo, schema_prefix)
+
+    """
+    2025-era session-bound MCP requests use the bundled Ecto store with #{inspect(repo)} and namespace #{inspect(namespace)}. This keeps sessions across application restarts. Generate its table with:
+
+        #{migration_command}
+
+    Then run `mix ecto.migrate` in the host application. The installer does not run either command. The Ecto store fails closed when the database is unavailable; current session-free requests do not depend on persisted session rows.
+    """
+  end
+
+  defp session_store_notice(%{mode: :ets, requested: :ets}) do
+    "2025-era session-bound MCP requests use the private ETS store because `--session-store ets` was selected; sessions are lost when the application restarts."
+  end
+
+  defp session_store_notice(%{mode: :custom, consistency_warning: warning}), do: warning
+
+  defp session_store_notice(%{
+         mode: :ets,
+         requested: :auto,
+         fallback: :repo_not_statically_supervised,
+         repo: repo
+       }) do
+    "Automatic session-store selection kept the private ETS store because Ecto Repo #{inspect(repo)} was found in the host source but could not be statically confirmed as supervised by the application. No Ecto session configuration or migration was added. Add the Repo as a literal application child, select a statically supervised PostgreSQL Repo with `--session-store ecto` and/or `--repo`, or choose `--session-store ets` explicitly; sessions are lost when the application restarts."
+  end
+
+  defp session_store_notice(%{
+         mode: :ets,
+         requested: :auto,
+         fallback: :unverified_repo,
+         repo: repo
+       }) do
+    "Automatic session-store selection kept the private ETS store because Ecto Repo #{inspect(repo)} could not be statically confirmed as PostgreSQL. No Ecto session configuration or migration was added. Select a statically proven PostgreSQL Repo with `--session-store ecto` and/or `--repo`, or choose `--session-store ets` explicitly; sessions are lost when the application restarts."
+  end
+
+  defp session_store_notice(%{
+         mode: :ets,
+         requested: :auto,
+         fallback: :unsupported_repo,
+         repo: repo
+       }) do
+    "Automatic session-store selection kept the private ETS store because Ecto Repo #{inspect(repo)} is not configured for PostgreSQL. No Ecto session configuration or migration was added. Select a statically proven PostgreSQL Repo with `--session-store ecto` and/or `--repo`, or choose `--session-store ets` explicitly; sessions are lost when the application restarts."
+  end
+
+  defp session_store_notice(_session_config), do: nil
+
+  defp session_migration_command(repo, nil),
+    do: "mix attesto_mcp_server.gen.migration --repo #{inspect(repo)}"
+
+  defp session_migration_command(repo, prefix),
+    do: "mix attesto_mcp_server.gen.migration --repo #{inspect(repo)} --schema-prefix #{prefix}"
 end

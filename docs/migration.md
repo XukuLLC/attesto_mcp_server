@@ -5,6 +5,62 @@ This guide maps an existing MCP catalog and deployment onto
 authorization, and rollout safety. The [usage guide](usage.md) contains the
 complete option reference.
 
+## 0.14 durable session storage
+
+Version 0.14 adds an optional PostgreSQL-backed store for clients that use the
+session-bound `2025-11-25` or `2025-06-18` revisions. Merely upgrading the
+dependency does not create a table, run a migration, or move existing ETS
+sessions. The current in-memory default remains available, and the
+session-free `2026-07-28` revision does not need this store.
+
+For the batteries-included Phoenix path, rerun the installer. When it finds
+exactly one statically confirmed PostgreSQL Repo that is supervised as a
+literal application child, it configures that Repo and prints the explicit
+migration command. Ambiguous, dynamic, unsupervised, and non-PostgreSQL setups
+are never guessed. You can also make the choice explicit:
+
+```console
+mix attesto_mcp_server.install \
+  --base-url https://api.example.com \
+  --session-store ecto \
+  --repo MyApp.Repo
+
+mix attesto_mcp_server.gen.migration --repo MyApp.Repo
+mix ecto.migrate
+```
+
+Run the generated migration before deploying the configuration. Every node
+serving one named MCP server must use the same Repo, table, namespace, and
+optional PostgreSQL schema prefix. Ensure the Repo starts before the MCP server
+child. Existing ETS session IDs cannot be copied into the database, so clients
+with an active session-bound connection may initialize once after the cutover;
+OAuth grants and tokens are unaffected. Keeping ETS requires no migration and
+may be selected explicitly with `--session-store ets`.
+
+During a rolling upgrade, an older node treats a persisted record with a future
+`format_version` as unavailable and leaves it untouched. Reads, ownership
+checks, touches, and session updates therefore cannot erase state written by a
+newer node; deploy the reader that understands the new version before relying
+on that state. An explicit `Server.delete_session/2` remains an intentional
+deletion request. Malformed records with a version understood by the running
+package continue to be discarded according to the normal corruption policy.
+
+Before cutover, confirm custom-store records are JSON-native maps with UTF-8
+string keys; the Ecto adapter rejects BEAM-specific values instead of coercing
+them. Use a database role limited to the intended table/schema because rows
+contain authenticated principal and tenant bindings. Allow pool capacity for
+application traffic plus concurrent MCP requests. Runtime database waits are
+bounded (one-second row locks, 1.5-second query calls, three-second
+transactions). Record-bearing listings return a bounded snapshot of the first
+eight active rows; concurrent row locks may cause `list_active` to omit
+otherwise active rows. Cleanup trusts indexed expiry, selects only keys, and
+claims at most 1,000 rows. Session expiry uses wall-clock timestamps while
+refreshes preserve monotonic activity, so clock skew can extend a session's
+effective TTL; synchronize clocks across every node using the durable store.
+Monitor
+`[:attesto_mcp_server, :session_store, :failure]` for neutral `:unavailable` and
+`:corrupt_discarded` outcomes during rollout.
+
 ## 0.13 dependency boundary
 
 Version 0.13 requires `attesto_mcp >= 1.3.0 and < 2.0.0`. Run `mix deps.get`
@@ -255,8 +311,9 @@ Modern `2026-07-28` requests are session-free. The earlier `2025-11-25` and
 in-memory, so a server restart or deploy removes those sessions and clients
 must initialize again. It does not invalidate their OAuth credentials.
 
-When sessions for earlier revisions must survive a rolling deploy, implement
-`AttestoMCP.Server.SessionStore`, configure a stable `session_namespace`, and
+When sessions for earlier revisions must survive a rolling deploy, use the
+bundled PostgreSQL `AttestoMCP.Server.SessionStore.Ecto` adapter or implement
+`AttestoMCP.Server.SessionStore`. Configure a stable `session_namespace` and
 use the same durable backend on every eligible node. Enable
 `session_clustered: true` only with that shared store. Streams are still
 node-local and reconnect after node loss; cross-node delivery is asynchronous

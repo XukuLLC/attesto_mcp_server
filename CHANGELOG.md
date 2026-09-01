@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.14.0 - 2026-09-01
+
+- Add an optional PostgreSQL-backed Ecto session store for the session-bound
+  `2025-11-25` and `2025-06-18` revisions. Composite, collision-resistant
+  server namespaces,
+  row-locked updates, indexed expiry, and bounded cleanup let sessions survive
+  application restarts and remain safe across nodes sharing one database.
+- Make the Phoenix installer select durable session storage automatically when
+  it finds exactly one statically confirmed, supervised PostgreSQL host Repo.
+  It preserves existing custom choices, leaves Repo-free hosts on ETS, and
+  falls back to ETS with an actionable notice when a sole Repo cannot be proven
+  supervised or its adapter cannot be proven. It also resolves literal aliases
+  in application and config source, refuses unsupported explicit or ambiguous
+  Repo choices, and supports explicit `--session-store`, `--repo`, and
+  `--schema-prefix` choices.
+- Add `mix attesto_mcp_server.gen.migration` for the fixed
+  `attesto_mcp_sessions` table. Generation is explicit and duplicate-safe;
+  neither the installer nor the generator runs a database migration. Default
+  paths follow the selected Repo's child application in umbrella projects.
+- Keep Ecto optional so non-Ecto and stdio consumers retain the existing
+  dependency footprint and in-memory default.
+- Emit a neutral `[:attesto_mcp_server, :session_store, :failure]` event for
+  each failed session-store call, keep adapter error details private, and
+  preserve one `:session_store_unavailable` result through server, HTTP, and
+  stdio boundaries.
+- Bound Ecto query, transaction, and PostgreSQL row-lock waits below the server
+  call budget. Record-bearing listings use small batches, counts use a SQL
+  aggregate, and cleanup loads only bounded keys. Direct loads and
+  record-bearing listings discard detected corrupt rows under lock with
+  bounded telemetry so one unusable row cannot wedge later work.
+- Keep session activity timestamps monotonic under concurrent refreshes and
+  constrain session timeouts to `1..9_000_000_000_000_000_000` milliseconds.
+  Malformed external session identifiers behave like absent sessions. Invalid
+  stored record versions are discarded atomically, while rolling upgrades
+  preserve higher integer record versions and bindings that a node cannot
+  decode without creating atoms. Conditional corruption cleanup rechecks the
+  current record under the adapter lock before deletion.
+- Reject Ecto adapter operations that require their own row-locking transaction
+  when called inside a caller-owned Repo transaction, before changing
+  transaction-local timeouts, returning an explicit unsupported nesting error
+  without poisoning the host transaction.
+- In clustered mode, propagate explicit session deletion and periodic
+  expired-row cleanup to peer processes with versioned, namespace-bound,
+  size-limited control messages so every node closes its local streams without
+  rebroadcast loops.
+- Make session-store outages detected before response streaming return HTTP 503
+  consistently across JSON-RPC POST, session-bound notification, GET, and
+  DELETE paths. Configured HTTP method-scope checks and core method
+  authorization precede outage disclosure. `Stdio.main/1` now stops the server
+  it owns on exit and raises when its initial durable session cannot be stored.
+- Make HexDocs open on the installer-first README so the Phoenix SaaS path is
+  the package's default documentation entry point.
+
 ## 0.13.0 - 2026-08-31
 
 - Require `attesto_mcp >= 1.3.0 and < 2.0.0`, adding compatibility with the

@@ -1,6 +1,6 @@
-# Production dependency inventory (0.13.0)
+# Production dependency inventory (0.14.0)
 
-This release evidence was observed locally on 2026-08-31 for 0.13.0 after
+This release evidence was observed locally on 2026-09-01 for 0.14.0 after
 resolving the published Hex packages with `mix deps.get` and checking the graph
 with `mix deps.tree --only prod`. This library does not maintain or ship a
 project lockfile, so consumers resolve the declared version ranges.
@@ -20,9 +20,10 @@ All listed base-runtime components are MIT or Apache-2.0 compatible. Bandit,
 Phoenix, ExDoc, and Dialyzer are development/test-only. Package tests and the
 fresh generated host use Phoenix 1.8.13; reusable compatibility hosts also
 exercise Phoenix 1.7.24 where required. Pinned `phx_new` 1.8.13 supplies the
-fresh host. None is a runtime dependency. The base runtime graph contains no
-web server, HTTP client, OAuth authorization server, or token issuer. CI
-asserts the web-server invariant against the production dependency tree.
+fresh host. None is a runtime dependency. The base consumer runtime contains
+no web server, and this package does not start an HTTP client, OAuth
+authorization-server endpoint, or token-issuer endpoint. CI asserts the
+web-server invariant against the production dependency tree.
 
 Igniter is a declared optional, non-runtime MIT-licensed installer dependency
 (`~> 0.6`; 0.8.3 in the observed development resolution). The project-level
@@ -45,6 +46,15 @@ public AttestoPhoenix protected-resource APIs at request time so replay, nonce,
 canonical-request, certificate, access-token revocation, and principal-loading
 policies remain host-owned. The explicit-callback installer path does not add
 either dependency.
+
+Ecto is a declared optional Apache-2.0-licensed dependency (`~> 3.10`; 3.14.2
+in the observed development resolution) used only when a host selects the
+bundled PostgreSQL session store. Its optional graph adds the Apache-2.0-
+licensed Decimal 3.1.1 package and reuses Jason and Telemetry. SQL execution
+and the PostgreSQL driver remain supplied by the host's existing Repo; this
+package uses `ecto_sql` and Postgrex only in tests. The dependency-neutral
+consumer lane verifies that neither Ecto nor the Ecto session adapter is
+loaded when the host does not declare Ecto.
 
 The declared package floor is Elixir 1.18 with OTP 27. `elixir --version`
 reported Elixir 1.18.3/OTP 27.3 for the local floor gate and Elixir 1.20.3/OTP

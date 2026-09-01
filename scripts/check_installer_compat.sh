@@ -10,12 +10,14 @@ host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-host.XXXXXX")
 phoenix_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-host.XXXXXX")
 phoenix_floor_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-floor-host.XXXXXX")
 phoenix_three_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-three-host.XXXXXX")
+phoenix_postgres_floor_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-postgres-floor-host.XXXXXX")
+outside_config_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-outside-config.XXXXXX")
 absent_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-absent.XXXXXX")
 generated_root=$(mktemp -d "$temp_root/attesto-mcp-installer-generated.XXXXXX")
 generated_host_dir="$generated_root/installer_host"
 
 cleanup() {
-  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$phoenix_three_host_dir" "$absent_dir" "$generated_root"
+  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$phoenix_three_host_dir" "$phoenix_postgres_floor_host_dir" "$outside_config_dir" "$absent_dir" "$generated_root"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -33,6 +35,12 @@ cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_three_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_three_host_dir/mix.exs"
 cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_three_host_dir/lib/installer_host_web/router.ex"
 cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_three_host_dir/lib/installer_host_web/parsed_body_probe.ex"
+cp -R "$repo_dir/fixtures/installer_phoenix_postgres_host/." "$phoenix_postgres_floor_host_dir"
+mkdir -p \
+  "$phoenix_postgres_floor_host_dir/lib/installer_host_web" \
+  "$phoenix_postgres_floor_host_dir/config"
+cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_postgres_floor_host_dir/lib/installer_host_web/router.ex"
+cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_postgres_floor_host_dir/lib/installer_host_web/parsed_body_probe.ex"
 
 digest_tree() {
   {
@@ -423,6 +431,21 @@ mix phx.new "$generated_host_dir" \
   grep -Fq 'native_apps: [loopback_include_localhost: true]' config/config.exs
   grep -Fq '{:req, ">= 0.6.1 and < 1.0.0"}' mix.exs
 
+  if grep -R -Fq 'AttestoMCP.Server.SessionStore.Ecto' config lib; then
+    echo "SQLite host unexpectedly selected the durable Ecto session store" >&2
+    exit 1
+  fi
+
+  if grep -R -Fq 'session_store:' config; then
+    echo "SQLite host unexpectedly received session-store configuration" >&2
+    exit 1
+  fi
+
+  if find priv -type f -name '*attesto_mcp_sessions*' -print -quit | grep -q .; then
+    echo "SQLite host unexpectedly received a durable-session migration" >&2
+    exit 1
+  fi
+
   first_digest=$(digest_tree)
 
   mix format --check-formatted
@@ -495,6 +518,56 @@ mix phx.new "$generated_host_dir" \
 
   second_digest=$(digest_tree)
   test "$first_digest" = "$second_digest"
+)
+
+(
+  cd "$phoenix_postgres_floor_host_dir"
+  export ATTESTO_MCP_SERVER_PATH="$repo_dir"
+  INSTALLER_HOST_SIGNING_PEM=$(openssl genpkey -algorithm ED25519 2>/dev/null)
+  export INSTALLER_HOST_SIGNING_PEM
+
+  export OUTSIDE_CONFIG_DIR="$outside_config_dir"
+  elixir -e '
+    outside = System.fetch_env!("OUTSIDE_CONFIG_DIR")
+    File.write!(Path.join(outside, "linked.exs"), """
+    import Config
+
+    config :installer_host, InstallerHost.MCP,
+      server_options: [session_store: {Outside.Store, :handle}]
+    """)
+    File.ln_s!(Path.join(outside, "linked.exs"), "config/linked.exs")
+  '
+
+  mix deps.get
+  mix attesto_mcp_server.install --base-url https://mcp.example.com --reuse-metadata-route --yes
+
+  grep -Fq 'AttestoMCP.Server.SessionStore.Ecto' config/config.exs
+  grep -Fq 'repo: InstallerHost.Repo' config/config.exs
+  grep -Fq 'children = [InstallerHost.Repo, InstallerHost.MCP]' lib/installer_host/application.ex
+
+  migration_path="priv/repo/migrations"
+  mix attesto_mcp_server.gen.migration --repo InstallerHost.Repo
+  migration_file=$(find "$migration_path" -type f -name '*_create_attesto_mcp_sessions.exs' -print -quit)
+  test -n "$migration_file"
+  grep -Fq 'create table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)' "$migration_file"
+  grep -Fq 'add(:namespace, :string, size: 256, primary_key: true, null: false)' "$migration_file"
+  grep -Fq 'add(:session_id, :string, size: 256, primary_key: true, null: false)' "$migration_file"
+  grep -Fq 'add(:record, :map, null: false)' "$migration_file"
+  grep -Fq 'add(:expires_at_ms, :bigint, null: false)' "$migration_file"
+  grep -Fq 'index(:attesto_mcp_sessions, [:namespace, :expires_at_ms, :session_id]' "$migration_file"
+  if command -v sha256sum >/dev/null 2>&1; then
+    migration_digest=$(sha256sum "$migration_file")
+  else
+    migration_digest=$(shasum -a 256 "$migration_file")
+  fi
+
+  mix attesto_mcp_server.install --base-url https://mcp.example.com --reuse-metadata-route --yes
+  test "$(find "$migration_path" -type f -name '*_create_attesto_mcp_sessions.exs' | wc -l | tr -d ' ')" -eq 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    test "$migration_digest" = "$(sha256sum "$migration_file")"
+  else
+    test "$migration_digest" = "$(shasum -a 256 "$migration_file")"
+  fi
 )
 
 (

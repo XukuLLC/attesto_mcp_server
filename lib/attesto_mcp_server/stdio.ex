@@ -33,50 +33,88 @@ defmodule AttestoMCP.Server.Stdio do
             ":max_message_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{json_budget}"
     end
 
-    {:ok, legacy_session} =
-      AttestoMCP.Server.new_session(
-        server,
-        context_principal(context),
-        Map.get(context, :tenant) || Map.get(context, "tenant")
-      )
-
-    context = Map.put(context, :legacy_session_id, legacy_session.id)
-    parent = self()
     input = Keyword.get(opts, :input, fn -> read_bounded_frame(max) end)
 
     unless is_function(input, 0) do
       raise ArgumentError, ":input must be a zero-arity function"
     end
 
-    {reader, reader_monitor} = spawn_monitor(fn -> read_loop(parent, input) end)
-    Process.put(:attesto_mcp_stdio_pending, %{})
-    # A stdio frame has its own transport ceiling.  Keep output under the
-    # declared frame bound even when the server's value/schema budget is
-    # larger.
-    Process.put(:attesto_mcp_stdio_json_budget, max)
+    with {:ok, legacy_session} <-
+           AttestoMCP.Server.new_session(
+             server,
+             context_principal(context),
+             Map.get(context, :tenant) || Map.get(context, "tenant")
+           ) do
+      context = Map.put(context, :legacy_session_id, legacy_session.id)
+      parent = self()
 
-    try do
-      loop(server, context, opts, max, reader, reader_monitor, %{})
-    after
-      stop_pending(Process.get(:attesto_mcp_stdio_pending, %{}))
-      Process.delete(:attesto_mcp_stdio_pending)
-      Process.delete(:attesto_mcp_stdio_json_budget)
-      AttestoMCP.Server.delete_session(server, legacy_session.id)
-      if Process.alive?(reader), do: Process.exit(reader, :kill)
-      Process.demonitor(reader_monitor, [:flush])
-      Telemetry.execute([:stdio, :stop], %{count: 1}, %{transport: :stdio, outcome: :closed})
+      {reader, reader_monitor} = spawn_monitor(fn -> read_loop(parent, input) end)
+      Process.put(:attesto_mcp_stdio_pending, %{})
+      # A stdio frame has its own transport ceiling.  Keep output under the
+      # declared frame bound even when the server's value/schema budget is
+      # larger.
+      Process.put(:attesto_mcp_stdio_json_budget, max)
+
+      try do
+        loop(server, context, opts, max, reader, reader_monitor, %{})
+      after
+        stop_pending(Process.get(:attesto_mcp_stdio_pending, %{}))
+        Process.delete(:attesto_mcp_stdio_pending)
+        Process.delete(:attesto_mcp_stdio_json_budget)
+        AttestoMCP.Server.delete_session(server, legacy_session.id)
+        if Process.alive?(reader), do: Process.exit(reader, :kill)
+        Process.demonitor(reader_monitor, [:flush])
+
+        Telemetry.execute([:stdio, :stop], %{count: 1}, %{
+          transport: :stdio,
+          outcome: :closed
+        })
+      end
+    else
+      {:error, :session_store_unavailable} ->
+        Telemetry.execute([:stdio, :stop], %{count: 1}, %{
+          transport: :stdio,
+          outcome: :unavailable
+        })
+
+        {:error, :session_store_unavailable}
+
+      {:error, reason}
+      when reason in [:nonportable_binding, :binding_too_large, :record_too_large] ->
+        Telemetry.execute([:stdio, :stop], %{count: 1}, %{
+          transport: :stdio,
+          outcome: :rejected
+        })
+
+        {:error, reason}
+
+      {:error, _reason} ->
+        Telemetry.execute([:stdio, :stop], %{count: 1}, %{
+          transport: :stdio,
+          outcome: :unavailable
+        })
+
+        {:error, :session_store_unavailable}
     end
   end
 
-  @doc "Starts a server and runs the stdio adapter until EOF."
-  @spec main(keyword()) :: term()
+  @doc "Starts a server, runs until EOF, and raises on an adapter startup failure."
+  @spec main(keyword()) :: :ok | no_return()
   def main(opts \\ []) do
     # Adapter controls belong to run/2. Keep them out of server startup so a
     # normal command-line invocation can provide identity/input callbacks
     # without weakening the server's unknown-option validation.
     server_opts = Keyword.drop(opts, @adapter_only_options)
     {:ok, server} = AttestoMCP.Server.start_link(server_opts)
-    run(server, opts)
+
+    try do
+      case run(server, opts) do
+        :ok -> :ok
+        {:error, reason} -> raise RuntimeError, "stdio adapter failed: #{reason}"
+      end
+    after
+      if Process.alive?(server), do: GenServer.stop(server)
+    end
   end
 
   defp read_loop(parent, input) do
@@ -278,46 +316,57 @@ defmodule AttestoMCP.Server.Stdio do
     id = Map.get(request, :id)
     key = if is_nil(id), do: {:notification, work_ref}, else: id
 
-    if legacy_not_ready?(server, context, request) do
-      if not is_nil(id),
-        do:
-          write(
-            JSONRPC.error_response(
-              id,
-              Error.invalid_request(%{"reason" => "initialized_notification_required"})
-            )
-          )
-
-      pending
-    else
-      case allow_rate(server, context, request) do
-        :ok ->
-          if not is_nil(id) and Map.has_key?(pending, key) do
+    case legacy_not_ready?(server, context, request) do
+      true ->
+        if not is_nil(id),
+          do:
             write(
-              JSONRPC.error_response(id, Error.invalid_request(%{"reason" => "duplicate_id"}))
+              JSONRPC.error_response(
+                id,
+                Error.invalid_request(%{"reason" => "initialized_notification_required"})
+              )
             )
+
+        pending
+
+      readiness when readiness in [false, :session_store_unavailable] ->
+        # Keep a readiness outage attached to this request even if the
+        # request-context lookup below happens to recover. The core dispatch
+        # still performs validation and authorization before returning its
+        # neutral store-unavailable response; it must never reach a handler.
+        context =
+          if readiness == :session_store_unavailable,
+            do: Map.put(context, :session_store_unavailable, true),
+            else: context
+
+        case allow_rate(server, context, request) do
+          :ok ->
+            if not is_nil(id) and Map.has_key?(pending, key) do
+              write(
+                JSONRPC.error_response(id, Error.invalid_request(%{"reason" => "duplicate_id"}))
+              )
+
+              pending
+            else
+              start_worker_process(
+                server,
+                context,
+                opts,
+                request,
+                pending,
+                id,
+                key,
+                parent,
+                work_ref
+              )
+            end
+
+          {:error, :rate_limited} ->
+            if not is_nil(id),
+              do: write(JSONRPC.error_response(id, Error.rate_limited()))
 
             pending
-          else
-            start_worker_process(
-              server,
-              context,
-              opts,
-              request,
-              pending,
-              id,
-              key,
-              parent,
-              work_ref
-            )
-          end
-
-        {:error, :rate_limited} ->
-          if not is_nil(id),
-            do: write(JSONRPC.error_response(id, Error.rate_limited()))
-
-          pending
-      end
+        end
     end
   end
 
@@ -482,6 +531,13 @@ defmodule AttestoMCP.Server.Stdio do
           )
           |> Map.put(:logging_level, session.logging_level)
 
+        {:error, :session_store_unavailable} ->
+          context
+          |> Map.put(:session_id, session_id)
+          |> Map.put(:protocol_version, nil)
+          |> Map.put(:legacy_session_state, :unavailable)
+          |> Map.put(:session_store_unavailable, true)
+
         _ ->
           context
           |> Map.put(:session_id, session_id)
@@ -573,14 +629,17 @@ defmodule AttestoMCP.Server.Stdio do
             Error.invalid_request(%{"reason" => "unsolicited_response"})
           )
         )
+
+      {:error, :session_store_unavailable} ->
+        write(JSONRPC.error_response(response.id, Error.session_store_unavailable()))
     end
 
     :ok
   end
 
   defp legacy_not_ready?(server, context, request) do
-    legacy_version?(version_for(request)) and
-      request.method not in ["initialize", "ping", "notifications/initialized"] and
+    if legacy_version?(version_for(request)) and
+         request.method not in ["initialize", "ping", "notifications/initialized"] do
       case legacy_session_lookup(
              server,
              context[:legacy_session_id],
@@ -589,8 +648,14 @@ defmodule AttestoMCP.Server.Stdio do
              request
            ) do
         {:ok, session} -> not session.initialized
+        # A backing-store outage must not create a transient window in which
+        # a legacy request can run before request_context/3 checks the store.
+        {:error, :session_store_unavailable} -> :session_store_unavailable
         _ -> true
       end
+    else
+      false
+    end
   end
 
   defp legacy_session_lookup(server, id, principal, tenant, %{method: method})
@@ -771,6 +836,7 @@ defmodule AttestoMCP.Server.Stdio do
 
     cond do
       not legacy_version?(version) -> version
+      context[:session_store_unavailable] == true -> @legacy
       context[:protocol_version] in @legacy_versions -> context[:protocol_version]
       request.method == "ping" -> @legacy
       true -> nil

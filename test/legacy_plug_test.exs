@@ -12,6 +12,54 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
   @short_session_timeout_ms 500
   @http_race_timeout_ms 120_000
 
+  defmodule FailAfterUpdates do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    alias AttestoMCP.Server.SessionStore.ETS
+
+    def save({store, _gate}, key, record), do: ETS.save(store, key, record)
+    def load({store, _gate}, key), do: ETS.load(store, key)
+    def delete({store, _gate}, key), do: ETS.delete(store, key)
+    def list_active({store, _gate}), do: ETS.list_active(store)
+    def update_ttl({store, _gate}, key, now), do: ETS.update_ttl(store, key, now)
+    def cleanup_expired({store, _gate}), do: ETS.cleanup_expired(store)
+
+    def update({store, gate}, key, fun) do
+      case Agent.get_and_update(gate, fn
+             :open -> {:allow, :open}
+             {:allow, remaining} when remaining > 0 -> {:allow, {:allow, remaining - 1}}
+             {:allow, 0} = state -> {:deny, state}
+           end) do
+        :allow -> ETS.update(store, key, fun)
+        :deny -> {:error, :database_unavailable}
+      end
+    end
+  end
+
+  defmodule CountedLoads do
+    @moduledoc false
+    @behaviour AttestoMCP.Server.SessionStore
+
+    alias AttestoMCP.Server.SessionStore.ETS
+
+    def save({store, _counter}, key, record), do: ETS.save(store, key, record)
+
+    def load({store, counter}, key) do
+      Agent.update(counter, &(&1 + 1))
+
+      if Agent.get(counter, & &1) > 2,
+        do: {:error, :database_unavailable},
+        else: ETS.load(store, key)
+    end
+
+    def delete({store, _counter}, key), do: ETS.delete(store, key)
+    def list_active({store, _counter}), do: ETS.list_active(store)
+    def update_ttl({store, _counter}, key, now), do: ETS.update_ttl(store, key, now)
+    def cleanup_expired({store, _counter}), do: ETS.cleanup_expired(store)
+    def update({store, _counter}, key, fun), do: ETS.update(store, key, fun)
+  end
+
   test "authenticated legacy initialize persists version and waits for initialized" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()
@@ -106,6 +154,222 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
     assert wrong_version.status == 400
     assert Jason.decode!(wrong_version.resp_body)["error"]["code"] == -32020
+  end
+
+  test "initialized notification returns 503 when its persistence update fails" do
+    {:ok, store} = start_supervised(AttestoMCP.Server.SessionStore.ETS)
+    gate = start_supervised!({Agent, fn -> :open end})
+    namespace = "initialized-outage"
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {FailAfterUpdates, {store, gate}},
+        session_namespace: namespace
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+    session_id = initialize_session(plug, token)
+
+    # Context construction and request validation each perform an ordinary
+    # touch. Fail the following mark-initialized update to exercise the
+    # post-preflight outage window.
+    :ok = Agent.update(gate, fn _state -> {:allow, 2} end)
+
+    response =
+      call(
+        plug,
+        token,
+        "POST",
+        %{"jsonrpc" => "2.0", "method" => "notifications/initialized", "params" => %{}},
+        session_id: session_id
+      )
+
+    assert response.status == 503
+    assert response.resp_body == "service unavailable"
+
+    assert {:ok, record} =
+             AttestoMCP.Server.SessionStore.ETS.load(store, {namespace, session_id})
+
+    refute record["initialized"]
+  end
+
+  test "session-store outages have exact neutral HTTP responses across legacy methods" do
+    {:ok, store} = start_supervised(AttestoMCP.Server.SessionStore.ETS)
+    gate = start_supervised!({Agent, fn -> :open end})
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {FailAfterUpdates, {store, gate}},
+        session_namespace: "outage-responses"
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+    session_id = initialize_session(plug, token)
+
+    # Validation and context lookup consume two updates before the initialized
+    # notification marks the session. The mark itself must be reported as a
+    # plain transport outage rather than exposing the adapter's error.
+    :ok = Agent.update(gate, fn _state -> {:allow, 2} end)
+
+    cases = [
+      {:notification,
+       fn ->
+         call(
+           plug,
+           token,
+           "POST",
+           %{"jsonrpc" => "2.0", "method" => "notifications/initialized", "params" => %{}},
+           session_id: session_id
+         )
+       end, 2, 503, "service unavailable"},
+      {:post,
+       fn ->
+         call(
+           plug,
+           token,
+           "POST",
+           %{"jsonrpc" => "2.0", "id" => 2, "method" => "ping", "params" => %{}},
+           session_id: session_id
+         )
+       end, 0, 503,
+       %{
+         "jsonrpc" => "2.0",
+         "id" => 2,
+         "error" => %{
+           "code" => -32603,
+           "message" => "Internal error",
+           "data" => %{"reason" => "session_store_unavailable"}
+         }
+       }},
+      {:get,
+       fn -> call(plug, token, "GET", nil, session_id: session_id, protocol_version: @legacy) end,
+       0, 503, "service unavailable"},
+      {:delete,
+       fn ->
+         call(plug, token, "DELETE", nil, session_id: session_id, protocol_version: @legacy)
+       end, 0, 503, "service unavailable"}
+    ]
+
+    Enum.each(cases, fn {kind, request, update_budget, expected_status, expected_body} ->
+      :ok = Agent.update(gate, fn _state -> {:allow, update_budget} end)
+      response = request.()
+
+      assert response.status == expected_status, kind: kind
+
+      if is_binary(expected_body) do
+        assert response.resp_body == expected_body, kind: kind
+      else
+        assert Jason.decode!(response.resp_body) == expected_body, kind: kind
+        refute response.resp_body =~ "database_unavailable"
+      end
+    end)
+  end
+
+  test "a session-store error returned by dispatch is HTTP 503 with an internal JSON-RPC error" do
+    {:ok, store} = start_supervised(AttestoMCP.Server.SessionStore.ETS)
+    gate = start_supervised!({Agent, fn -> {:allow, 1} end})
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {FailAfterUpdates, {store, gate}},
+        session_namespace: "dispatch-outage"
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = plug(server, config)
+
+    response =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 3,
+          "method" => "initialize",
+          "params" => %{
+            "protocolVersion" => @legacy,
+            "capabilities" => %{},
+            "clientInfo" => %{"name" => "outage-test", "version" => "1.0"}
+          }
+        },
+        protocol_version: @legacy
+      )
+
+    assert response.status == 503
+
+    assert Jason.decode!(response.resp_body) == %{
+             "jsonrpc" => "2.0",
+             "id" => 3,
+             "error" => %{
+               "code" => -32603,
+               "message" => "Internal error",
+               "data" => %{"reason" => "session_store_unavailable"}
+             }
+           }
+
+    refute response.resp_body =~ "database_unavailable"
+  end
+
+  test "streamed legacy tools reuse the preflight logging lookup" do
+    {:ok, store} = start_supervised(AttestoMCP.Server.SessionStore.ETS)
+    counter = start_supervised!({Agent, fn -> 0 end})
+    parent = self()
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {CountedLoads, {store, counter}},
+        session_namespace: "streamed-logging"
+      )
+
+    assert :ok =
+             Server.register_tool(server, "counted-stream", %{
+               input_schema: %{"type" => "object"},
+               handler: fn _arguments, _context ->
+                 send(parent, :counted_stream_handler_ran)
+                 {:ok, %{"streamed" => true}}
+               end
+             })
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+
+    plug =
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        stream_tools: ["counted-stream"],
+        auth: [config: config, resource: @resource]
+      )
+
+    session_id = initialize_session(plug, token)
+
+    assert :ok = Server.mark_initialized(server, session_id)
+
+    Agent.update(counter, fn _ -> 0 end)
+
+    response =
+      call(
+        plug,
+        token,
+        "POST",
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 2,
+          "method" => "tools/call",
+          "params" => %{"name" => "counted-stream", "arguments" => %{}}
+        },
+        session_id: session_id
+      )
+
+    assert response.status == 200
+    assert_receive :counted_stream_handler_ran, 1_000
+    assert Agent.get(counter, & &1) == 2
   end
 
   test "authenticated HTTP session negotiates and enforces 2025-06-18" do

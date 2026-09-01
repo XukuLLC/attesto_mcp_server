@@ -50,12 +50,26 @@ defmodule Mix.Tasks.AttestoMcpServer.Install.Docs do
         the package-owned metadata forward
       * `--enable-cimd` - explicitly enable AttestoPhoenix Client ID Metadata
         Documents and add the default fetcher's Req dependency
+      * `--session-store` - choose `auto` (the default), `ecto`, or `ets` for
+        2025-era session-bound MCP state. Automatic mode uses Ecto when exactly
+        one host Repo is statically confirmed to use PostgreSQL and supervised
+        as an application child. With no Repo, or when the sole Repo cannot be
+        statically confirmed as supervised PostgreSQL, automatic mode safely
+        keeps the in-memory ETS store; use `ets` to opt out of durable sessions
+        explicitly. Explicit `ecto` remains fail-closed unless PostgreSQL is
+        statically proven
+      * `--repo` - Ecto Repo module used by the durable session store when the
+        host has more than one Repo, or when `ecto` is selected explicitly
+      * `--schema-prefix` - optional PostgreSQL schema used by the durable
+        session store and its migration
       * `--allow-http-loopback` - allow an explicit HTTP loopback origin for
         local development only
 
     Igniter's global `--dry-run`, `--yes`, and related options remain
     available. Umbrella roots are not supported; run the task inside the
-    Phoenix child application.
+    Phoenix child application. When the installer selects Ecto, it prints the
+    exact `mix attesto_mcp_server.gen.migration` command; it never generates or
+    runs that migration automatically.
     """
   end
 end

@@ -30,6 +30,33 @@ With `attesto_phoenix` already declared directly by the host, run:
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
 ```
 
+When exactly one host Ecto Repo is statically confirmed to use PostgreSQL and
+to be supervised as a literal application child, the installer wires the
+bundled session store and orders the MCP child after that Repo. Run the exact
+generator command printed in the installer notice, followed by the host's
+normal migration command:
+
+```sh
+mix attesto_mcp_server.gen.migration --repo MyApp.Repo
+mix ecto.migrate
+```
+
+The installer and generator only write source; neither changes the database.
+With no Repo, the in-memory ETS default remains in use. With multiple Repos, the
+installer refuses to choose until `--repo MyApp.Repo` is supplied. Use
+`--session-store ets` to retain in-memory sessions deliberately, or
+`--schema-prefix my_schema` with Ecto for a validated PostgreSQL schema. If the
+sole Repo is not statically confirmed as a supervised PostgreSQL application
+child, automatic selection keeps the in-memory ETS default, adds a notice, and
+emits no Ecto session configuration or migration guidance. Explicit
+`--session-store ecto` and/or `--repo MyApp.Repo` choices remain fail-closed
+until PostgreSQL is statically proven.
+
+Static discovery reads regular `.exs` files below `config/` without following
+symlinks. Conflicting environment-specific Repo or session-store declarations
+are treated as ambiguous; make the selection consistent or pass an explicit
+supported choice rather than relying on file order.
+
 Whether or not CIMD is enabled, the installer sets
 `native_apps.loopback_include_localhost` to `true` only when that key is absent.
 This lets a registered portless `http://localhost/...` native-app callback use
@@ -182,7 +209,8 @@ selected uniquely, pass `--router MyAppWeb.Router`; the task refuses ambiguous
 router selection and prints an exact manual snippet if no router exists.
 
 Additional options are `--mcp-path`, `--server-module`, `--router`,
-`--attesto-config`, `--enable-cimd`, and `--reuse-metadata-route`. Run the task inside the Phoenix child application rather
+`--attesto-config`, `--enable-cimd`, `--reuse-metadata-route`,
+`--session-store`, `--repo`, and `--schema-prefix`. Run the task inside the Phoenix child application rather
 than at an umbrella root. The generated `server_status` tool is deliberately a
 small starter; replace it with application-specific registrations and scopes.
 When `--reuse-metadata-route` is selected, the task requires exactly one
@@ -666,8 +694,90 @@ private details into protocol responses or Telemetry. Function, `{Module,
 :function}`, and `{Module, :function, prefix_args}` callback forms are
 supported.
 
-The default session store is private in-memory state. Durable hosts can
-implement `AttestoMCP.Server.SessionStore` and configure:
+The default session store is package-owned in-memory state. The Phoenix
+installer selects the bundled PostgreSQL adapter only when exactly one Repo is
+statically confirmed as both supervised and PostgreSQL-backed. Manual
+configuration may use the same stateless data handle in application config:
+
+```elixir
+store = %{
+  repo: MyApp.Repo,
+  namespace: "primary-mcp",
+  schema_prefix: nil
+}
+
+server_options = [
+  session_store: {AttestoMCP.Server.SessionStore.Ecto, store},
+  session_namespace: "primary-mcp"
+]
+```
+
+`AttestoMCP.Server.SessionStore.Ecto.new/1` validates and returns the same
+handle when called from application startup code after the Repo module is
+available. Do not call it while evaluating `config.exs`, before host modules
+have been compiled.
+
+Generate and apply `attesto_mcp_sessions` before starting the server:
+
+```sh
+mix attesto_mcp_server.gen.migration --repo MyApp.Repo
+mix ecto.migrate
+```
+
+The adapter supports PostgreSQL and uses row locks for atomic updates. Its
+required namespace is bound into the store handle, so key operations and
+indexed listing/cleanup cannot cross server namespaces. Several named MCP
+servers can therefore share one table without sharing sessions. It stores the
+complete versioned record as JSONB, preserves unknown JSON-native fields with
+binary object keys, validates indexed expiry mirrors before use, and uses those
+mirrors for bounded listing and cleanup. Record-bearing listings return the
+first eight active rows ordered by expiry and session ID; they are bounded
+snapshots rather than a pagination API, and concurrent row locks may cause
+`list_active` to omit otherwise active rows. Session counts use a separate SQL
+aggregate. Cleanup trusts the indexed expiry column, selects only keys, and
+claims at most 1,000 rows, so periodic passes drain larger backlogs without
+loading their record payloads. Direct loads and record-bearing listings verify
+the complete record against its expiry mirrors. Malformed rows detected there
+fail closed and are removed under a row lock so one row cannot block later
+work.
+
+Session expiry uses wall-clock timestamps while refreshes preserve monotonic
+activity. Clock skew between nodes can therefore extend a session's effective
+TTL; synchronize clocks across every node using the durable store.
+
+Database operations fail closed. The adapter limits PostgreSQL row-lock waits
+to one second, individual query calls to 1.5 seconds, and transactions to three
+seconds so a stalled database returns a neutral store-unavailable result before
+the server's call budget. Size the Repo pool for ordinary application demand
+plus concurrent MCP requests, and monitor checkout pressure and
+`session_store/failure` events. The host Repo must supply `ecto_sql` and
+Postgrex; this package keeps only Ecto itself as an optional dependency so
+ETS-only consumers do not inherit a SQL stack.
+
+Adapter operations that require their own row-locking transaction must run
+outside caller-owned `Repo.transaction/2` blocks. Those operations reject
+nested use before opening another transaction or changing transaction-local
+timeouts, returning `{:error, :nested_transaction_unsupported}`. Let the MCP
+server own its short session-store transaction rather than wrapping it in an
+application transaction.
+
+The table contains serialized authenticated principal and tenant bindings.
+Treat it as part of the authorization trust boundary: grant the application
+role only the required table/schema privileges, prevent unrelated writers, and
+apply normal encrypted-backup and database audit controls. Before moving a
+custom store to Ecto, confirm every persisted record is JSON-native and every
+map key is a UTF-8 string; atom-keyed or otherwise BEAM-specific records are
+rejected rather than coerced.
+
+Principal and tenant bindings may contain existing atoms. Safe restoration
+never creates atoms from persisted data, so every node that must use an
+atom-bearing binding needs those atoms loaded already. A node where an atom is
+absent treats the binding as unavailable and leaves the durable record intact;
+use binary or string identities when nodes do not share the same loaded atom
+set.
+
+Hosts needing another backend can implement
+`AttestoMCP.Server.SessionStore` and configure:
 
 ```elixir
 session_store: {MyApp.MCPSessions, store_handle},
@@ -685,8 +795,11 @@ cannot reach their backend.
 
 For multiple Erlang nodes, add `session_clustered: true` with a genuinely
 shared adapter and explicit namespace. Requests on any peer can load the same
-session, and publishes fan out asynchronously once to each live peer. In
-0.12.0, peer catalog drift cannot reduce publisher-required scopes; drain mixed
+session, publishes fan out asynchronously once to each live peer, and explicit
+session deletion or periodic expired-row cleanup closes matching local streams
+on every reachable peer.
+
+Peer catalog drift cannot reduce publisher-required scopes; drain mixed
 old/new clusters rather than rely on them for resource notifications. Use a
 globally unique namespace when unrelated deployments share the store or Erlang
 cluster. Streams remain local processes and reopen after failover; event replay
@@ -880,8 +993,10 @@ modern requests never use one of these sessions.
 
 Session-bound GET is a standing incremental SSE stream with bounded keepalive and
 session-owner delivery. DELETE closes the authenticated session and its
-streams. This release does not advertise cross-process replication or
-Last-Event-ID resumption; a Last-Event-ID GET is rejected rather than replayed.
+streams. Clustered mode coordinates live peers but does not replicate stream
+processes or event history. Last-Event-ID resumption is not supported; a
+Last-Event-ID GET is rejected rather than replayed.
+
 Session-bound initialization advertises the server's `resources.subscribe` capability;
 clients do not need to self-declare that server capability. After
 `notifications/initialized`, negotiated `sampling`, `elicitation`, and `roots`
@@ -922,12 +1037,18 @@ stable event contract is:
   `cancellation/stop`, and `progress/emit` or `progress/reject`.
 * `mrtr/round`, `subscription/open`, `subscription/close`,
   `subscription/suppressed`, and `subscription/backpressure`.
-* `cache/choice`, `cache/invalidation`, `session/open`, `session/close`, and
-  `supervision/restart`.
+* `cache/choice`, `cache/invalidation`, `session/open`, `session/close`,
+  `session_store/failure`, and `supervision/restart`.
 
 `auth/policy_failure` identifies the failing boundary only through a safe
 `principal_policy` or `verifier` category and an atom failure kind; it never
 includes the callback reason, token claims, or principal.
+
+`session_store/failure` identifies the failed operation only through its bounded
+`source` atom. The outcome is `unavailable`, or `corrupt_discarded` when the
+bundled Ecto adapter removes a structurally corrupt persisted row so later
+bounded passes can continue. Adapter reasons, session identifiers, records, and
+exception text are never included.
 
 Credential, proof, request-state, baggage, private content, and arbitrary
 callback values are removed before Telemetry emission.
@@ -957,7 +1078,12 @@ is 64,000 bytes; larger limits must be explicit. A host may instead call
 `AttestoMCP.Server.Stdio.run/2` with its own supervised server and context.
 `AttestoMCP.Server.Stdio.main/1` accepts the adapter-only identity, input,
 server-request, and EOF controls too; it removes those controls before starting
-the owned server so core unknown-option validation stays strict.
+the owned server so core unknown-option validation stays strict. `run/2` returns
+one of these startup error tuples: `{:error, :session_store_unavailable}`,
+`{:error, :nonportable_binding}`, `{:error, :binding_too_large}`, or
+`{:error, :record_too_large}`. `main/1` stops its owned server after the
+adapter exits and raises for a startup failure so an executable wrapper cannot
+silently report a successful exit.
 
 ## Protocol version compatibility
 

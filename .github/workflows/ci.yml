@@ -101,10 +101,26 @@ jobs:
           - elixir: "1.20.4"
             otp: "29.0.5"
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: attesto_mcp_server_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d attesto_mcp_server_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7.0.1
       - name: scan source for generic package hygiene violations
         run: scripts/check_source_hygiene.sh .
+      - name: verify conformance evidence fingerprint
+        run: scripts/check_conformance_evidence.sh
       - uses: erlef/setup-beam@v1.24.1
         with:
           elixir-version: ${{ matrix.elixir }}
@@ -122,6 +138,7 @@ jobs:
             end)
           '
       - run: mix test.all
+      - run: mix test test/ecto_session_store_test.exs --include ecto --warnings-as-errors
       - run: mix test test/legacy_bandit_test.exs test/p3_auth_acceptance_test.exs
       - run: MCP_REQUIREMENTS=2026-07-28 mix test test/conformance_fixture_test.exs --seed 0
       - run: MCP_REQUIREMENTS=2025-11-25 mix test test/conformance_fixture_test.exs --seed 0
@@ -150,7 +167,43 @@ jobs:
       - run: test -s CONFORMANCE.md && test -s docs/sbom.md
       - run: elixir examples/stdio.exs </dev/null
       - working-directory: examples/consumer
-        run: mix deps.get && mix compile --warnings-as-errors && mix run -e '{:ok, server} = AttestoMCP.ExternalConsumer.build_server(); _plug = AttestoMCP.ExternalConsumer.plug(server); AttestoMCP.ExternalConsumer.stdio(server)'
+        run: |
+          mix deps.get
+          mix compile --warnings-as-errors
+          mix run -e 'if Code.ensure_loaded?(Ecto), do: raise("Ecto leaked into the dependency-neutral consumer"); if Code.ensure_loaded?(AttestoMCP.Server.SessionStore.Ecto), do: raise("Ecto adapter compiled without Ecto"); {:ok, server} = AttestoMCP.ExternalConsumer.build_server(); _plug = AttestoMCP.ExternalConsumer.plug(server); AttestoMCP.ExternalConsumer.stdio(server)'
+          if mix attesto_mcp_server.gen.migration --repo AttestoMCP.ExternalConsumer.Repo > "$RUNNER_TEMP/neutral-migration-task.log" 2>&1; then
+            echo "migration task unexpectedly succeeded without Ecto" >&2
+            exit 1
+          fi
+          grep -Fq "requires Ecto" "$RUNNER_TEMP/neutral-migration-task.log"
+
+          ATTESTO_MCP_CONSUMER_ECTO=1 mix deps.get
+          ATTESTO_MCP_CONSUMER_ECTO=1 mix compile --warnings-as-errors
+          activation_migrations="$RUNNER_TEMP/consumer-activation-migrations"
+          mkdir -p "$activation_migrations"
+          export ATTESTO_MCP_CONSUMER_MIGRATIONS="$activation_migrations"
+          ATTESTO_MCP_CONSUMER_ECTO=1 mix run -e '
+            unless Code.ensure_loaded?(AttestoMCP.Server.SessionStore.Ecto),
+              do: raise("Ecto adapter did not compile after dependency activation")
+            unless Code.ensure_loaded?(AttestoMCP.Server.SessionStore.Ecto.Session),
+              do: raise("Ecto schema did not compile after dependency activation")
+            defmodule AttestoMCP.ExternalConsumer.Repo do
+              use Ecto.Repo,
+                otp_app: :attesto_mcp_external_consumer,
+                adapter: Ecto.Adapters.Postgres
+            end
+            path = System.fetch_env!("ATTESTO_MCP_CONSUMER_MIGRATIONS")
+            Mix.Task.run("attesto_mcp_server.gen.migration", [
+              "--repo", "AttestoMCP.ExternalConsumer.Repo",
+              "--migrations-path", path
+            ])
+            unless length(Path.wildcard(Path.join(path, "*_create_attesto_mcp_sessions.exs"))) == 1,
+              do: raise("migration task did not activate with Ecto")
+          '
+
+          mix deps.unlock --unused
+          mix compile --warnings-as-errors
+          mix run -e 'if Code.ensure_loaded?(Ecto), do: raise("Ecto remained in the neutral dependency graph"); if Code.ensure_loaded?(AttestoMCP.Server.SessionStore.Ecto), do: raise("Ecto adapter beam remained after dependency removal"); if Code.ensure_loaded?(AttestoMCP.Server.SessionStore.Ecto.Session), do: raise("Ecto schema beam remained after dependency removal")'
 
   official-interop:
     runs-on: ubuntu-latest

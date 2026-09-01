@@ -3,6 +3,7 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
   use GenServer
 
   @behaviour AttestoMCP.Server.SessionStore
+  alias AttestoMCP.Server.Session
   @max_list 1_000
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -43,9 +44,23 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
     reply =
       case state.records,
         do: (
-          %{^key => record} -> {:ok, record}
-          _ -> :not_found
+          %{^key => record} ->
+            case Session.record_version_status(record) do
+              :invalid -> :not_found
+              _ -> {:ok, record}
+            end
+
+          _ ->
+            :not_found
         )
+
+    state =
+      if reply == :not_found and Map.has_key?(state.records, key) and
+           Session.record_version_status(state.records[key]) == :invalid do
+        delete_record(state, key)
+      else
+        state
+      end
 
     {:reply, reply, state}
   end
@@ -75,14 +90,40 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
 
   def handle_call({:update_ttl, key, now}, _from, state) do
     update_record(state, key, fn record ->
-      if expired?(record, now),
-        do: :delete,
-        else: {:ok, Map.put(record, "last_seen_ms", now)}
+      case Session.record_version_status(record) do
+        :future ->
+          # A node that cannot decode this record must neither rewrite nor
+          # delete it during a touch. Return the opaque record so callers can
+          # distinguish preservation from an absent row.
+          :preserve
+
+        :invalid ->
+          # Invalid version markers are corrupt, not opaque future records.
+          # Remove them as one atomic store operation.
+          :delete
+
+        :current ->
+          # The expiry decision must include time spent waiting in the GenServer
+          # mailbox. Otherwise a delayed refresh could revive an already-expired
+          # session. A refresh can arrive out of order across callers, so never
+          # move last_seen backwards.
+          effective_now = max(now, System.system_time(:millisecond))
+
+          if expired?(record, effective_now),
+            do: :delete,
+            else: {:ok, Map.put(record, "last_seen_ms", max(record["last_seen_ms"], now))}
+      end
     end)
   end
 
   def handle_call({:update, key, fun}, _from, state) do
-    update_record(state, key, fun)
+    update_record(state, key, fn record ->
+      case Session.record_version_status(record) do
+        :future -> :preserve
+        :invalid -> :delete
+        :current -> fun.(record)
+      end
+    end)
   end
 
   def handle_call(:cleanup_expired, _from, state) do
@@ -101,6 +142,15 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
           queued: MapSet.put(state.queued, key)
       }
     end
+  end
+
+  defp delete_record(state, key) do
+    %{
+      state
+      | records: Map.delete(state.records, key),
+        cleanup_queue: :queue.delete(key, state.cleanup_queue),
+        queued: MapSet.delete(state.queued, key)
+    }
   end
 
   defp cleanup_records(state, _now, 0, expired), do: {expired, state}
@@ -153,6 +203,9 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
 
               {:reply, :not_found, state}
 
+            :preserve ->
+              {:reply, {:ok, record}, state}
+
             {:error, reason} ->
               {:reply, {:error, reason}, state}
 
@@ -169,12 +222,21 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
   end
 
   defp expired?(record, now) do
-    created = record["created_at_ms"]
-    seen = record["last_seen_ms"]
-    absolute = record["absolute_timeout_ms"]
-    idle = record["idle_timeout_ms"]
+    case Session.record_version_status(record) do
+      :future ->
+        false
 
-    not (is_integer(created) and is_integer(seen) and is_integer(absolute) and
-           is_integer(idle)) or now - created > absolute or now - seen > idle
+      :invalid ->
+        true
+
+      :current ->
+        created = record["created_at_ms"]
+        seen = record["last_seen_ms"]
+        absolute = record["absolute_timeout_ms"]
+        idle = record["idle_timeout_ms"]
+
+        not (is_integer(created) and is_integer(seen) and is_integer(absolute) and
+               is_integer(idle)) or now - created > absolute or now - seen > idle
+    end
   end
 end

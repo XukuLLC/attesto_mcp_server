@@ -14,7 +14,7 @@ tool over HTTP.
 
 ```elixir
 Mix.install([
-  {:attesto_mcp_server, "~> 0.13"},
+  {:attesto_mcp_server, "~> 0.14.0"},
   {:bandit, "~> 1.6"},
   {:jason, "~> 1.4"},
   {:jose, "~> 1.11"}

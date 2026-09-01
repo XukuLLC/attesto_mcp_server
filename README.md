@@ -32,6 +32,9 @@ installer mounts the MCP path itself.
 The installer:
 
 - creates and supervises an application-owned `<App>.MCP` server;
+- uses the application's single, statically confirmed and supervised
+  PostgreSQL Ecto Repo for durable session-bound client sessions, while
+  Repo-free applications retain the in-memory ETS default;
 - mounts the protected `/mcp` endpoint and its public OAuth resource metadata;
 - connects the endpoint to the live `attesto_phoenix` configuration;
 - preserves token revocation, principal loading, DPoP replay/nonce, canonical
@@ -41,8 +44,16 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
-Review every installer notice, including any exact manual verification emitted
-when endpoint source is unavailable. After a successful install, run the
+Review every installer notice, including any migration command and exact manual
+verification emitted when endpoint source is unavailable. When the installer
+selects the bundled Ecto store, run the command it prints and then migrate:
+
+```sh
+mix attesto_mcp_server.gen.migration --repo MyApp.Repo
+mix ecto.migrate
+```
+
+The installer does not run either command. After a successful install, run the
 generated starter test before editing the sample:
 
 ```sh
@@ -185,6 +196,42 @@ Omitting that option retains the secure method-level defaults.
 The automatic path above is intended for most Phoenix SaaS applications. These
 options cover less common installations:
 
+### Choose session storage
+
+The default `--session-store auto` behavior is deliberately simple:
+
+- one discovered, statically confirmed and supervised PostgreSQL Ecto Repo
+  selects the bundled store and prints the exact migration command;
+- no Repo keeps the in-memory ETS store; and
+- multiple Repos stop installation before editing until `--repo MyApp.Repo`
+  selects one.
+
+If the sole Repo is not statically confirmed as a supervised PostgreSQL
+application child, automatic selection keeps the in-memory ETS store and
+prints a notice; no Ecto session configuration or migration guidance is added.
+Explicit `--session-store ecto` and/or `--repo MyApp.Repo` choices remain
+fail-closed until PostgreSQL is statically proven. Use `--session-store ets` to
+make the in-memory choice explicit.
+
+Use `--schema-prefix my_schema` with the selected Repo when the application
+keeps these rows outside PostgreSQL's default schema. To keep sessions in
+memory even when a Repo exists, opt out explicitly:
+
+```sh
+mix igniter.install attesto_mcp_server \
+  --base-url https://mcp.example.com \
+  --session-store ets
+```
+
+The Ecto store keeps negotiated `2025-11-25` and `2025-06-18` sessions across
+application restarts. The `2026-07-28` transport is session-free. Live streams
+reconnect after process loss; persisted session state does not promise event
+replay. Distributed Erlang deployments that need cross-node notification
+fanout can additionally enable `session_clustered: true`. Treat the session
+table as authorization-sensitive data and use a least-privilege PostgreSQL
+role; the [durable-session guidance](docs/usage.md#atomic-startup-telemetry-and-durable-sessions)
+covers database timeouts, capacity, and cutover requirements.
+
 ### Enable Client ID Metadata Documents
 
 The installer leaves CIMD disabled unless explicitly requested, because the
@@ -255,7 +302,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 0.13"}]
+  [{:attesto_mcp_server, "~> 0.14.0"}]
 end
 ```
 
@@ -277,12 +324,13 @@ Secure defaults bound JSON values, outputs, queues, concurrency, and execution
 time. Applications with larger tool inputs or Base64 resources can raise the
 finite `max_json_bytes` budget together with the relevant `max_body_bytes` and
 `max_message_bytes` transport ceilings. Result constructors may also need an
-explicit higher limit for oversized content. Atomic catalogs, durable
-session-store adapters, clustered routing, cache policy, telemetry, and
+explicit higher limit for oversized content. Atomic catalogs, the bundled
+PostgreSQL session store, custom session-store adapters, clustered routing,
+cache policy, telemetry, and
 exception reporting are documented in the [usage guide](docs/usage.md).
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 0.13.0 in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 0.14.0 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

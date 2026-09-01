@@ -57,6 +57,10 @@ defmodule AttestoMCP.Server do
   @max_rate_buckets 10_000
   @cluster_notification_version 2
   @legacy_cluster_notification_version 1
+  @session_close_message_version 1
+  @max_session_close_ids 128
+  @max_session_close_key_bytes 256
+  @session_close_reasons [:session_deleted, :session_expired]
   @max_cluster_resource_scope_sets 8
   @max_cluster_resource_scopes 128
   @max_cluster_scope_bytes 256
@@ -519,7 +523,7 @@ defmodule AttestoMCP.Server do
 
   @doc "Binds an unnegotiated session to one enabled legacy protocol revision."
   @spec set_session_version(pid() | atom(), binary(), String.t()) ::
-          :ok | {:error, :invalid_version}
+          :ok | {:error, :invalid_version | :session_store_unavailable}
   def set_session_version(server, id, version),
     do: GenServer.call(server, {:set_session_version, id, version})
 
@@ -634,7 +638,12 @@ defmodule AttestoMCP.Server do
 
   @doc "Negotiates one enabled legacy revision and capability map exactly once."
   @spec negotiate_session(pid() | atom(), binary(), term(), term(), String.t(), map()) ::
-          :ok | {:error, :invalid_negotiation | :already_negotiated | :not_found}
+          :ok
+          | {:error,
+             :invalid_negotiation
+             | :already_negotiated
+             | :not_found
+             | :session_store_unavailable}
   def negotiate_session(server, session_id, principal, tenant, version, capabilities),
     do:
       GenServer.call(
@@ -642,17 +651,20 @@ defmodule AttestoMCP.Server do
         {:negotiate_session, session_id, principal, tenant, version, capabilities}
       )
 
+  @spec session_capabilities(pid() | atom(), binary(), term(), term()) ::
+          map() | {:error, :session_store_unavailable}
   def session_capabilities(server, session_id, principal, tenant),
     do: GenServer.call(server, {:session_capabilities, session_id, principal, tenant})
 
   @doc "Returns the negotiated minimum legacy log level for an owned session."
-  @spec session_logging_level(pid() | atom(), binary(), term(), term()) :: String.t() | nil
+  @spec session_logging_level(pid() | atom(), binary(), term(), term()) ::
+          String.t() | nil | {:error, :session_store_unavailable}
   def session_logging_level(server, session_id, principal, tenant),
     do: GenServer.call(server, {:session_logging_level, session_id, principal, tenant})
 
   @doc "Sets the negotiated minimum legacy log level for an owned session."
   @spec set_session_logging_level(pid() | atom(), binary(), term(), term(), String.t()) ::
-          :ok | {:error, :not_found}
+          :ok | {:error, :not_found | :session_store_unavailable}
   def set_session_logging_level(server, session_id, principal, tenant, level),
     do: GenServer.call(server, {:set_session_logging_level, session_id, principal, tenant, level})
 
@@ -947,10 +959,17 @@ defmodule AttestoMCP.Server do
           {:ok, _session} ->
             {:reply, {:ok, stream_ref}, put_in(state.legacy_streams[stream_ref], stream)}
 
+          {:error, :session_store_unavailable} ->
+            Process.demonitor(monitor, [:flush])
+            {:reply, {:error, :session_store_unavailable}, state}
+
           _ ->
             Process.demonitor(monitor, [:flush])
             {:reply, {:error, :not_found}, state}
         end
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
 
       _ ->
         {:reply, {:error, :not_found}, state}
@@ -998,11 +1017,22 @@ defmodule AttestoMCP.Server do
               end)
 
             case result do
-              {:ok, _session} -> {:reply, :ok, state}
-              {:error, :already_negotiated} -> {:reply, {:error, :already_negotiated}, state}
-              _ -> {:reply, {:error, :not_found}, state}
+              {:ok, _session} ->
+                {:reply, :ok, state}
+
+              {:error, :already_negotiated} ->
+                {:reply, {:error, :already_negotiated}, state}
+
+              {:error, :session_store_unavailable} ->
+                {:reply, {:error, :session_store_unavailable}, state}
+
+              _ ->
+                {:reply, {:error, :not_found}, state}
             end
         end
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
 
       _ ->
         {:reply, {:error, :not_found}, state}
@@ -1011,15 +1041,27 @@ defmodule AttestoMCP.Server do
 
   def handle_call({:session_capabilities, session_id, principal, tenant}, _from, state) do
     case session_for(state, session_id, principal, tenant) do
-      {:ok, session} -> {:reply, session.client_capabilities, state}
-      _ -> {:reply, %{}, state}
+      {:ok, session} ->
+        {:reply, session.client_capabilities, state}
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
+
+      _ ->
+        {:reply, %{}, state}
     end
   end
 
   def handle_call({:session_logging_level, session_id, principal, tenant}, _from, state) do
     case session_for(state, session_id, principal, tenant) do
-      {:ok, session} -> {:reply, session.logging_level, state}
-      _ -> {:reply, nil, state}
+      {:ok, session} ->
+        {:reply, session.logging_level, state}
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
+
+      _ ->
+        {:reply, nil, state}
     end
   end
 
@@ -1037,9 +1079,18 @@ defmodule AttestoMCP.Server do
                   do: {:ok, %{Session.touch(current) | logging_level: level}},
                   else: {:error, :not_found}
              end) do
-          {:ok, _session} -> {:reply, :ok, state}
-          _ -> {:reply, {:error, :not_found}, state}
+          {:ok, _session} ->
+            {:reply, :ok, state}
+
+          {:error, :session_store_unavailable} ->
+            {:reply, {:error, :session_store_unavailable}, state}
+
+          _ ->
+            {:reply, {:error, :not_found}, state}
         end
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
 
       _ ->
         {:reply, {:error, :not_found}, state}
@@ -1053,27 +1104,32 @@ defmodule AttestoMCP.Server do
            request.id == id and request.session_id == session_id
          end) do
       {request_ref, request} ->
-        if session_owned?(state, session_id, principal, tenant) and
-             request.principal == principal and request.tenant == tenant do
-          case validate_client_response(request.method, response, request.params, state.opts) do
-            {:ok, result} ->
-              send(request.waiter, {request_ref, {:response, {:ok, result}}})
+        case session_owned?(state, session_id, principal, tenant) do
+          :ok when request.principal == principal and request.tenant == tenant ->
+            case validate_client_response(request.method, response, request.params, state.opts) do
+              {:ok, result} ->
+                send(request.waiter, {request_ref, {:response, {:ok, result}}})
 
-              {:reply, :ok, remove_client_request(state, request_ref, request)}
+                {:reply, :ok, remove_client_request(state, request_ref, request)}
 
-            {:error, {:client_error, _error} = client_error} ->
-              send(request.waiter, {request_ref, {:response, {:error, client_error}}})
+              {:error, {:client_error, _error} = client_error} ->
+                send(request.waiter, {request_ref, {:response, {:error, client_error}}})
 
-              {:reply, {:error, client_error}, remove_client_request(state, request_ref, request)}
+                {:reply, {:error, client_error},
+                 remove_client_request(state, request_ref, request)}
 
-            {:error, :invalid_response} ->
-              send(request.waiter, {request_ref, {:response, {:error, :invalid_response}}})
+              {:error, :invalid_response} ->
+                send(request.waiter, {request_ref, {:response, {:error, :invalid_response}}})
 
-              {:reply, {:error, :invalid_response},
-               remove_client_request(state, request_ref, request)}
-          end
-        else
-          {:reply, {:error, :not_found}, state}
+                {:reply, {:error, :invalid_response},
+                 remove_client_request(state, request_ref, request)}
+            end
+
+          :session_store_unavailable ->
+            {:reply, {:error, :session_store_unavailable}, state}
+
+          _ ->
+            {:reply, {:error, :not_found}, state}
         end
 
       nil ->
@@ -1121,11 +1177,23 @@ defmodule AttestoMCP.Server do
       {:reply, {:ok, request_ref},
        put_in(next_state.client_requests[request_ref], client_request)}
     else
-      false -> {:reply, {:error, :missing_capability}, state}
-      nil -> {:reply, {:error, :unsupported}, state}
-      {:error, :unsupported} -> {:reply, {:error, :unsupported}, state}
-      :stream_not_ready -> {:reply, {:error, :not_ready}, state}
-      _ -> {:reply, {:error, :not_ready}, state}
+      false ->
+        {:reply, {:error, :missing_capability}, state}
+
+      nil ->
+        {:reply, {:error, :unsupported}, state}
+
+      {:error, :unsupported} ->
+        {:reply, {:error, :unsupported}, state}
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
+
+      :stream_not_ready ->
+        {:reply, {:error, :not_ready}, state}
+
+      _ ->
+        {:reply, {:error, :not_ready}, state}
     end
   end
 
@@ -1178,6 +1246,9 @@ defmodule AttestoMCP.Server do
         else
           {:error, reason} -> {:reply, {:error, reason}, state}
         end
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
 
       _ ->
         {:reply, {:error, :not_found}, state}
@@ -1305,23 +1376,28 @@ defmodule AttestoMCP.Server do
   end
 
   def handle_call({:new_session, principal, tenant, session_opts}, _from, state) do
-    session =
-      Session.new(principal, tenant,
-        absolute_timeout:
-          Keyword.get(session_opts, :absolute_timeout, state.opts[:session_absolute_timeout]),
-        idle_timeout: Keyword.get(session_opts, :idle_timeout, state.opts[:session_idle_timeout])
-      )
+    case session_timeout_values(session_opts, state.opts) do
+      {:ok, absolute_timeout, idle_timeout} ->
+        session =
+          Session.new(principal, tenant,
+            absolute_timeout: absolute_timeout,
+            idle_timeout: idle_timeout
+          )
 
-    case save_session(state, session) do
-      :ok ->
-        state_telemetry(
-          state,
-          [:session, :open],
-          %{count: 1},
-          %{transport: :core, outcome: :ok}
-        )
+        case save_session(state, session) do
+          :ok ->
+            state_telemetry(
+              state,
+              [:session, :open],
+              %{count: 1},
+              %{transport: :core, outcome: :ok}
+            )
 
-        {:reply, {:ok, session}, state}
+            {:reply, {:ok, session}, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -1351,6 +1427,8 @@ defmodule AttestoMCP.Server do
          end) do
       {:ok, _session} -> {:reply, :ok, state}
       {:error, :not_found} -> {:reply, :ok, state}
+      {:error, :unknown_record_version} -> {:reply, :ok, state}
+      {:error, :binding_unavailable} -> {:reply, :ok, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -1362,8 +1440,14 @@ defmodule AttestoMCP.Server do
                do: {:ok, %{Session.touch(session) | version: version}},
                else: {:error, :invalid_version}
            end) do
-        {:ok, _session} -> {:reply, :ok, state}
-        _ -> {:reply, {:error, :invalid_version}, state}
+        {:ok, _session} ->
+          {:reply, :ok, state}
+
+        {:error, :session_store_unavailable} ->
+          {:reply, {:error, :session_store_unavailable}, state}
+
+        _ ->
+          {:reply, {:error, :invalid_version}, state}
       end
     else
       {:reply, {:error, :invalid_version}, state}
@@ -1371,24 +1455,47 @@ defmodule AttestoMCP.Server do
   end
 
   def handle_call({:delete_session, id}, _from, state) do
-    existed = match?({:ok, _session}, load_session(state, id))
+    case load_session(state, id) do
+      {:ok, _session} ->
+        delete_loaded_session(state, id, true)
 
-    case delete_session_record(state, id) do
-      :ok ->
-        if existed,
-          do: state_telemetry(state, [:session, :close], %{count: 1}, %{outcome: :deleted})
+      {:error, reason}
+      when reason in [:not_found, :invalid_session_record, :unknown_record_version] ->
+        # Deletion remains idempotent and also removes physically retained
+        # expired or corrupt rows that are no longer loadable as sessions.
+        # An explicit deletion request may also remove a future-version row;
+        # ordinary ownership lookups never take this branch.
+        delete_loaded_session(state, id, false)
 
-        {:reply, :ok, close_legacy_streams_for_session(state, id, :session_deleted)}
+      {:error, :binding_unavailable} ->
+        # Explicit deletion remains idempotent and intentionally destructive,
+        # even when this node cannot restore the persisted binding.
+        delete_loaded_session(state, id, false)
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-
-      _ ->
+      {:error, :session_store_unavailable} ->
+        # Do not issue a second adapter call after an unavailable load. This
+        # avoids reporting success from a different result and keeps the
+        # failure event one-per-call.
         {:reply, {:error, :session_store_unavailable}, state}
     end
   end
 
   def handle_call(_request, _from, state), do: {:reply, {:error, :unsupported}, state}
+
+  defp delete_loaded_session(state, id, existed) do
+    case delete_session_record(state, id) do
+      :ok ->
+        if existed,
+          do: state_telemetry(state, [:session, :close], %{count: 1}, %{outcome: :deleted})
+
+        state = close_legacy_streams_for_session(state, id, :session_deleted)
+        broadcast_session_close(state, :session_deleted, [id])
+        {:reply, :ok, state}
+
+      {:error, :session_store_unavailable} ->
+        {:reply, {:error, :session_store_unavailable}, state}
+    end
+  end
 
   @impl true
   def handle_cast({:publish_legacy, notification}, state) do
@@ -1450,6 +1557,16 @@ defmodule AttestoMCP.Server do
     end
   end
 
+  def handle_cast({:cluster_session_close, envelope}, state) do
+    case cluster_session_close(envelope, state) do
+      {:ok, reason, ids} ->
+        {:noreply, Enum.reduce(ids, state, &close_legacy_streams_for_session(&2, &1, reason))}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
   def handle_cast({:ack_legacy_stream, stream_ref}, state) do
     state =
       update_in(state.legacy_streams[stream_ref], fn
@@ -1490,6 +1607,8 @@ defmodule AttestoMCP.Server do
 
     state =
       Enum.reduce(expired, state, &close_legacy_streams_for_session(&2, &1, :session_expired))
+
+    broadcast_session_close(state, :session_expired, expired)
 
     Process.send_after(self(), :cleanup_sessions, 60_000)
     {:noreply, state}
@@ -1819,6 +1938,22 @@ defmodule AttestoMCP.Server do
     end
   end
 
+  defp validate_session_store_namespace!(opts) do
+    case Keyword.get(opts, :session_store) do
+      {module, store} when module == AttestoMCP.Server.SessionStore.Ecto ->
+        namespace = Keyword.get(opts, :session_namespace) || default_session_namespace(opts)
+
+        unless Code.ensure_loaded?(module) and function_exported?(module, :namespace_matches?, 2) and
+                 apply(module, :namespace_matches?, [store, namespace]) do
+          raise ArgumentError,
+                ":session_store must be a valid Ecto handle whose namespace matches :session_namespace"
+        end
+
+      _other ->
+        :ok
+    end
+  end
+
   defp ensure_pg_started! do
     case :pg.start_link(@session_pg_scope) do
       {:ok, pid} -> Process.unlink(pid)
@@ -1860,6 +1995,8 @@ defmodule AttestoMCP.Server do
       |> put_default_if_nil(:stream_queue_size, normalized[:max_queue])
       |> put_default_if_nil(:subscription_queue_size, normalized[:max_queue])
       |> put_default_if_nil(:legacy_keepalive_ms, normalized[:stream_keepalive_ms])
+      |> put_default_if_nil(:session_idle_timeout, 1_800_000)
+      |> put_default_if_nil(:session_absolute_timeout, 86_400_000)
 
     validate_startup_options!(normalized)
     validate_rate_limits!(normalized[:rate_limits])
@@ -1907,6 +2044,31 @@ defmodule AttestoMCP.Server do
     end
   end
 
+  defp session_timeout_values(session_opts, opts) when is_list(session_opts) do
+    if Keyword.keyword?(session_opts) do
+      absolute_timeout =
+        Keyword.get(session_opts, :absolute_timeout, opts[:session_absolute_timeout])
+
+      idle_timeout = Keyword.get(session_opts, :idle_timeout, opts[:session_idle_timeout])
+
+      cond do
+        not Session.valid_timeout?(absolute_timeout) ->
+          {:error, {:invalid_session_timeout, :absolute_timeout}}
+
+        not Session.valid_timeout?(idle_timeout) ->
+          {:error, {:invalid_session_timeout, :idle_timeout}}
+
+        true ->
+          {:ok, absolute_timeout, idle_timeout}
+      end
+    else
+      {:error, {:invalid_session_timeout, :options}}
+    end
+  end
+
+  defp session_timeout_values(_session_opts, _opts),
+    do: {:error, {:invalid_session_timeout, :options}}
+
   defp validate_startup_options!(opts) do
     unknown = Keyword.keys(opts) -- @allowed_startup_option_keys
 
@@ -1927,7 +2089,9 @@ defmodule AttestoMCP.Server do
       :client_request_timeout,
       :max_queue,
       :stream_queue_size,
-      :subscription_queue_size
+      :subscription_queue_size,
+      :session_idle_timeout,
+      :session_absolute_timeout
     ]
 
     nonnegative = [
@@ -1935,16 +2099,23 @@ defmodule AttestoMCP.Server do
       :legacy_initialized_grace_ms,
       :stream_keepalive_ms,
       :legacy_keepalive_ms,
-      :session_idle_timeout,
-      :session_absolute_timeout,
       :cursor_ttl,
       :subscription_timeout
     ]
 
     Enum.each(positive, fn key ->
       case Keyword.get(opts, key) do
-        value when is_integer(value) and value > 0 -> :ok
-        _ -> raise ArgumentError, "#{key} must be a positive integer"
+        value when key in [:session_idle_timeout, :session_absolute_timeout] ->
+          unless Session.valid_timeout?(value) do
+            raise ArgumentError,
+                  "#{key} must be between 1 and #{Session.max_timeout_ms()} milliseconds"
+          end
+
+        value when is_integer(value) and value > 0 ->
+          :ok
+
+        _ ->
+          raise ArgumentError, "#{key} must be a positive integer"
       end
     end)
 
@@ -2049,9 +2220,20 @@ defmodule AttestoMCP.Server do
     end
 
     case Keyword.get(opts, :session_namespace) do
-      nil -> :ok
-      value when is_binary(value) and byte_size(value) in 1..256 -> :ok
-      _ -> raise ArgumentError, ":session_namespace must be a non-empty string up to 256 bytes"
+      nil ->
+        :ok
+
+      value when is_binary(value) ->
+        unless valid_session_close_key?(value),
+          do:
+            raise(
+              ArgumentError,
+              ":session_namespace must be a non-empty valid UTF-8 string up to 256 bytes without NUL bytes"
+            )
+
+      _ ->
+        raise ArgumentError,
+              ":session_namespace must be a non-empty valid UTF-8 string up to 256 bytes without NUL bytes"
     end
 
     case Keyword.get(opts, :session_store) do
@@ -2059,6 +2241,8 @@ defmodule AttestoMCP.Server do
       {module, _store} when is_atom(module) -> validate_session_store_adapter!(module)
       _ -> raise ArgumentError, ":session_store must be a {module, store} adapter tuple"
     end
+
+    validate_session_store_namespace!(opts)
 
     if opts[:session_clustered] == true and
          (is_nil(opts[:session_store]) or is_nil(opts[:session_namespace])) do
@@ -2571,6 +2755,10 @@ defmodule AttestoMCP.Server do
 
   defp request_logging_level(_request, _context, _era), do: nil
 
+  defp enrich_logging_context(context, _runtime, @legacy)
+       when is_map_key(context, :logging_level),
+       do: context
+
   defp enrich_logging_context(context, runtime, @legacy) do
     level =
       case context[:session_id] do
@@ -2586,7 +2774,13 @@ defmodule AttestoMCP.Server do
           nil
       end
 
-    Map.put_new(context, :logging_level, level)
+    case level do
+      {:error, :session_store_unavailable} ->
+        Map.put(context, :session_store_unavailable, true)
+
+      level ->
+        Map.put_new(context, :logging_level, level)
+    end
   end
 
   defp enrich_logging_context(context, _runtime, _era), do: context
@@ -2931,6 +3125,20 @@ defmodule AttestoMCP.Server do
       {:error, :not_found} ->
         {:error, :not_found}
 
+      {:error, :invalid_session_record} ->
+        case discard_invalid_session_record(state, session_id) do
+          {:ok, _outcome} -> {:error, :not_found}
+          {:error, :session_store_unavailable} -> {:error, :session_store_unavailable}
+        end
+
+      {:error, :unknown_record_version} ->
+        # A rolling deployment may encounter a record written by a newer
+        # node. It is unavailable to this node, but must remain durable.
+        {:error, :not_found}
+
+      {:error, :binding_unavailable} ->
+        {:error, :not_found}
+
       {:error, :session_store_unavailable} ->
         {:error, :session_store_unavailable}
     end
@@ -2941,10 +3149,19 @@ defmodule AttestoMCP.Server do
       {:ok, session} ->
         cond do
           not Session.valid?(session) ->
-            delete_session_record(state, id)
-            state_telemetry(state, [:session, :close], %{count: 1}, %{outcome: :expired})
+            case discard_invalid_session_record(state, id) do
+              {:ok, :discarded} ->
+                state_telemetry(state, [:session, :close], %{count: 1}, %{outcome: :expired})
 
-            {{:error, :not_found}, close_legacy_streams_for_session(state, id, :session_expired)}
+                {{:error, :not_found},
+                 close_legacy_streams_for_session(state, id, :session_expired)}
+
+              {:ok, :preserved} ->
+                {{:error, :not_found}, state}
+
+              {:error, :session_store_unavailable} ->
+                {{:error, :session_store_unavailable}, state}
+            end
 
           not Session.same_principal?(session, principal) or
               not Session.same_tenant?(session, tenant) ->
@@ -2960,10 +3177,39 @@ defmodule AttestoMCP.Server do
                       do: {:ok, Session.touch(current)},
                       else: {:error, :not_found}
                  end) do
-              {:ok, updated} -> {{:ok, updated}, state}
-              _ -> {{:error, :not_found}, state}
+              {:ok, updated} ->
+                {{:ok, updated}, state}
+
+              {:error, :session_store_unavailable} ->
+                {{:error, :session_store_unavailable}, state}
+
+              _ ->
+                {{:error, :not_found}, state}
             end
         end
+
+      {:error, :invalid_session_record} ->
+        case discard_invalid_session_record(state, id) do
+          {:ok, :discarded} ->
+            {{:error, :not_found}, close_legacy_streams_for_session(state, id, :session_expired)}
+
+          {:ok, :preserved} ->
+            {{:error, :not_found}, state}
+
+          {:error, :session_store_unavailable} ->
+            {{:error, :session_store_unavailable}, state}
+        end
+
+      {:error, :unknown_record_version} ->
+        # Do not let a rolling deployment turn a newer durable record into a
+        # deletion merely because this node cannot deserialize it yet.
+        {{:error, :not_found}, state}
+
+      {:error, :binding_unavailable} ->
+        {{:error, :not_found}, state}
+
+      {:error, :session_store_unavailable} ->
+        {{:error, :session_store_unavailable}, state}
 
       _ ->
         {{:error, :not_found}, state}
@@ -2975,11 +3221,21 @@ defmodule AttestoMCP.Server do
   defp load_session(state, id) when is_binary(id) do
     case safe_session_store_call(state, :load, [session_key(state, id)]) do
       {:ok, record} when is_map(record) ->
-        with {:ok, session} <- Session.from_record(record),
-             true <- session.id == id do
-          {:ok, session}
-        else
-          _ -> {:error, :not_found}
+        case Session.from_record(record) do
+          {:ok, %{id: ^id} = session} ->
+            {:ok, session}
+
+          {:ok, _session} ->
+            {:error, :invalid_session_record}
+
+          {:error, :unknown_record_version} ->
+            {:error, :unknown_record_version}
+
+          {:error, :binding_unavailable} ->
+            {:error, :binding_unavailable}
+
+          {:error, _reason} ->
+            {:error, :invalid_session_record}
         end
 
       :not_found ->
@@ -3004,38 +3260,85 @@ defmodule AttestoMCP.Server do
         end
 
       {:error, reason}
-      when reason in [:nonportable_binding, :binding_too_large, :record_too_large] ->
+      when reason in [
+             :nonportable_binding,
+             :binding_too_large,
+             :record_too_large,
+             :invalid_session_timeout
+           ] ->
         {:error, reason}
     end
   end
 
   defp update_session(state, id, updater) when is_binary(id) and is_function(updater, 1) do
-    result =
-      safe_session_store_call(state, :update, [
-        session_key(state, id),
-        fn record ->
-          case Session.from_record(record) do
-            {:ok, session} ->
-              with true <- Session.valid?(session),
-                   {:ok, updated} <- updater.(session),
-                   {:ok, updated_record} <- Session.to_record(updated) do
-                {:ok, Map.merge(record, updated_record)}
-              else
-                false -> :delete
-                {:error, reason} -> {:error, reason}
-              end
+    semantic_error_ref = make_ref()
 
-            {:error, _reason} ->
-              :delete
-          end
-        end
-      ])
+    result =
+      safe_session_store_call(
+        state,
+        :update,
+        [
+          session_key(state, id),
+          fn record -> apply_session_update(record, updater, semantic_error_ref) end
+        ],
+        semantic_error_ref
+      )
 
     case result do
-      {:ok, record} -> Session.from_record(record)
-      :not_found -> {:error, :not_found}
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :session_store_unavailable}
+      {:ok, record} ->
+        case Session.from_record(record) do
+          {:ok, %{id: ^id} = session} -> {:ok, session}
+          {:ok, _session} -> session_store_unavailable(state, :update)
+          {:error, :unknown_record_version} -> {:error, :unknown_record_version}
+          {:error, :binding_unavailable} -> {:error, :binding_unavailable}
+          {:error, _reason} -> session_store_unavailable(state, :update)
+        end
+
+      :not_found ->
+        {:error, :not_found}
+
+      {:error, {:server_session_update, ^semantic_error_ref, reason}} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        {:error, :session_store_unavailable}
+    end
+  end
+
+  defp apply_session_update(record, updater, semantic_error_ref) do
+    try do
+      case Session.from_record(record) do
+        {:ok, session} ->
+          with true <- Session.valid?(session),
+               {:ok, updated} <- updater.(session),
+               {:ok, updated_record} <- Session.to_record(updated) do
+            {:ok, Map.merge(record, updated_record)}
+          else
+            false ->
+              :delete
+
+            {:error, reason} ->
+              {:error, {:server_session_update, semantic_error_ref, reason}}
+          end
+
+        {:error, :unknown_record_version} ->
+          # Preserve records written by a newer node. The caller receives a
+          # private semantic error and can turn it into neutral not-found;
+          # the adapter must not interpret it as a deletion request.
+          {:error, {:server_session_update, semantic_error_ref, :unknown_record_version}}
+
+        {:error, :binding_unavailable} ->
+          {:error, {:server_session_update, semantic_error_ref, :binding_unavailable}}
+
+        {:error, _reason} ->
+          :delete
+      end
+    catch
+      _kind, _reason ->
+        {:error, {:server_session_update, semantic_error_ref, :update_failed}}
     end
   end
 
@@ -3044,12 +3347,20 @@ defmodule AttestoMCP.Server do
 
     case safe_session_store_call(state, :update_ttl, [session_key(state, id), now]) do
       {:ok, record} when is_map(record) ->
-        with {:ok, session} <- Session.from_record(record),
-             true <- session.id == id,
-             true <- session.last_seen == now do
-          {:ok, session}
-        else
-          _ -> {:error, :session_store_unavailable}
+        case Session.from_record(record) do
+          {:ok, %{id: ^id} = session} ->
+            if session.last_seen >= now,
+              do: {:ok, session},
+              else: session_store_unavailable(state, :update_ttl)
+
+          {:error, :unknown_record_version} ->
+            {:error, :not_found}
+
+          {:error, :binding_unavailable} ->
+            {:error, :not_found}
+
+          _ ->
+            session_store_unavailable(state, :update_ttl)
         end
 
       :not_found ->
@@ -3069,16 +3380,71 @@ defmodule AttestoMCP.Server do
     safe_session_store_call(state, :delete, [session_key(state, id)])
   end
 
-  defp session_count(state) do
-    case safe_session_store_call(state, :list_active, []) do
-      {:ok, records} when is_list(records) ->
-        Enum.count(records, fn
-          {{namespace, _id}, _record} -> namespace == state.session_namespace
-          _ -> false
-        end)
+  defp discard_invalid_session_record(state, id) when is_binary(id) do
+    result =
+      safe_session_store_call(
+        state,
+        :update,
+        [
+          session_key(state, id),
+          fn record ->
+            case Session.from_record(record) do
+              {:error, :unknown_record_version} ->
+                {:ok, record}
+
+              {:error, :binding_unavailable} ->
+                # A binding may refer to an atom that is intentionally not
+                # loaded on this node. Keep the durable record for a node
+                # that can resolve it; it is not malformed data.
+                {:ok, record}
+
+              {:ok, %{id: ^id} = session} ->
+                if Session.valid?(session), do: {:ok, record}, else: :delete
+
+              {:ok, _session} ->
+                :delete
+
+              {:error, _reason} ->
+                :delete
+            end
+          end
+        ]
+      )
+
+    case result do
+      :not_found ->
+        {:ok, :discarded}
+
+      {:ok, record} when is_map(record) ->
+        {:ok, :preserved}
+
+      {:error, :session_store_unavailable} ->
+        {:error, :session_store_unavailable}
 
       _ ->
-        0
+        {:error, :session_store_unavailable}
+    end
+  end
+
+  defp discard_invalid_session_record(_state, _id), do: {:ok, :discarded}
+
+  defp session_count(state) do
+    if function_exported?(state.session_store_module, :count_active, 1) do
+      case safe_session_store_call(state, :count_active, []) do
+        {:ok, count} when is_integer(count) and count >= 0 -> count
+        _ -> 0
+      end
+    else
+      case safe_session_store_call(state, :list_active, []) do
+        {:ok, records} when is_list(records) ->
+          Enum.count(records, fn
+            {{namespace, _id}, _record} -> namespace == state.session_namespace
+            _ -> false
+          end)
+
+        _ ->
+          0
+      end
     end
   end
 
@@ -3096,10 +3462,101 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp safe_session_store_call(state, function, arguments) do
-    apply(state.session_store_module, function, [state.session_store | arguments])
-  catch
-    _kind, _reason -> {:error, :session_store_unavailable}
+  defp safe_session_store_call(state, function, arguments),
+    do: safe_session_store_call(state, function, arguments, nil)
+
+  defp safe_session_store_call(state, function, arguments, semantic_error_ref) do
+    result =
+      try do
+        apply(state.session_store_module, function, [state.session_store | arguments])
+      catch
+        _kind, _reason -> {:error, :session_store_unavailable}
+      end
+      |> normalize_session_store_result(function, semantic_error_ref)
+
+    if session_store_failure?(result) do
+      state_telemetry(
+        state,
+        [:session_store, :failure],
+        %{count: 1},
+        %{source: function, outcome: :unavailable}
+      )
+    end
+
+    result
+  end
+
+  defp normalize_session_store_result(result, function, semantic_error_ref) do
+    result =
+      case result do
+        # Only updater errors created by this server carry application
+        # semantics. Adapter-owned error terms are private implementation
+        # details and always cross the server boundary as one neutral outage.
+        # The per-call reference prevents an adapter from forging that
+        # privileged internal result tag.
+        {:error, {:server_session_update, ^semantic_error_ref, _reason}} = error
+        when is_reference(semantic_error_ref) ->
+          error
+
+        {:error, _reason} ->
+          {:error, :session_store_unavailable}
+
+        result ->
+          result
+      end
+
+    if valid_session_store_result?(function, result),
+      do: result,
+      else: {:error, :session_store_unavailable}
+  end
+
+  defp valid_session_store_result?(function, :ok) when function in [:save, :delete], do: true
+  defp valid_session_store_result?(:load, :not_found), do: true
+
+  defp valid_session_store_result?(function, :not_found) when function in [:update, :update_ttl],
+    do: true
+
+  defp valid_session_store_result?(function, {:ok, value})
+       when function in [:load, :update, :update_ttl], do: is_map(value)
+
+  defp valid_session_store_result?(function, {:ok, value})
+       when function == :list_active,
+       do: is_list(value) and Enum.all?(value, &valid_active_session_entry?/1)
+
+  defp valid_session_store_result?(function, {:ok, value})
+       when function == :cleanup_expired,
+       do: is_list(value) and Enum.all?(value, &valid_session_key?/1)
+
+  defp valid_session_store_result?(:count_active, {:ok, value}),
+    do: is_integer(value) and value >= 0
+
+  defp valid_session_store_result?(_function, {:error, _reason}), do: true
+  defp valid_session_store_result?(_function, _result), do: false
+
+  defp session_store_failure?({:error, {:server_session_update, ref, _reason}})
+       when is_reference(ref),
+       do: false
+
+  defp session_store_failure?({:error, _reason}), do: true
+  defp session_store_failure?(_result), do: false
+
+  defp valid_active_session_entry?({key, record}) when is_map(record),
+    do: valid_session_key?(key)
+
+  defp valid_active_session_entry?(_entry), do: false
+
+  defp valid_session_key?({namespace, id}) when is_binary(namespace) and is_binary(id), do: true
+  defp valid_session_key?(_key), do: false
+
+  defp session_store_unavailable(state, function) do
+    state_telemetry(
+      state,
+      [:session_store, :failure],
+      %{count: 1},
+      %{source: function, outcome: :unavailable}
+    )
+
+    {:error, :session_store_unavailable}
   end
 
   defp publish_notification_local(
@@ -3171,6 +3628,117 @@ defmodule AttestoMCP.Server do
     _kind, _reason -> :ok
   end
 
+  defp broadcast_session_close(%{session_cluster_group: nil}, _reason, _ids), do: :ok
+
+  defp broadcast_session_close(state, reason, ids) do
+    with true <- valid_session_close_key?(state.session_namespace),
+         true <- reason in @session_close_reasons,
+         {:ok, ids} <- normalize_session_close_ids(ids) do
+      ids
+      |> Enum.chunk_every(@max_session_close_ids)
+      |> Enum.each(fn chunk ->
+        envelope = %{
+          version: @session_close_message_version,
+          namespace: state.session_namespace,
+          reason: reason,
+          ids: chunk
+        }
+
+        state.session_cluster_group
+        |> then(&:pg.get_members(@session_pg_scope, &1))
+        |> Enum.each(fn
+          pid when is_pid(pid) and pid != self() ->
+            GenServer.cast(pid, {:cluster_session_close, envelope})
+
+          _pid ->
+            :ok
+        end)
+      end)
+    end
+
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp cluster_session_close(
+         %{
+           version: @session_close_message_version,
+           namespace: namespace,
+           reason: reason,
+           ids: ids
+         } = envelope,
+         state
+       )
+       when map_size(envelope) == 4 do
+    with true <- namespace == state.session_namespace,
+         true <- valid_session_close_key?(namespace),
+         true <- reason in @session_close_reasons,
+         {:ok, ids} <- normalize_session_close_ids(ids, @max_session_close_ids) do
+      {:ok, reason, ids}
+    else
+      _ -> :error
+    end
+  rescue
+    _exception -> :error
+  catch
+    _kind, _reason -> :error
+  end
+
+  defp cluster_session_close(_envelope, _state), do: :error
+
+  defp normalize_session_close_ids(ids, max \\ nil)
+
+  defp normalize_session_close_ids(ids, max) when is_list(ids) do
+    with true <- proper_list_within_limit?(ids, max),
+         {:ok, ids} <- collect_session_close_ids(ids, %{}, []) do
+      {:ok, ids}
+    else
+      _ -> :error
+    end
+  rescue
+    _exception -> :error
+  end
+
+  defp normalize_session_close_ids(_ids, _max), do: :error
+
+  defp proper_list_within_limit?(ids, nil) do
+    ids != []
+  end
+
+  defp proper_list_within_limit?(ids, max) when is_integer(max) and max > 0 do
+    bounded_proper_list?(ids, max, 0)
+  end
+
+  defp proper_list_within_limit?(_ids, _max), do: false
+
+  defp bounded_proper_list?([], _max, count) when count > 0, do: true
+
+  defp bounded_proper_list?([_head | tail], max, count) when count < max,
+    do: bounded_proper_list?(tail, max, count + 1)
+
+  defp bounded_proper_list?([_head | _tail], _max, _count), do: false
+  defp bounded_proper_list?(_improper, _max, _count), do: false
+
+  defp collect_session_close_ids([], _seen, collected), do: {:ok, Enum.reverse(collected)}
+
+  defp collect_session_close_ids([id | rest], seen, collected) do
+    if valid_session_close_key?(id) do
+      if Map.has_key?(seen, id) do
+        collect_session_close_ids(rest, seen, collected)
+      else
+        collect_session_close_ids(rest, Map.put(seen, id, true), [id | collected])
+      end
+    else
+      :error
+    end
+  end
+
+  defp valid_session_close_key?(value) do
+    is_binary(value) and byte_size(value) in 1..@max_session_close_key_bytes and
+      String.valid?(value) and :binary.match(value, <<0>>) == :nomatch
+  end
+
   defp await_initialized_until(server, id, principal, tenant, deadline, touch?) do
     session =
       if touch?,
@@ -3193,11 +3761,19 @@ defmodule AttestoMCP.Server do
 
       {:error, :not_found} ->
         {:error, :not_found}
+
+      {:error, :session_store_unavailable} ->
+        {:error, :session_store_unavailable}
     end
   end
 
-  defp session_owned?(state, session_id, principal, tenant),
-    do: match?({:ok, _}, session_for(state, session_id, principal, tenant))
+  defp session_owned?(state, session_id, principal, tenant) do
+    case session_for(state, session_id, principal, tenant) do
+      {:ok, _session} -> :ok
+      {:error, :session_store_unavailable} -> :session_store_unavailable
+      _ -> :not_found
+    end
+  end
 
   defp response_id(%{id: id}), do: id
   defp response_id(%{"id" => id}), do: id
@@ -3301,6 +3877,31 @@ defmodule AttestoMCP.Server do
 
           {:error, :session_store_unavailable} ->
             acc
+
+          {:error, :unknown_record_version} ->
+            # Keep the durable row for a newer node. This node cannot safely
+            # decide whether the session is valid or expired.
+            acc
+
+          {:error, :binding_unavailable} ->
+            # Keep the durable row and its live stream for a node that can
+            # resolve the persisted binding.
+            acc
+
+          {:error, :invalid_session_record} ->
+            # A store may have returned a structurally invalid row before a
+            # newer node replaced it. Re-check under the store's update lock;
+            # a preserved future record must not close the live stream.
+            case discard_invalid_session_record(acc, session_id) do
+              {:ok, :discarded} ->
+                close_legacy_streams_for_session(acc, session_id, :session_expired)
+
+              {:ok, :preserved} ->
+                acc
+
+              {:error, :session_store_unavailable} ->
+                acc
+            end
 
           _ ->
             close_legacy_streams_for_session(acc, session_id, :session_expired)
@@ -4103,10 +4704,15 @@ defmodule AttestoMCP.Server do
     with :ok <- validate_request_params_shape(params),
          :ok <- validate_legacy_initialize_request(method, era, params, runtime.opts),
          :ok <- validate_era(era, params, runtime.opts),
-         :ok <- validate_protocol_binding(method, era, context, opts),
          :ok <- validate_trace_context(params),
          :ok <- authorization(method, context, runtime.opts, era) do
-      dispatch_method(era, method, params, context, runtime, opts)
+      if context[:session_store_unavailable] == true do
+        {:error, Error.session_store_unavailable()}
+      else
+        with :ok <- validate_protocol_binding(method, era, context, opts) do
+          dispatch_method(era, method, params, context, runtime, opts)
+        end
+      end
     end
   end
 
@@ -4365,6 +4971,9 @@ defmodule AttestoMCP.Server do
         {:error, :already_negotiated} ->
           {:error, Error.invalid_request(%{"reason" => "initialize_session_rejected"})}
 
+        {:error, :session_store_unavailable} ->
+          {:error, Error.session_store_unavailable()}
+
         {:error, _reason} ->
           {:error, Error.internal(%{"reason" => "initialize_session_rejected"})}
       end
@@ -4596,6 +5205,9 @@ defmodule AttestoMCP.Server do
 
           {:error, :not_found} ->
             {:error, Error.invalid_request(%{"reason" => "session_not_found"})}
+
+          {:error, :session_store_unavailable} ->
+            {:error, Error.session_store_unavailable()}
         end
 
       _ ->
@@ -4638,6 +5250,9 @@ defmodule AttestoMCP.Server do
 
       {:error, :limit_reached} ->
         {:error, Error.invalid_params(%{"reason" => "resource_subscription_limit"})}
+
+      {:error, :session_store_unavailable} ->
+        {:error, Error.session_store_unavailable()}
 
       _ ->
         {:error, Error.invalid_params(%{"reason" => "session_not_found"})}

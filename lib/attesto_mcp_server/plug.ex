@@ -1134,10 +1134,17 @@ defmodule AttestoMCP.Server.Plug do
         definition_authorizer: definition_authorizer
       )
 
-    if era == @legacy and request.method == "notifications/initialized" and session_id,
-      do: AttestoMCP.Server.mark_initialized(conn_server, session_id)
+    mark_result =
+      if era == @legacy and request.method == "notifications/initialized" and session_id,
+        do: AttestoMCP.Server.mark_initialized(conn_server, session_id),
+        else: :ok
 
-    send_resp(conn, 202, "")
+    case mark_result do
+      :ok -> send_resp(conn, 202, "")
+      {:error, :session_store_unavailable} -> send_resp(conn, 503, "service unavailable")
+      {:error, _reason} -> send_resp(conn, 503, "service unavailable")
+      _ -> send_resp(conn, 503, "service unavailable")
+    end
   end
 
   defp session_context(_state, nil, _conn, _request), do: {:ok, %{}}
@@ -1157,6 +1164,9 @@ defmodule AttestoMCP.Server.Plug do
            protocol_version: session.version,
            logging_level: session.logging_level
          }}
+
+      {:error, :session_store_unavailable} ->
+        {:error, Error.session_store_unavailable()}
 
       _ ->
         {:error, Error.invalid_request(%{"reason" => "legacy_session_unavailable"})}
@@ -1218,6 +1228,14 @@ defmodule AttestoMCP.Server.Plug do
           conn,
           Map.get(request, :id),
           Error.invalid_request(%{"reason" => "unsolicited_response"}),
+          state.auth_opts
+        )
+
+      {:error, :session_store_unavailable} ->
+        error_response(
+          conn,
+          Map.get(request, :id),
+          Error.session_store_unavailable(),
           state.auth_opts
         )
     end
@@ -1310,21 +1328,32 @@ defmodule AttestoMCP.Server.Plug do
              definition_authorizer: definition_authorizer
            ) do
         {_id, response} ->
-          status = if Map.has_key?(response, "error"), do: error_status(response, era), else: 200
-          maybe_set_session_version(state.server, session_id, request, response, era)
+          case maybe_set_session_version(state.server, session_id, request, response, era) do
+            {:error, :session_store_unavailable} ->
+              error_response(
+                conn,
+                Map.get(request, :id),
+                Error.session_store_unavailable(),
+                state.auth_opts
+              )
 
-          if era == @legacy and request.method == "initialize" and
-               Map.has_key?(response, "error"),
-             do: AttestoMCP.Server.delete_session(state.server, session_id)
+            _ ->
+              status =
+                if Map.has_key?(response, "error"), do: error_status(response, era), else: 200
 
-          conn =
-            if not is_nil(session_id) and
-                 not (era == @legacy and request.method == "initialize" and
-                        Map.has_key?(response, "error")),
-               do: put_resp_header(conn, "mcp-session-id", session_id),
-               else: conn
+              if era == @legacy and request.method == "initialize" and
+                   Map.has_key?(response, "error"),
+                 do: AttestoMCP.Server.delete_session(state.server, session_id)
 
-          send_json(conn, status, response)
+              conn =
+                if not is_nil(session_id) and
+                     not (era == @legacy and request.method == "initialize" and
+                            Map.has_key?(response, "error")),
+                   do: put_resp_header(conn, "mcp-session-id", session_id),
+                   else: conn
+
+              send_json(conn, status, response)
+          end
 
         :notification ->
           send_resp(conn, 202, "")
@@ -1606,6 +1635,7 @@ defmodule AttestoMCP.Server.Plug do
           end
       end
     else
+      {:error, :session_store_unavailable} -> send_resp(conn, 503, "service unavailable")
       _ -> send_resp(conn, 404, "session not found")
     end
   end
@@ -1644,6 +1674,9 @@ defmodule AttestoMCP.Server.Plug do
             AttestoMCP.Server.close_legacy_stream(state.server, stream_ref)
             conn
         end
+
+      {:error, :session_store_unavailable} ->
+        send_resp(conn, 503, "service unavailable")
 
       _ ->
         send_resp(conn, 404, "session not found")
@@ -1746,6 +1779,7 @@ defmodule AttestoMCP.Server.Plug do
           error_response(conn, nil, error, state.auth_opts)
       end
     else
+      {:error, :session_store_unavailable} -> send_resp(conn, 503, "service unavailable")
       _ -> send_resp(conn, 404, "session not found")
     end
   end
@@ -1759,6 +1793,9 @@ defmodule AttestoMCP.Server.Plug do
       {:error, reason}
       when reason in [:nonportable_binding, :binding_too_large, :record_too_large] ->
         {:error, Error.internal(%{"reason" => "invalid_session_binding"})}
+
+      {:error, :session_store_unavailable} ->
+        {:error, Error.session_store_unavailable()}
 
       _ ->
         {:error, Error.internal(%{"reason" => "session_create_failed"})}
@@ -1839,6 +1876,9 @@ defmodule AttestoMCP.Server.Plug do
 
         {:error, :not_found} ->
           {:error, Error.session_not_found()}
+
+        {:error, :session_store_unavailable} ->
+          {:error, Error.session_store_unavailable()}
       end
     else
       _ -> {:error, Error.invalid_request(%{"reason" => "legacy_session_required"})}
@@ -1864,8 +1904,14 @@ defmodule AttestoMCP.Server.Plug do
              state.opts[:legacy_initialized_grace_ms] || 50,
              request
            ) do
-        :ok -> :ok
-        _ -> {:error, Error.invalid_request(%{"reason" => "initialized_notification_required"})}
+        :ok ->
+          :ok
+
+        {:error, :session_store_unavailable} ->
+          {:error, Error.session_store_unavailable()}
+
+        _ ->
+          {:error, Error.invalid_request(%{"reason" => "initialized_notification_required"})}
       end
     end
   end
@@ -3236,7 +3282,10 @@ defmodule AttestoMCP.Server.Plug do
        when is_binary(session_id) and request.method == "initialize" do
     case get_in(response, ["result", "protocolVersion"]) do
       version when is_binary(version) ->
-        AttestoMCP.Server.set_session_version(server, session_id, version)
+        case AttestoMCP.Server.set_session_version(server, session_id, version) do
+          {:error, :session_store_unavailable} -> {:error, :session_store_unavailable}
+          _ -> :ok
+        end
 
       _ ->
         :ok
@@ -3325,6 +3374,17 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp error_status(%{"error" => %{"code" => -32601}}, @modern), do: 404
+
+  defp error_status(
+         %{
+           "error" => %{
+             "code" => -32603,
+             "data" => %{"reason" => "session_store_unavailable"}
+           }
+         },
+         _era
+       ),
+       do: 503
 
   defp error_status(%{"error" => %{"code" => code}}, _era) when code in [-32020, -32021, -32022],
     do: 400

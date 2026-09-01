@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "0.13.0"
+  @version "0.14.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -37,6 +37,14 @@ defmodule AttestoMCP.Server.MixProject do
       {:plug, "~> 1.16"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.2"},
+      # Optional: only needed by AttestoMCP.Server.SessionStore.Ecto. ETS is
+      # the built-in default, so non-Ecto consumers do not pull persistence
+      # dependencies into their runtime closure.
+      {:ecto, "~> 3.10", optional: true},
+      # Test-only SQL backend for the optional Ecto session-store tests. Host
+      # applications supply ecto_sql and their own database driver.
+      {:ecto_sql, "~> 3.10", only: :test},
+      {:postgrex, ">= 0.22.4 and < 1.0.0", only: :test},
       {:igniter, "~> 0.6", optional: true, runtime: false},
       {:bandit, "~> 1.6", only: [:dev, :test], runtime: false},
       {:phoenix, ">= 1.7.0 and < 2.0.0", only: :test, runtime: false},
@@ -101,13 +109,13 @@ defmodule AttestoMCP.Server.MixProject do
       # Keep generated consumer dependencies/build output and local coverage
       # artifacts out of the archive while retaining the runnable example.
       files:
-        ~w(lib config test fixtures examples/bandit.exs examples/stdio.exs examples/conformance_server.exs examples/attesto_mcp_server.livemd scripts examples/consumer/mix.exs examples/consumer/lib examples/consumer/README.md docs .github LICENSE README.md CONFORMANCE.md CHANGELOG.md CONTRIBUTING.md SECURITY.md .formatter.exs mix.exs)
+        ~w(lib config test fixtures examples/bandit.exs examples/stdio.exs examples/conformance_server.exs examples/attesto_mcp_server.livemd scripts examples/consumer/mix.exs examples/consumer/lib examples/consumer/README.md docs LICENSE README.md CONFORMANCE.md CHANGELOG.md CONTRIBUTING.md SECURITY.md .formatter.exs mix.exs)
     ]
   end
 
   defp docs do
     [
-      main: "AttestoMCP.Server.API",
+      main: "readme",
       source_ref: "v#{@version}",
       source_url: @source_url,
       extras: [
