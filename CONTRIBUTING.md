@@ -10,11 +10,6 @@ regression tests for refusal paths as well as the successful path. Package
 changes should also verify the unpacked archive with
 `scripts/check_source_hygiene.sh path/to/archive package`.
 
-Do not commit credentials, generated dependency state, workstation paths, or
-other private project data. Release notes must distinguish candidate work from
-recorded conformance and dependency evidence; do not add results that were not
-actually run.
-
 ## Contributor credit
 
 Accepted external contributions are credited by GitHub handle and pull request
