@@ -1461,8 +1461,27 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
 
   defp stop_repo(repo) do
     case Process.whereis(repo) do
-      pid when is_pid(pid) -> Supervisor.stop(pid, :normal)
+      pid when is_pid(pid) -> stop_repo_pid(pid)
       nil -> :ok
+    end
+  end
+
+  defp stop_repo_pid(pid) do
+    monitor = Process.monitor(pid)
+
+    try do
+      Supervisor.stop(pid, :normal)
+    catch
+      :exit, reason ->
+        stacktrace = __STACKTRACE__
+
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+        after
+          100 -> :erlang.raise(:exit, reason, stacktrace)
+        end
+    after
+      Process.demonitor(monitor, [:flush])
     end
   end
 
