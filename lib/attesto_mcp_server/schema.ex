@@ -125,6 +125,64 @@ defmodule AttestoMCP.Server.Schema do
 
   def apply_property_defaults(_value, _schema, _opts), do: {:error, :invalid_instance}
 
+  @doc false
+  @spec atomize_property_keys(term(), map() | boolean()) :: term()
+  def atomize_property_keys(value, schema)
+
+  def atomize_property_keys(value, schema) when is_map(value) and is_map(schema) do
+    properties = Map.get(schema, "properties", %{})
+
+    if is_map(properties) do
+      Map.new(value, fn {key, nested} ->
+        case Map.fetch(properties, key) do
+          {:ok, property_schema} ->
+            {existing_property_atom(key), atomize_property_keys(nested, property_schema)}
+
+          :error ->
+            {key, nested}
+        end
+      end)
+    else
+      value
+    end
+  end
+
+  def atomize_property_keys(value, schema) when is_list(value) and is_map(schema) do
+    prefix_items = Map.get(schema, "prefixItems", [])
+    items = Map.get(schema, "items")
+
+    value
+    |> Enum.with_index()
+    |> Enum.map(fn {item, index} ->
+      case item_schema(prefix_items, items, index) do
+        nil -> item
+        item_schema -> atomize_property_keys(item, item_schema)
+      end
+    end)
+  end
+
+  def atomize_property_keys(value, _schema), do: value
+
+  defp item_schema(prefix_items, items, index) when is_list(prefix_items) do
+    case Enum.fetch(prefix_items, index) do
+      {:ok, schema} -> schema
+      :error -> items
+    end
+  end
+
+  defp item_schema(_prefix_items, items, _index), do: items
+
+  # Never create atoms from schemas or client input. A host that wants an atom
+  # key already references that atom in compiled application code; otherwise
+  # the declared key remains a string.
+  defp existing_property_atom(property) when is_binary(property) do
+    String.to_existing_atom(property)
+  rescue
+    ArgumentError -> property
+  end
+
+  defp existing_property_atom(property), do: property
+
   @doc "Checks a schema without validating an instance. No network references are fetched."
   @spec validate_schema(term(), keyword()) :: :ok | {:error, term()}
   def validate_schema(schema, opts \\ [])

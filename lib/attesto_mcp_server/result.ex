@@ -27,6 +27,7 @@ defmodule AttestoMCP.Server.Result do
           | {:is_error, boolean()}
           | {:meta, map()}
           | {:max_json_bytes, pos_integer()}
+          | {:output_canonicalization, :strict | :json | :jason}
   @type resource_option :: {:meta, map()} | {:max_json_bytes, pos_integer()}
 
   defmodule ClientError do
@@ -59,12 +60,22 @@ defmodule AttestoMCP.Server.Result do
   @doc """
   Builds a complete tool result from one content block or a list of blocks.
 
-  `:structured_content`, when present, must be a bounded JSON value. `:meta`
-  must be a bounded JSON object. Unknown and duplicate options are rejected.
+  `:structured_content`, when present, must be a bounded JSON value. Pass
+  `output_canonicalization: :json` or `:jason` to opt into the corresponding
+  encoder protocol for structs and string conversion for non-boolean atoms.
+  `:meta` must be a bounded JSON object. Unknown and duplicate options are
+  rejected.
   """
   @spec tool(Content.t() | [Content.t()], [tool_option()]) :: tool_result()
   def tool(content, opts \\ []) do
-    opts = options!(opts, [:structured_content, :is_error, :meta, :max_json_bytes])
+    opts =
+      options!(opts, [
+        :structured_content,
+        :is_error,
+        :meta,
+        :max_json_bytes,
+        :output_canonicalization
+      ])
 
     %{"content" => list_wrap(content)}
     |> put_options(
@@ -109,9 +120,15 @@ defmodule AttestoMCP.Server.Result do
   def valid_code?(_code), do: false
 
   defp tool_result!(value, opts) do
-    case Output.normalize_tool_result(value, budget_opts(opts)) do
-      {:ok, result} -> result
-      {:error, _reason} -> raise ArgumentError, "invalid MCP tool result"
+    case Output.normalize_tool_result_detailed(value, budget_opts(opts)) do
+      {:ok, result} ->
+        result
+
+      {:error, %Output.CanonicalizationError{} = error} ->
+        raise ArgumentError, Exception.message(error)
+
+      {:error, _reason} ->
+        raise ArgumentError, "invalid MCP tool result"
     end
   end
 
@@ -131,14 +148,22 @@ defmodule AttestoMCP.Server.Result do
 
   defp budget_opts(opts) do
     max_bytes = Keyword.get(opts, :max_json_bytes, Schema.default_instance_bytes())
+    output_canonicalization = Keyword.get(opts, :output_canonicalization, :strict)
 
-    if is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
-         max_bytes <= Schema.max_allowed_instance_bytes() do
-      [max_bytes: max_bytes]
-    else
+    unless is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
+             max_bytes <= Schema.max_allowed_instance_bytes() do
       raise ArgumentError,
             ":max_json_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{Schema.max_allowed_instance_bytes()} bytes"
     end
+
+    unless output_canonicalization in [:strict, :json, :jason],
+      do:
+        raise(
+          ArgumentError,
+          ":output_canonicalization must be :strict, :json, or :jason"
+        )
+
+    [max_bytes: max_bytes, output_canonicalization: output_canonicalization]
   end
 
   defp put_options(map, opts, mapping) do

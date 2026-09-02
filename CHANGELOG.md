@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.0.0 - 2026-09-01
+
+- Establish the stable 1.0 host API while preserving the strict output and
+  string-keyed argument defaults from 0.14.
+- Add a bounded `principal_binding` callback so handlers can receive complete
+  loaded principals while session ownership, subscription isolation, cursors,
+  and accounting use a small stable identifier. Add a separate post-auth,
+  pre-body Plug `authorize` gate for mount-wide policy with neutral 403
+  denials.
+- Let `AttestoMCP.Server.Phoenix.protected_resource_options/2` compose a
+  post-load principal callback without replacing AttestoPhoenix JTI revocation
+  checks or principal loading.
+- Add explicit `:json` and `:jason` tool-output canonicalization modes for
+  protocol-encoded structs and atom values, retaining bounded input, encoded,
+  decoded, and final wire validation. Trusted exception reporters receive a
+  value-free JSON Pointer diagnostic when canonicalization fails.
+- Add opt-in schema-limited atom keys for tool arguments. Conversion happens
+  only after input validation, uses existing atoms, and never creates atoms
+  from schemas or client data.
+- Add `AttestoMCP.Server.Test.call_tool/4` for focused host tests that exercise
+  scopes, definition policy, schemas, handler execution, and complete wire
+  results through normal dispatch.
+- Support up to 32 exact MCP paths in `PhoenixParser` and document a complete
+  multi-server Phoenix deployment with distinct durable-session namespaces.
+- Add bounded, cursor-based active legacy session ID pages for operator
+  tooling. Bundled ETS and Ecto stores expose IDs without loading records or
+  principal bindings; Ecto uses deterministic bytewise ordering.
+- Add a public migration guide for moving documented `anubis_mcp` component,
+  response, context, scope, and schema APIs onto AttestoMCP registrations.
+
 ## 0.14.0 - 2026-09-01
 
 - Add an optional PostgreSQL-backed Ecto session store for the session-bound

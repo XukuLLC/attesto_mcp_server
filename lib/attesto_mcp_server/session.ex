@@ -9,7 +9,9 @@ defmodule AttestoMCP.Server.Session do
   malformed or oversized current-version records fail closed. Higher integer
   format versions remain opaque and are preserved by the bundled stores.
 
-  Principal and tenant bindings may contain existing atoms because they are
+  The `principal` field stores an identity binding, not necessarily the richer
+  principal value exposed to request handlers. Principal and tenant bindings
+  may contain existing atoms because they are
   encoded as bounded Erlang terms. Safe restoration never creates atoms from
   persisted data, so an atom-bearing binding can be used only on nodes where
   those atoms already exist. A node that cannot safely decode such a binding
@@ -93,6 +95,15 @@ defmodule AttestoMCP.Server.Session do
 
   def same_principal?(%__MODULE__{principal: expected}, actual), do: expected == actual
   def same_tenant?(%__MODULE__{tenant: expected}, actual), do: expected == actual
+
+  @doc false
+  @spec validate_binding(term()) :: :ok | {:error, :binding_too_large | :nonportable_binding}
+  def validate_binding(binding) do
+    case encode_binding(binding) do
+      {:ok, _encoded} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
 
   @doc "Serializes persistent session state without live processes or callbacks."
   @spec to_record(t()) :: {:ok, map()} | {:error, term()}

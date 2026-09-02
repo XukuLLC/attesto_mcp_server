@@ -162,6 +162,75 @@ defmodule AttestoMCP.Server.PhoenixTest do
     assert_receive {:revocation_checked, "active"}
     assert_receive {:load_principal, "principal-123"}
 
+    owner = self()
+
+    wrapped_options =
+      Phoenix.protected_resource_options(:sample,
+        principal: fn loaded_principal, claims, sender ->
+          send(owner, {:principal_wrapped, loaded_principal, claims["sub"], sender})
+          {:ok, Map.put(loaded_principal, :sender_binding, sender.binding)}
+        end
+      )
+
+    assert wrapped_options[:principal].(
+             %{"jti" => "active", "sub" => "wrapped-principal"},
+             %{binding: :bearer}
+           ) ==
+             {:ok, %{subject: "wrapped-principal", sender_binding: :bearer}}
+
+    assert_receive {:revocation_checked, "active"}
+    assert_receive {:load_principal, "wrapped-principal"}
+
+    assert_receive {:principal_wrapped, %{subject: "wrapped-principal"}, "wrapped-principal",
+                    %{binding: :bearer}}
+
+    assert wrapped_options[:principal].(
+             %{"jti" => "revoked", "sub" => "wrapped-revoked"},
+             %{binding: :bearer}
+           ) == {:error, :revoked}
+
+    assert_receive {:revocation_checked, "revoked"}
+    refute_receive {:load_principal, "wrapped-revoked"}
+    refute_receive {:principal_wrapped, _, "wrapped-revoked", _}
+
+    invalid_wrapper =
+      Phoenix.protected_resource_options(:sample, principal: fn _, _, _ -> :invalid end)
+
+    assert invalid_wrapper[:principal].(
+             %{"jti" => "active", "sub" => "invalid-wrapper"},
+             %{binding: :bearer}
+           ) == {:error, :principal_wrapper_failed}
+
+    assert_receive {:revocation_checked, "active"}
+    assert_receive {:load_principal, "invalid-wrapper"}
+
+    rejecting_wrapper =
+      Phoenix.protected_resource_options(:sample,
+        principal: fn _, _, _ -> {:error, :host_rejected} end
+      )
+
+    assert rejecting_wrapper[:principal].(
+             %{"jti" => "active", "sub" => "rejected-wrapper"},
+             %{binding: :bearer}
+           ) == {:error, :host_rejected}
+
+    assert_receive {:revocation_checked, "active"}
+    assert_receive {:load_principal, "rejected-wrapper"}
+
+    raising_wrapper =
+      Phoenix.protected_resource_options(:sample,
+        principal: fn _, _, _ -> raise "wrapper failed" end
+      )
+
+    assert raising_wrapper[:principal].(
+             %{"jti" => "active", "sub" => "raising-wrapper"},
+             %{binding: :bearer}
+           ) == {:error, :authorization_check_failed}
+
+    assert_receive {:revocation_checked, "active"}
+    assert_receive {:load_principal, "raising-wrapper"}
+    assert_policy_failure(telemetry_event, :exception)
+
     assert options[:principal].(
              %{"jti" => "revoked", "sub" => "principal-revoked"},
              %{binding: :bearer}
@@ -268,6 +337,27 @@ defmodule AttestoMCP.Server.PhoenixTest do
   test "rejects a non-atom protected-resource OTP application" do
     assert_raise ArgumentError, "otp_app must be an atom", fn ->
       Phoenix.protected_resource_options("sample")
+    end
+  end
+
+  test "validates protected-resource principal composition options before integration" do
+    assert_raise ArgumentError, ~r/protected-resource options must be a keyword list/, fn ->
+      Phoenix.protected_resource_options(:sample, :invalid)
+    end
+
+    assert_raise ArgumentError, ~r/unknown protected-resource option/, fn ->
+      Phoenix.protected_resource_options(:sample, unknown: true)
+    end
+
+    assert_raise ArgumentError, ~r/must not contain duplicate keys/, fn ->
+      Phoenix.protected_resource_options(:sample,
+        principal: fn _, _, _ -> {:ok, :first} end,
+        principal: fn _, _, _ -> {:ok, :second} end
+      )
+    end
+
+    assert_raise ArgumentError, ~r/:principal must be a supported three-argument callback/, fn ->
+      Phoenix.protected_resource_options(:sample, principal: fn _ -> {:ok, :invalid} end)
     end
   end
 

@@ -1119,6 +1119,21 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
              Server.get_session(second, session.id, %{"sub" => "alice"}, "tenant-b")
   end
 
+  test "Server.active_session_ids pages keys from an Ecto-backed store", %{store: store} do
+    {:ok, server} = Server.start_link(session_store: {Store, store}, session_namespace: "default")
+
+    on_exit(fn ->
+      if Process.alive?(server), do: GenServer.stop(server)
+    end)
+
+    assert {:ok, session} = Server.new_session(server, "operator-principal")
+
+    assert {:ok, %{session_ids: [session_id], next_cursor: nil}} =
+             Server.active_session_ids(server)
+
+    assert session_id == session.id
+  end
+
   test "list and cleanup return bounded, active/expired records", %{store: store} do
     live = {"default", unique_id()}
     assert :ok = Store.save(store, live, record())
@@ -1140,6 +1155,50 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
     assert {:ok, expired} = Store.cleanup_expired(store)
     assert length(expired) <= 1_000
     assert {:ok, _remaining} = Store.cleanup_expired(store)
+  end
+
+  test "active key pages avoid record payloads and use stable session-ID cursors", %{store: store} do
+    keys =
+      for id <- ["page-c", "page-a", "page-b"] do
+        key = {"default", id}
+        assert :ok = Store.save(store, key, record(%{"private" => String.duplicate("x", 10_000)}))
+        key
+      end
+
+    expected = Enum.sort_by(keys, &elem(&1, 1))
+
+    assert {:ok, %{keys: first, next_cursor: "page-b"}} =
+             Store.list_active_keys(store, "default", nil, 2)
+
+    assert first == Enum.take(expected, 2)
+
+    assert {:ok, %{keys: second, next_cursor: nil}} =
+             Store.list_active_keys(store, "default", "page-b", 2)
+
+    assert second == Enum.drop(expected, 2)
+    assert {:error, :namespace_mismatch} = Store.list_active_keys(store, "other", nil, 2)
+    assert {:error, :invalid_page} = Store.list_active_keys(store, "default", nil, 0)
+    assert {:error, :invalid_page} = Store.list_active_keys(store, "default", <<0>>, 2)
+  end
+
+  test "active key pages use deterministic binary session-ID ordering", %{store: store} do
+    ids = ["A", "a", "_", "-"]
+
+    for id <- ids do
+      assert :ok = Store.save(store, {"default", id}, record())
+    end
+
+    expected = Enum.sort(ids)
+
+    assert {:ok, %{keys: first, next_cursor: "A"}} =
+             Store.list_active_keys(store, "default", nil, 2)
+
+    assert Enum.map(first, &elem(&1, 1)) == Enum.take(expected, 2)
+
+    assert {:ok, %{keys: second, next_cursor: nil}} =
+             Store.list_active_keys(store, "default", "A", 2)
+
+    assert Enum.map(second, &elem(&1, 1)) == Enum.drop(expected, 2)
   end
 
   test "record-bearing listings retain a small aggregate memory bound", %{store: store} do

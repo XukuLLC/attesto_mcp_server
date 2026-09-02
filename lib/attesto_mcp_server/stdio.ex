@@ -506,8 +506,17 @@ defmodule AttestoMCP.Server.Stdio do
     end
   end
 
-  defp context_principal(context),
-    do: Map.get(context, :principal) || Map.get(context, "principal")
+  defp context_principal(context) do
+    Map.get(
+      context,
+      :principal_binding,
+      Map.get(
+        context,
+        "principal_binding",
+        Map.get(context, :principal, Map.get(context, "principal"))
+      )
+    )
+  end
 
   defp request_context(server, context, request) do
     if legacy_version?(version_for(request)) do

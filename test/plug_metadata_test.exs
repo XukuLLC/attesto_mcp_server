@@ -56,6 +56,29 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
     assert %{"resource" => "http://www.example.com/mcp"} = Jason.decode!(conn.resp_body)
   end
 
+  test "protected-resource metadata bypasses mount authorization", %{server: server} do
+    parent = self()
+
+    opts =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        authorize: fn _context ->
+          send(parent, :mount_authorized)
+          false
+        end,
+        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+      )
+
+    response =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(opts)
+
+    assert response.status == 200
+    assert %{"resource" => "http://www.example.com/mcp"} = Jason.decode!(response.resp_body)
+    refute_receive :mount_authorized
+  end
+
   test "each mount advertises only its configured authorization scopes", %{server: server} do
     documents =
       AttestoMCP.Server.Plug.init(

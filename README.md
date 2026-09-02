@@ -96,6 +96,10 @@ mix test
 mix phx.server
 ```
 
+For focused tool tests, `AttestoMCP.Server.Test.call_tool/4` runs input-schema,
+scope, policy, handler, output-schema, and wire-result checks without setting up
+an HTTP token. Keep separate Plug tests for the authentication boundary.
+
 MCP clients connect to `https://mcp.example.com/mcp` and authorize against the
 same Attesto authorization server as the rest of the application.
 
@@ -152,7 +156,9 @@ decoded input followed by an authenticated context containing the principal,
 tenant, scopes, claims, sender constraints, request metadata, and optional
 application context. One-arity and MFA handlers are also supported. See the
 [registration and handler contract](docs/usage.md#registration) for every input
-form.
+form. Tool arguments remain string-keyed unless the server explicitly selects
+`tool_argument_keys: :atoms`; that mode converts only schema-declared keys whose
+atoms already exist and never creates atoms from client input.
 
 ## Handler results
 
@@ -161,6 +167,14 @@ and `Result` constructors are available for text, structured tool results,
 resources, prompts, images, audio, and canonical Base64 blobs. They catch
 malformed output before it reaches a client; raw maps remain supported for
 extensions. See [registration and handler results](docs/usage.md#registration).
+
+Structured output remains strict by default. A server may explicitly select
+`output_canonicalization: :json` or `:jason` to stringify atom values and pass
+structs through the corresponding encoder protocol under the normal bounded
+output checks. Pairing `output_canonicalization: :jason` with
+`tool_argument_keys: :atoms` is the direct migration setting for applications
+whose existing handlers already use Jason-derived structs and atom-keyed tool
+arguments.
 
 JSON Schema `default` values are annotations and are not inserted during normal
 dispatch. Applications that intentionally need bounded direct-property defaults
@@ -185,6 +199,13 @@ Only literal `true` from `authorize` permits access; failures deny access
 without disclosing whether the definition exists. An optional HTTP
 `context_builder` can add application data under `context.host_context` without
 replacing the authenticated identity or claims.
+
+For loaded principal structs, set the HTTP Plug's `principal_binding` callback
+to a small stable identifier. Handlers continue to receive the complete value
+as `context.principal`, while sessions, subscriptions, cursors, and accounting
+use `context.principal_binding`. A separate Plug-level `authorize` callback can
+gate the complete mount once per authenticated HTTP leg and returns a neutral
+403 on denial. See [principal loading and mount authorization](docs/usage.md#phoenix-installation).
 
 Applications needing definition-scoped HTTP authorization can enable the
 bounded `scope_policy` modes documented in
@@ -302,7 +323,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 0.14.0"}]
+  [{:attesto_mcp_server, "~> 1.0"}]
 end
 ```
 
@@ -311,7 +332,9 @@ Supervise `AttestoMCP.Server`, register definitions through
 [`examples/bandit.exs`](examples/bandit.exs) program demonstrates direct server
 startup, registration, and the protected Plug; the [usage guide](docs/usage.md)
 documents the transport and authentication options. Router and supervision
-wiring remain specific to the host.
+wiring remain specific to the host. It also includes a
+[three-server Phoenix example](docs/usage.md#three-named-mcp-servers-in-one-phoenix-host)
+for applications with multiple MCP mounts.
 
 The production library depends on Plug rather than a particular HTTP server.
 Bandit is the documented development/test adapter. The loopback example returns
@@ -329,8 +352,13 @@ PostgreSQL session store, custom session-store adapters, clustered routing,
 cache policy, telemetry, and
 exception reporting are documented in the [usage guide](docs/usage.md).
 
+Operator code can page active session-bound client IDs with
+`AttestoMCP.Server.API.active_session_ids/2` without loading session records,
+principals, or tenants. The session-free `2026-07-28` transport has no server
+session IDs to list.
+
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 0.14.0 in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 1.0.0 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

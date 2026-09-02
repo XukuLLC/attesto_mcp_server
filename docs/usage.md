@@ -19,10 +19,45 @@ package to `attesto_phoenix`.
 On this automatic path, every authenticated token subject must resolve through
 the host's `load_principal` callback. A revoked JTI, an unresolved subject, or
 a callback failure denies the request with a neutral invalid-token response.
-The loaded principal is the server's security identity for ownership checks,
-session and subscription isolation, and rate/concurrency accounting. Return a
-term whose equality remains stable for the same identity across requests; do
-not include per-load timestamps, references, or other changing values.
+Handlers receive that complete loaded value as `context.principal` and
+`context.attesto_mcp_principal`.
+
+By default, the loaded principal also remains the identity used for ownership,
+session and subscription isolation, cursors, and rate/concurrency accounting.
+For a loaded struct or any value with fields that can differ between loads,
+configure the Plug's `principal_binding` callback. It receives the loaded
+principal and returns the stable identity term directly:
+
+```elixir
+forward "/mcp", AttestoMCP.Server.Plug,
+  server: MyApp.MCP,
+  path: "/mcp",
+  auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+  principal_binding: {MyApp.MCPIdentity, :binding},
+  resource: "/mcp",
+  base_url: "https://mcp.example.com"
+
+defmodule MyApp.MCPIdentity do
+  def binding(%MyApp.Accounts.User{id: id}), do: {:user, id}
+end
+```
+
+Anonymous one-argument functions and `{module, function, prefix_arguments}`
+MFAs are also supported. The return is not an `{:ok, value}` wrapper: it is the
+binding itself. It must be non-nil, portable, and at most 64 KiB in its encoded
+form. Prefer a small opaque identifier without profile data or other PII.
+Invalid returns and callback failures stop the request with a generic internal
+error before a POST body is read. The derived value is available to handlers as
+`context.principal_binding`; the complete principal is not replaced.
+
+The durable record format remains version 1 and retains its existing
+`"principal"` field, which stores the binding. Existing 0.14 records therefore
+need no database migration and continue to decode. With `principal_binding`
+omitted, their comparison behavior is unchanged. Enabling a new binding on a
+mount fails closed for an existing row unless that row's stored principal is
+equal to the newly derived binding. Drain those session-bound clients or allow
+their sessions to expire and reconnect when changing this policy; modern
+session-free clients are unaffected.
 
 With `attesto_phoenix` already declared directly by the host, run:
 
@@ -169,6 +204,36 @@ Elixir.Phoenix.Router.forward(
 )
 ```
 
+`protected_resource_options/2` can transform or reject the loaded principal
+without replacing the automatic revocation and `load_principal` path. Its
+`:principal` callback runs only after both steps succeed and receives the
+loaded principal, verified claims, and sender information. It must return
+`{:ok, non_nil_principal}` or `{:error, reason}`:
+
+```elixir
+auth:
+  {AttestoMCP.Server.Phoenix, :protected_resource_options,
+   [
+     :my_app,
+     [principal: {MyApp.MCPPrincipal, :finalize}]
+   ]}
+
+defmodule MyApp.MCPPrincipal do
+  def finalize(loaded_principal, claims, _sender) do
+    {:ok,
+     %{
+       account: loaded_principal,
+       client_id: claims["client_id"]
+     }}
+  end
+end
+```
+
+The function and MFA forms are strict three-argument callbacks; an MFA with
+prefix arguments receives those first. A malformed return or exception denies
+authentication. Use the Plug-level `authorize` option below for mount access
+policy that should produce a neutral 403 rather than an invalid-token response.
+
 The explicit `--attesto-config` path instead keeps the static
 `auth: [config: &Elixir.MyApp.MCP.attesto_config/0, resource: "/mcp",
 base_url: "https://mcp.example.com"]` form. Such hosts remain responsible for
@@ -231,6 +296,119 @@ imports cannot redirect its routing DSL. Installation also stops when an
 existing exact, parameterized, glob, resource, or forwarded route could overlap
 either generated mount; resolve the conflict or mount the two forwards manually
 at an intentional precedence point.
+
+### Three named MCP servers in one Phoenix host
+
+The installer owns one generated mount. A host with several MCP resources can
+wire them manually. Give every server a distinct registered name and session
+namespace. The bundled Ecto adapter then keeps all sessions in the same
+`attesto_mcp_sessions` table while its `{namespace, session_id}` key prevents a
+session issued at one mount from being accepted at another:
+
+```elixir
+defmodule MyApp.Application do
+  use Application
+
+  @impl true
+  def start(_type, _args) do
+    children = [
+      MyApp.Repo,
+      mcp_child(MyApp.MCP.Catalog, "mcp-catalog", MyApp.MCP.Catalog.registrations()),
+      mcp_child(MyApp.MCP.Operations, "mcp-operations", MyApp.MCP.Operations.registrations()),
+      mcp_child(MyApp.MCP.Preview, "mcp-preview", MyApp.MCP.Preview.registrations())
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
+  end
+
+  defp mcp_child(name, namespace, registrations) do
+    {:ok, store} =
+      AttestoMCP.Server.SessionStore.Ecto.new(
+        repo: MyApp.Repo,
+        namespace: namespace
+      )
+
+    {AttestoMCP.Server,
+     name: name,
+     registrations: registrations,
+     session_store: {AttestoMCP.Server.SessionStore.Ecto, store},
+     session_namespace: namespace}
+  end
+end
+```
+
+Replace the endpoint's ordinary `Plug.Parsers` declaration with the wrapper,
+retaining the host's parser options. One wrapper accepts up to 32 unique static
+MCP paths. It bypasses only an exact decoded path and its trailing-slash
+equivalents; parent paths, segment prefixes, and child paths still run the host
+parser:
+
+```elixir
+plug AttestoMCP.Server.PhoenixParser,
+  mcp_path: ["/mcp/catalog", "/mcp/operations", "/mcp/preview"],
+  parsers: [:urlencoded, :multipart, :json],
+  pass: ["*/*"],
+  json_decoder: Phoenix.json_library()
+```
+
+Publish one path-specific protected-resource metadata document and one
+protected forward per server. `root: false` avoids assigning the ambiguous
+unsuffixed metadata document to any of the three resources:
+
+```elixir
+defmodule MyAppWeb.Router do
+  use MyAppWeb, :router
+  use AttestoMCP.Router
+
+  scope "/" do
+    attesto_mcp_protected_resource_metadata "/mcp/catalog",
+      scopes: ["catalog.mcp"],
+      base_url: "https://mcp.example.com",
+      root: false
+
+    attesto_mcp_protected_resource_metadata "/mcp/operations",
+      scopes: ["operations.mcp"],
+      base_url: "https://mcp.example.com",
+      root: false
+
+    attesto_mcp_protected_resource_metadata "/mcp/preview",
+      scopes: ["preview.mcp"],
+      base_url: "https://mcp.example.com",
+      root: false
+  end
+
+  forward "/mcp/catalog", AttestoMCP.Server.Plug,
+    server: MyApp.MCP.Catalog,
+    path: "/mcp/catalog",
+    scopes_supported: ["catalog.mcp"],
+    default_scopes: ["catalog.mcp"],
+    auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+    resource: "/mcp/catalog",
+    base_url: "https://mcp.example.com"
+
+  forward "/mcp/operations", AttestoMCP.Server.Plug,
+    server: MyApp.MCP.Operations,
+    path: "/mcp/operations",
+    scopes_supported: ["operations.mcp"],
+    default_scopes: ["operations.mcp"],
+    auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+    resource: "/mcp/operations",
+    base_url: "https://mcp.example.com"
+
+  forward "/mcp/preview", AttestoMCP.Server.Plug,
+    server: MyApp.MCP.Preview,
+    path: "/mcp/preview",
+    scopes_supported: ["preview.mcp"],
+    default_scopes: ["preview.mcp"],
+    auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+    resource: "/mcp/preview",
+    base_url: "https://mcp.example.com"
+end
+```
+
+Keep these routes outside browser-session and CSRF pipelines. Each metadata
+path, Plug `:path`, protected resource, public origin, advertised scopes, and
+server registration must agree for that mount.
 
 ## Bandit development server
 
@@ -317,11 +495,12 @@ Per-delivery subscription reauthorization requires an executable
 access token's validity, audience, sender binding, applicable scopes, and any
 matched resource definition scopes before modern or session-bound
 subscription-notification delivery.
-Comparisons with the opening token actor, principal, and tenant preserve the
-authenticated stream's ownership snapshot; they do not re-run host policy.
-Host revocation and principal callbacks run when the stream is authenticated,
-not inside shared publish processes; a later host-policy change applies on the
-next request or reconnect. An `issuer:` without a verifier configuration is
+Comparisons with the opening token actor, principal binding, and tenant preserve
+the authenticated stream's ownership snapshot; they do not re-run host policy.
+Host revocation, principal, and mount-authorization callbacks run when the
+stream is authenticated, not inside shared publish processes; a later
+host-policy change applies on the next request or reconnect. An `issuer:`
+without a verifier configuration is
 metadata-only: it may serve RFC 9728 metadata, but protected traffic fails
 closed until the host supplies an executable Attesto configuration.
 
@@ -426,6 +605,26 @@ argument is the authenticated request context; a completion input's `:context`
 is the separate client-supplied completion context. Arity-1 and MFA handler
 forms are also accepted.
 
+Tool handlers receive string-keyed arguments by default. Applications porting
+handlers that already use atom keys may opt in at server startup:
+
+```elixir
+server_options = [
+  tool_argument_keys: :atoms,
+  output_canonicalization: :jason
+]
+```
+
+`:atoms` is applied only after the original string-keyed input has passed its
+registered JSON Schema. It converts literal keys found under `properties` only
+when the corresponding atom already exists in the VM; no call creates an atom.
+Undeclared keys and declared names without an existing atom remain strings.
+The conversion follows nested literal `properties`, array `items`, and
+`prefixItems`. Keys available only through references, combinators, or
+conditional branches remain strings so ambiguous schema paths never broaden
+the conversion. The default `tool_argument_keys: :strings` preserves the wire
+map exactly.
+
 Tool output content, prompt messages, and resource contents are checked before
 they reach the wire. Supported content includes text, Base64 image/audio,
 resource links, embedded resources, and structured tool output. Malformed
@@ -442,6 +641,35 @@ The server rechecks the complete result after adding `resultType`, cache
 metadata, and server identity. A constructor value at the standalone ceiling
 can therefore be refused when server-owned fields would make the final result
 too large. Results for session-bound revisions receive the same final aggregate check.
+
+Structured tool output is strict by default: non-boolean atom values and
+structs are rejected, while atom map keys continue to canonicalize to strings.
+`output_canonicalization: :json` opts into `JSON.Encoder`; `:jason` opts into
+`Jason.Encoder`. In either mode, non-boolean atom values become strings and a
+struct is encoded only through the selected protocol, decoded back to ordinary
+JSON values, and then checked normally. Encoder input, encoded iodata, decoded
+nodes, depth, and final JSON bytes all remain bounded by the server's configured
+limits. Derive encoders with an explicit `:only` field list when a struct can
+contain private application data.
+
+Raw handler values automatically use the server setting. When constructing a
+complete result inside the handler, pass the same mode explicitly (it is also
+available as `context.output_canonicalization`):
+
+```elixir
+Result.tool(Content.text("loaded"),
+  structured_content: record,
+  output_canonicalization: context.output_canonicalization
+)
+```
+
+If canonicalization fails, the client still receives only a generic failure. A
+configured trusted `exception_reporter` additionally receives a bounded,
+value-free diagnostic identifying the first JSON Pointer path and rejection
+category, with safe value and encoder categories where applicable. When a
+public result constructor detects the failure inside the handler, its
+`ArgumentError` message carries the same bounded path and category. The
+rejected value is never included in either report or Telemetry metadata.
 
 `AttestoMCP.Server.Schema.validate/2` treats JSON Schema `default` as an
 annotation and never changes the original request. A handler may explicitly
@@ -493,6 +721,90 @@ end
 
 The map is exposed only as `context.host_context`. Returning anything else or
 raising prevents handler invocation.
+
+### Mount authorization
+
+Use the HTTP Plug's `authorize` option for one business-policy gate covering an
+entire mount:
+
+```elixir
+forward "/mcp/admin", AttestoMCP.Server.Plug,
+  server: MyApp.AdminMCP,
+  path: "/mcp/admin",
+  auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]},
+  principal_binding: {MyApp.MCPIdentity, :binding},
+  authorize: {MyApp.MCPPolicy, :admin_mount?},
+  resource: "/mcp/admin",
+  base_url: "https://mcp.example.com"
+
+defmodule MyApp.MCPPolicy do
+  def admin_mount?(context), do: context.principal.role == :admin
+end
+```
+
+The callback accepts a one-argument function, `{module, function}`, or
+`{module, function, prefix_arguments}`; prefix arguments precede the context.
+It receives the authenticated base context, including the complete principal,
+stable principal binding, tenant, scopes, claims, sender information, and
+`host_context` when a `context_builder` is configured. Only literal `true`
+permits access. Every other return and every raise, throw, or exit produces the
+same plain 403 response without a `WWW-Authenticate` challenge or policy
+details.
+
+This gate runs once on each authenticated POST, GET, and DELETE leg, before a
+POST body is read and before protocol dispatch. Invalid credentials still stop
+at authentication and never invoke it. Because the request body has not been
+classified yet, the callback does not receive an MCP method or its arguments;
+use `scope_map`, `scope_policy`, and per-definition authorization for those
+decisions. When both `context_builder` and mount authorization are configured,
+the built context is cached and reused for dispatch, so each callback runs only
+once. Metadata discovery is public and does not run the mount policy.
+
+For streams and subscriptions, this policy governs the authenticated opening
+leg. Delivery reauthorization continues to check the captured binding, tenant,
+sender, and scopes; a later business-policy change takes effect on the next
+request or reconnect.
+
+### Focused tool tests
+
+Use `AttestoMCP.Server.Test.call_tool/4` for a per-tool test that still goes
+through protocol dispatch. It checks the server's operation scopes, the
+tool's scope clauses and `authorize` callback, its input schema, the handler,
+its output schema, and final wire-output validation. The return value is the
+complete JSON-RPC response map, so success and neutral denial/error results can
+be asserted without constructing an internal request:
+
+```elixir
+response =
+  AttestoMCP.Server.Test.call_tool(
+    MyApp.MCP,
+    "get_item",
+    %{"id" => "item-7"},
+    request_id: "get-item-test",
+    principal: %{id: "user-7"},
+    scopes: ["items.read"],
+    host_context: %{account_id: "acct-1"}
+  )
+
+assert %{
+         "id" => "get-item-test",
+         "result" => %{
+           "resultType" => "complete",
+           "structuredContent" => %{"id" => "item-7"}
+         }
+       } = response
+```
+
+The helper JSON-encodes and decodes its request before dispatch, matching a
+client's nested string keys before any configured tool-argument key policy.
+It defaults to protocol revision `2026-07-28`, principal `"test-principal"`,
+and no scopes; `:protocol_version`, `:client_capabilities`, and `:timeout` are
+available for focused variants.
+
+The principal, tenant, scopes, and host context options stand in for a request
+that has already authenticated. This helper does not exercise token, DPoP,
+mTLS, HTTP header, parser-order, or mount-policy checks. Keep Plug-level tests
+for that boundary.
 
 ### Per-definition authorization
 
@@ -740,6 +1052,36 @@ loading their record payloads. Direct loads and record-bearing listings verify
 the complete record against its expiry mirrors. Malformed rows detected there
 fail closed and are removed under a row lock so one row cannot block later
 work.
+
+For operator tooling, `AttestoMCP.Server.active_session_ids/2` returns bounded,
+cursor-based pages of active session IDs without loading or returning principals,
+tenants, or session records:
+
+```elixir
+{:ok, %{session_ids: ids, next_cursor: cursor}} =
+  AttestoMCP.Server.active_session_ids(MyApp.MCP, limit: 100)
+
+next_page =
+  if cursor do
+    AttestoMCP.Server.active_session_ids(MyApp.MCP, cursor: cursor, limit: 100)
+  end
+```
+
+The default page is 100 IDs and the maximum is 1,000. Pass the returned
+`next_cursor` unchanged to continue; a `nil` cursor means the page is complete.
+IDs are ordered lexicographically and are scoped to the server's configured
+`session_namespace`. This is an operator visibility API, not a session-loading
+or administration API: use the normal authenticated session operations when a
+specific session must be inspected or closed. The method applies to the
+session-bound revisions; the 2026 stateless transport has no server-side
+session IDs to list.
+
+Custom session-store adapters may implement the optional `list_active_keys/4`
+callback from `AttestoMCP.Server.SessionStore` to support this view. It must
+return only `{namespace, session_id}` keys and a cursor, never record payloads
+or principal bindings. Adapters that do not implement it return
+`{:error, :unsupported}`; malformed pages and adapter failures are converted to
+the neutral `:session_store_unavailable` result.
 
 Session expiry uses wall-clock timestamps while refreshes preserve monotonic
 activity. Clock skew between nodes can therefore extend a session's effective
@@ -1035,14 +1377,20 @@ stable event contract is:
   `timeout`, `open`, `close`, and `backpressure` where applicable.
 * `auth/refusal`, `auth/policy_failure`, `protocol/error`, `cancellation/request`,
   `cancellation/stop`, and `progress/emit` or `progress/reject`.
+* `principal_binding/exception` and `context_builder/exception`.
 * `mrtr/round`, `subscription/open`, `subscription/close`,
   `subscription/suppressed`, and `subscription/backpressure`.
 * `cache/choice`, `cache/invalidation`, `session/open`, `session/close`,
   `session_store/failure`, and `supervision/restart`.
 
+`auth/policy_failure` can report the `:mount_policy` category. A failed
+`principal_binding` callback emits `principal_binding/exception`, and a failed
+`context_builder` callback emits `context_builder/exception`; both remain
+value-free and use the configured `exception_reporter` when applicable.
+
 `auth/policy_failure` identifies the failing boundary only through a safe
-`principal_policy` or `verifier` category and an atom failure kind; it never
-includes the callback reason, token claims, or principal.
+`principal_policy`, `mount_policy`, or `verifier` category and an atom failure
+kind; it never includes the callback reason, token claims, or principal.
 
 `session_store/failure` identifies the failed operation only through its bounded
 `source` atom. The outcome is `unavailable`, or `corrupt_discarded` when the

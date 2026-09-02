@@ -22,6 +22,16 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
   def list_active(store), do: GenServer.call(store, :list_active)
 
   @impl true
+  def list_active_keys(store, namespace, cursor, limit) do
+    if valid_page_part?(namespace) and (is_nil(cursor) or valid_page_part?(cursor)) and
+         is_integer(limit) and limit in 1..@max_list do
+      GenServer.call(store, {:list_active_keys, namespace, cursor, limit})
+    else
+      {:error, :invalid_page}
+    end
+  end
+
+  @impl true
   def update_ttl(store, key, now), do: GenServer.call(store, {:update_ttl, key, now})
 
   @impl true
@@ -86,6 +96,28 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
       |> Enum.reject(fn {_key, record} -> expired?(record, now) end)
 
     {:reply, {:ok, records}, state}
+  end
+
+  def handle_call({:list_active_keys, namespace, cursor, limit}, _from, state) do
+    now = System.system_time(:millisecond)
+
+    page =
+      state.records
+      |> Enum.flat_map(fn
+        {{^namespace, id} = key, record} when is_binary(id) ->
+          if valid_page_part?(id) and not expired?(record, now), do: [key], else: []
+
+        _entry ->
+          []
+      end)
+      |> Enum.sort_by(&elem(&1, 1))
+      |> Enum.drop_while(fn {_namespace, id} -> is_binary(cursor) and id <= cursor end)
+      |> Enum.take(limit + 1)
+
+    keys = Enum.take(page, limit)
+    next_cursor = if length(page) > limit, do: keys |> List.last() |> elem(1)
+
+    {:reply, {:ok, %{keys: keys, next_cursor: next_cursor}}, state}
   end
 
   def handle_call({:update_ttl, key, now}, _from, state) do
@@ -238,5 +270,10 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
         not (is_integer(created) and is_integer(seen) and is_integer(absolute) and
                is_integer(idle)) or now - created > absolute or now - seen > idle
     end
+  end
+
+  defp valid_page_part?(value) do
+    is_binary(value) and byte_size(value) in 1..256 and String.valid?(value) and
+      :binary.match(value, <<0>>) == :nomatch
   end
 end

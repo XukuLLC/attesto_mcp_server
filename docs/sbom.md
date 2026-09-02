@@ -1,9 +1,10 @@
-# Production dependency inventory (0.14.0)
+# Production dependency inventory (1.0.0)
 
-This release evidence was observed locally on 2026-09-01 for 0.14.0 after
-resolving the published Hex packages with `mix deps.get` and checking the graph
-with `mix deps.tree --only prod`. This library does not maintain or ship a
-project lockfile, so consumers resolve the declared version ranges.
+This candidate evidence was observed locally on 2026-09-01 for 1.0.0 after
+resolving its published dependency packages from Hex with `mix deps.get` and
+checking the graph with `mix deps.tree --only prod`. This library does not
+maintain or ship a project lockfile, so consumers resolve the declared version
+ranges.
 
 | Component | Resolved version | License policy | Production path |
 |---|---:|---|---|

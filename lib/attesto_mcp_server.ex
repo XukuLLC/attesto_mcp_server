@@ -19,13 +19,19 @@ defmodule AttestoMCP.Server.API do
   `%{ref: ref, argument: argument, value: value, context: context}`. These
   envelopes use atom keys for their declared fields; a resource MRTR retry also
   carries its string-keyed input-response entries at the top level. Nested MCP
-  values retain their JSON string keys. The callback context contains the
-  authenticated principal, tenant, scopes, transport, negotiated version,
-  request ID, `trace_context`, progress callback, and the Attesto assigns (`:attesto_mcp_claims`,
+  values retain their JSON string keys by default. The server-wide
+  `tool_argument_keys: :atoms` opt-in converts only literal, schema-declared
+  property keys that already exist as atoms; it never creates atoms from
+  schemas or client input. The callback context contains the
+  complete authenticated principal, tenant, scopes, transport, negotiated
+  version, request ID, `trace_context`, progress callback, and an optional
+  stable `:principal_binding` supplied by the transport. The HTTP Plug always
+  supplies that field, defaulting it to the complete principal when no binding
+  callback is configured. It also supplies the Attesto assigns (`:attesto_mcp_claims`,
   `:attesto_mcp_scopes`, `:attesto_mcp_sender`, `:attesto_mcp_principal`, and
   `:attesto_context`) when the Plug boundary is used. The context also exposes
-  the supervised server's `:max_json_bytes` value for matching public content
-  and result constructor options. A successful callback
+  the supervised server's `:max_json_bytes`, `:output_canonicalization`, and
+  `:tool_argument_keys` values for matching public result options. A successful callback
   returns `{:ok, result}`, an application failure returns `{:error, reason}`,
   and an interactive callback returns `{:input_required, request_map}` with
   typed MRTR request entries. An HTTP `context_builder` contributes only the
@@ -55,6 +61,8 @@ defmodule AttestoMCP.Server.API do
           | {:session_idle_timeout, pos_integer()}
           | {:session_absolute_timeout, pos_integer()}
           | {:max_json_bytes, pos_integer()}
+          | {:output_canonicalization, :strict | :json | :jason}
+          | {:tool_argument_keys, :strings | :atoms}
           | {:max_body_bytes, pos_integer()}
           | {:max_message_bytes, pos_integer()}
           | {:max_queue, pos_integer()}
@@ -211,16 +219,23 @@ defmodule AttestoMCP.Server.API do
   @spec stats(server()) :: map()
   def stats(server), do: AttestoMCP.Server.stats(server)
 
+  @doc "Returns one bounded page of active legacy session IDs for operator tooling."
+  @spec active_session_ids(server(), keyword()) ::
+          {:ok, %{session_ids: [String.t()], next_cursor: String.t() | nil}}
+          | {:error, :invalid_options | :session_store_unavailable | :unsupported}
+  def active_session_ids(server, opts \\ []),
+    do: AttestoMCP.Server.active_session_ids(server, opts)
+
   @doc "Returns normalized startup options used by Plug and stdio adapters."
   @spec options(server()) :: keyword()
   def options(server), do: AttestoMCP.Server.options(server)
 
-  @doc "Creates a principal/tenant-bound legacy session."
+  @doc "Creates a principal-binding/tenant-bound legacy session."
   @spec new_session(server(), term(), term(), keyword()) :: {:ok, struct()} | {:error, term()}
   def new_session(server, principal, tenant \\ nil, opts \\ []),
     do: AttestoMCP.Server.new_session(server, principal, tenant, opts)
 
-  @doc "Looks up a session only for its bound principal and tenant."
+  @doc "Looks up a session only for its principal binding and tenant."
   @spec get_session(server(), String.t(), term(), term()) :: {:ok, struct()} | {:error, term()}
   def get_session(server, id, principal, tenant \\ nil),
     do: AttestoMCP.Server.get_session(server, id, principal, tenant)
@@ -258,7 +273,13 @@ defmodule AttestoMCP.Server.API do
   @spec cancel_subscription(server(), term(), pid()) :: :ok | {:error, term()}
   defdelegate cancel_subscription(server, id, owner), to: AttestoMCP.Server
 
-  @doc "Cancels a request owned by a principal."
+  @doc """
+  Cancels a request owned by the supplied principal binding.
+
+  When the transport configures `:principal_binding`, pass the derived binding
+  rather than the complete loaded principal. Otherwise pass the principal used
+  when the request started.
+  """
   @spec cancel_request(server(), term(), term()) :: :ok | {:error, term()}
   defdelegate cancel_request(server, principal, request_id), to: AttestoMCP.Server
 end

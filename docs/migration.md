@@ -5,6 +5,37 @@ This guide maps an existing MCP catalog and deployment onto
 authorization, and rollout safety. The [usage guide](usage.md) contains the
 complete option reference.
 
+## 1.0 host integration controls
+
+Version 1.0 keeps the 0.14 transport, authentication, strict-output, and
+string-key argument defaults. Upgrading the dependency alone does not require
+new OAuth consent, token issuance, a database migration, or changes to existing
+registrations.
+
+The new host ergonomics are explicit choices:
+
+- set the HTTP Plug's `principal_binding` callback when a loaded principal is a
+  struct or otherwise changes between requests;
+- set its `authorize` callback for one post-auth policy gate covering the
+  complete mount;
+- choose `tool_argument_keys: :atoms` for existing atom-key handlers and
+  `output_canonicalization: :json` or `:jason` for protocol-encoded structs and
+  atom values;
+- use `AttestoMCP.Server.Test.call_tool/4` to port focused tool tests through
+  normal dispatch; and
+- pass a bounded path list to `PhoenixParser` when one endpoint serves several
+  named MCP servers.
+
+Enabling `principal_binding` changes the value compared with stored
+session-bound ownership records. Existing version-1 rows remain readable, but
+an old row fails closed when its stored principal does not equal the new
+binding. Drain those clients or let their sessions expire and reconnect when
+turning the option on. The session-free `2026-07-28` transport is unaffected.
+
+Custom session stores need no change unless operator ID pagination is wanted;
+implement the optional `list_active_keys/4` callback to enable
+`active_session_ids/2`.
+
 ## 0.14 durable session storage
 
 Version 0.14 adds an optional PostgreSQL-backed store for clients that use the
@@ -67,6 +98,148 @@ Version 0.13 requires `attesto_mcp >= 1.3.0 and < 2.0.0`. Run `mix deps.get`
 after upgrading; direct Phoenix hosts may keep a compatible
 `attesto_phoenix` requirement from the supported `>= 2.14.1 and < 4.0.0`
 range.
+
+## Arriving from anubis_mcp
+
+Port one public Anubis component at a time into an
+`AttestoMCP.Server` registration. The mapping in this section uses the
+documented component callbacks, response builders, frame/context fields, and
+generated JSON Schema APIs from
+[`anubis_mcp`](https://hexdocs.pm/anubis_mcp/); it does not depend on
+implementation details.
+
+### Convert tool responses and callback returns
+
+Anubis tool components return a response together with a frame. An AttestoMCP
+tool handler returns `{:ok, result}` or `{:error, reason}` and does not return a
+mutable frame. Move durable mutations into application-owned storage and build
+the MCP result with `AttestoMCP.Server.Content` and
+`AttestoMCP.Server.Result`:
+
+| Anubis tool response | AttestoMCP handler return |
+| --- | --- |
+| `Response.text(Response.tool(), text)` | `{:ok, Result.tool(Content.text(text))}` |
+| `Response.structured(Response.tool(), value)` | `{:ok, Result.tool(Content.text("structured response"), structured_content: value, output_canonicalization: :jason)}` |
+| `Response.json(Response.tool(), value)` | `{:ok, Result.tool(Content.text(Jason.encode!(value)))}` |
+| `Response.error(Response.tool(), message)` | `{:error, Result.error(message, "domain_code")}` |
+
+The `:jason` option in the structured-response row covers the atom-keyed maps
+and Jason-encoded structs common in existing components. If `value` is already
+JSON-native, omit that option. Review every derived encoder's field list before
+relying on it so private struct fields cannot become MCP output.
+
+`Result.error/2` is for bounded business text and an optional stable code that
+are deliberately safe to disclose. Unexpected failures should remain ordinary
+private errors. For structured output, choose useful fallback text rather than
+assuming every client renders `structuredContent`.
+
+For example, a tool registration can retain its domain function while changing
+only the MCP adapter:
+
+```elixir
+alias AttestoMCP.Server.{Content, Result}
+
+{:tool, "get_item",
+ %{
+   input_schema: input_schema,
+   output_schema: output_schema,
+   required_scopes: ["items.read"],
+   handler: fn arguments, context ->
+     case MyApp.Items.fetch(context.principal, arguments["id"]) do
+       {:ok, item} ->
+         value = %{"id" => item.id, "name" => item.name}
+
+         {:ok,
+          Result.tool(Content.text(item.name),
+            structured_content: value
+          )}
+
+       :not_found ->
+         {:error, Result.error("item not found", "item_not_found")}
+     end
+   end
+ }}
+```
+
+### Replace frame access with handler context
+
+Map authenticated and application-owned values explicitly:
+
+| Anubis callback value | AttestoMCP handler value |
+| --- | --- |
+| `Frame.subject(frame)` | `context.principal` |
+| `Frame.scopes(frame)` | `context.scopes` |
+| Verified details read through `Frame.authorization(frame)` | the specific verified `context.attesto_mcp_claims` or `context.attesto_mcp_sender` field needed by the handler |
+| Mutable values in `frame.assigns` | no direct equivalent; keep state in application-owned storage and expose request-time host data through `context.host_context` |
+
+Treat the handler context as read-only. `context.host_context` is rebuilt for
+the authenticated request; it is not session state and is not a mutable-frame
+replacement. Do not merge untrusted request values into package-owned
+principal, scope, claims, or sender keys. Data that previously changed by
+returning a new frame needs an application-owned process or datastore with its
+own lifecycle.
+
+### Carry scopes and schemas into registrations
+
+Move a component's `scopes:` list to the registration's `required_scopes`.
+Both are all-of declarations. If the new definition also accepts a different
+complete grant, add it under `alternative_scope_sets`; do not flatten
+alternatives into the primary list.
+
+Replace Peri `schema do` and `output_schema do` blocks with JSON Schema maps.
+An existing Anubis component exposes the JSON Schema produced by those public
+DSLs through `input_schema/0` and, when declared, `output_schema/0`. A one-time
+pretty-printed dump is a useful starting point:
+
+```elixir
+schemas = %{
+  "input" => MyApp.Tools.GetItem.input_schema(),
+  "output" => MyApp.Tools.GetItem.output_schema()
+}
+
+IO.puts(Jason.encode!(schemas, pretty: true))
+```
+
+Review the resulting maps and validate each against this package's bounded
+local subset before registration:
+
+```elixir
+:ok = AttestoMCP.Server.Schema.validate_schema(input_schema)
+:ok = AttestoMCP.Server.Schema.validate_schema(output_schema)
+```
+
+There is no component conversion pass during AttestoMCP registration. Express
+a nullable property directly in JSON Schema, for example
+`%{"type" => ["string", "null"]}`, rather than carrying forward a generated
+`oneOf`-with-null union solely for nullability.
+
+### Choose argument-key and output conversion policy
+
+JSON requests arrive with string keys. The default
+`tool_argument_keys: :strings` preserves them, so Anubis callbacks that matched
+atom-keyed validated parameters must change `arguments[:id]` to
+`arguments["id"]`. A server may opt into `tool_argument_keys: :atoms`; only
+literal keys declared by input-schema `properties` are eligible, only already
+existing atoms are used, and undeclared client keys remain strings. The bounded
+conversion never creates atoms from request data.
+
+The default `output_canonicalization: :strict` accepts JSON-native values. It
+does not implicitly encode non-boolean atom values or structs. Convert enums,
+dates, times, decimals, and application structs to explicit JSON values before
+passing them to `Result.tool/2`, or deliberately select
+`output_canonicalization: :json` for the standard `JSON.Encoder` protocol or
+`:jason` for `Jason.Encoder`. Both opt-in modes stringify non-boolean atoms and
+still apply the server's output budgets, output schema, and final wire
+validation. Raw handler returns inherit the server mode. A handler that calls
+`Result.tool/2` passes the same `output_canonicalization:` value explicitly,
+normally from `context.output_canonicalization`, because the constructor
+validates before it returns to the server.
+
+After porting each component, use `AttestoMCP.Server.Test.call_tool/4` with a
+representative principal and scopes. It exercises the registered input schema,
+scope clauses, definition `authorize`, handler, output schema, and complete
+wire result without requiring an HTTP token. Keep separate Plug tests for the
+authentication and sender-constraint boundary.
 
 ## 1. Inventory the catalog
 

@@ -60,6 +60,7 @@ defmodule AttestoMCP.Server do
   @session_close_message_version 1
   @max_session_close_ids 128
   @max_session_close_key_bytes 256
+  @max_active_session_page_size 1_000
   @session_close_reasons [:session_deleted, :session_expired]
   @max_cluster_resource_scope_sets 8
   @max_cluster_resource_scopes 128
@@ -84,6 +85,8 @@ defmodule AttestoMCP.Server do
     :session_idle_timeout,
     :session_absolute_timeout,
     :max_json_bytes,
+    :output_canonicalization,
+    :tool_argument_keys,
     :max_body_bytes,
     :max_message_bytes,
     :max_queue,
@@ -233,7 +236,7 @@ defmodule AttestoMCP.Server do
     runtime = GenServer.call(server, :runtime)
     id = Map.get(request, :id)
     method = Map.get(request, :method, "")
-    principal = Map.get(context, :principal) || Map.get(context, "principal")
+    principal = principal(context)
 
     if request.kind == :notification and method == "notifications/cancelled" and
          cancellation_notification_allowed?(opts) do
@@ -329,6 +332,11 @@ defmodule AttestoMCP.Server do
                      |> Map.put(:owner, parent)
                      |> Map.put(:request_id, id)
                      |> Map.put(:max_json_bytes, runtime.opts[:max_json_bytes])
+                     |> Map.put(
+                       :output_canonicalization,
+                       runtime.opts[:output_canonicalization]
+                     )
+                     |> Map.put(:tool_argument_keys, runtime.opts[:tool_argument_keys])
                      |> Map.put(:request_extensions, Map.get(request, :extensions, %{}))
                      |> Map.put_new(:protocol_version, raw_version)
                      |> Map.put(:logging_level, request_logging_level(request, context, era))
@@ -530,6 +538,40 @@ defmodule AttestoMCP.Server do
   @doc "Returns bounded public counters for sessions, streams, subscriptions, and requests."
   @spec stats(pid() | atom()) :: map()
   def stats(server), do: GenServer.call(server, :stats)
+
+  @doc "Returns one bounded page of active legacy session IDs for operator tooling."
+  @spec active_session_ids(pid() | atom(), keyword()) ::
+          {:ok, %{session_ids: [String.t()], next_cursor: String.t() | nil}}
+          | {:error, :invalid_options | :session_store_unavailable | :unsupported}
+  def active_session_ids(server, opts \\ []) do
+    with {:ok, cursor, limit} <- normalize_active_session_page_options(opts) do
+      GenServer.call(server, {:active_session_ids, cursor, limit})
+    end
+  end
+
+  defp normalize_active_session_page_options(opts) when is_list(opts) do
+    keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
+
+    if Keyword.keyword?(opts) and Enum.all?(keys, &(&1 in [:cursor, :limit])) and
+         length(keys) == length(Enum.uniq(keys)) do
+      cursor = Keyword.get(opts, :cursor)
+      limit = Keyword.get(opts, :limit, 100)
+
+      if (is_nil(cursor) or valid_active_session_cursor?(cursor)) and is_integer(limit) and
+           limit in 1..@max_active_session_page_size,
+         do: {:ok, cursor, limit},
+         else: {:error, :invalid_options}
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  defp normalize_active_session_page_options(_opts), do: {:error, :invalid_options}
+
+  defp valid_active_session_cursor?(value) do
+    is_binary(value) and byte_size(value) in 1..@max_session_close_key_bytes and
+      String.valid?(value) and :binary.match(value, <<0>>) == :nomatch
+  end
 
   @doc "Returns normalized options used by the protocol adapters."
   @spec options(pid() | atom()) :: keyword()
@@ -845,6 +887,30 @@ defmodule AttestoMCP.Server do
        subscriptions: subscription_stats.count,
        subscription_queue: subscription_stats.queued
      }, state}
+  end
+
+  def handle_call({:active_session_ids, cursor, limit}, _from, state) do
+    if function_exported?(state.session_store_module, :list_active_keys, 4) do
+      case safe_session_store_call(state, :list_active_keys, [
+             state.session_namespace,
+             cursor,
+             limit
+           ]) do
+        {:ok, %{keys: keys, next_cursor: next_cursor}} ->
+          if valid_active_session_page?(keys, next_cursor, cursor, limit) and
+               Enum.all?(keys, fn {namespace, _id} -> namespace == state.session_namespace end) do
+            {:reply,
+             {:ok, %{session_ids: Enum.map(keys, &elem(&1, 1)), next_cursor: next_cursor}}, state}
+          else
+            {:reply, session_store_unavailable(state, :list_active_keys), state}
+          end
+
+        {:error, :session_store_unavailable} = error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :unsupported}, state}
+    end
   end
 
   def handle_call({:notification_scopes, notification}, _from, state) do
@@ -1977,6 +2043,8 @@ defmodule AttestoMCP.Server do
       |> Keyword.put_new(:max_request_timeout, 120_000)
       |> Keyword.put_new(:request_state_ttl, 120_000)
       |> Keyword.put_new(:max_json_bytes, Schema.default_instance_bytes())
+      |> Keyword.put_new(:output_canonicalization, :strict)
+      |> Keyword.put_new(:tool_argument_keys, :strings)
       |> Keyword.put_new(:stream_keepalive_ms, 15_000)
       |> Keyword.put_new(:max_queue, 128)
       |> Keyword.put_new(:rate_limits, %{
@@ -2134,6 +2202,16 @@ defmodule AttestoMCP.Server do
       raise ArgumentError,
             ":max_json_bytes must be between #{Schema.min_allowed_instance_bytes()} and #{Schema.max_allowed_instance_bytes()} bytes"
     end
+
+    unless opts[:output_canonicalization] in [:strict, :json, :jason],
+      do:
+        raise(
+          ArgumentError,
+          ":output_canonicalization must be :strict, :json, or :jason"
+        )
+
+    unless opts[:tool_argument_keys] in [:strings, :atoms],
+      do: raise(ArgumentError, ":tool_argument_keys must be :strings or :atoms")
 
     Enum.each([:max_body_bytes, :max_message_bytes], fn key ->
       case Keyword.get(opts, key) do
@@ -3532,6 +3610,21 @@ defmodule AttestoMCP.Server do
   defp valid_session_store_result?(:count_active, {:ok, value}),
     do: is_integer(value) and value >= 0
 
+  defp valid_session_store_result?(
+         :list_active_keys,
+         {:ok, %{keys: keys, next_cursor: next_cursor}}
+       ) do
+    if is_list(keys) and length(keys) <= @max_active_session_page_size and
+         Enum.all?(keys, &valid_active_session_page_key?/1) do
+      ids = Enum.map(keys, &elem(&1, 1))
+
+      ids == Enum.sort(ids) and ids == Enum.uniq(ids) and
+        (is_nil(next_cursor) or (ids != [] and next_cursor == List.last(ids)))
+    else
+      false
+    end
+  end
+
   defp valid_session_store_result?(_function, {:error, _reason}), do: true
   defp valid_session_store_result?(_function, _result), do: false
 
@@ -3546,6 +3639,20 @@ defmodule AttestoMCP.Server do
     do: valid_session_key?(key)
 
   defp valid_active_session_entry?(_entry), do: false
+
+  defp valid_active_session_page_key?({namespace, id}),
+    do: valid_active_session_cursor?(namespace) and valid_active_session_cursor?(id)
+
+  defp valid_active_session_page_key?(_key), do: false
+
+  defp valid_active_session_page?(keys, next_cursor, cursor, limit) do
+    ids = Enum.map(keys, &elem(&1, 1))
+
+    length(keys) <= limit and
+      (is_nil(cursor) or Enum.all?(ids, &(&1 > cursor))) and
+      (is_nil(next_cursor) or
+         (ids != [] and next_cursor > (cursor || "") and next_cursor == List.last(ids)))
+  end
 
   defp valid_session_key?({namespace, id}) when is_binary(namespace) and is_binary(id), do: true
   defp valid_session_key?(_key), do: false
@@ -5886,15 +5993,24 @@ defmodule AttestoMCP.Server do
         {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
 
       tool when is_map(tool) ->
+        handler_context = handler_identity_context(context, :tool, tool)
+
         with :ok <-
                Schema.validate(arguments, tool.input_schema,
                  max_bytes: runtime.opts[:max_json_bytes]
                ),
+             handler_arguments <-
+               handler_tool_arguments(
+                 arguments,
+                 tool.input_schema,
+                 runtime.opts[:tool_argument_keys],
+                 tool.handler
+               ),
              result <-
                invoke(
                  tool.handler,
-                 arguments,
-                 handler_identity_context(context, :tool, tool),
+                 handler_arguments,
+                 handler_context,
                  opts
                ) do
           case result do
@@ -5936,7 +6052,7 @@ defmodule AttestoMCP.Server do
               end
 
             {:ok, output_value} ->
-              output = normalize_tool_result(output_value, runtime.opts)
+              output = normalize_tool_result(output_value, runtime.opts, handler_context)
               output = if era == @legacy, do: legacy_tool_result(output), else: output
               output = filter_tool_result_revision(output, context[:protocol_version])
 
@@ -7567,37 +7683,101 @@ defmodule AttestoMCP.Server do
   defp normalize_handler_result({:error, reason}), do: {:error, reason}
   defp normalize_handler_result(value), do: {:ok, value}
 
-  defp normalize_tool_result(%{} = result, opts) do
-    case canonical_wire_value(result, json_budget_opts(opts)) do
-      {:ok, %{"content" => _} = normalized} -> normalized
-      {:ok, normalized} -> normalize_structured_tool_value(normalized)
-      _ -> result
+  defp handler_tool_arguments(arguments, schema, :atoms, handler) do
+    _ = ensure_handler_module_loaded(handler)
+    Schema.atomize_property_keys(arguments, schema)
+  end
+
+  defp handler_tool_arguments(arguments, _schema, _mode, _handler), do: arguments
+
+  # `String.to_existing_atom/1` can only see atoms introduced by loaded BEAM
+  # modules.  An MFA or external function capture may point at a module that
+  # is available on the code path but has not been loaded yet; load it before
+  # converting schema-declared argument keys. Anonymous/local functions are
+  # deliberately left alone so this preparation has no effect on them.
+  defp ensure_handler_module_loaded({module, _function}) when is_atom(module),
+    do: ensure_module_loaded(module)
+
+  defp ensure_handler_module_loaded({module, _function, _args}) when is_atom(module),
+    do: ensure_module_loaded(module)
+
+  defp ensure_handler_module_loaded(fun) when is_function(fun) do
+    case :erlang.fun_info(fun, :type) do
+      {:type, :external} ->
+        case :erlang.fun_info(fun, :module) do
+          {:module, module} when is_atom(module) -> ensure_module_loaded(module)
+          _other -> :ok
+        end
+
+      _local_or_other ->
+        :ok
     end
   end
 
-  defp normalize_tool_result(result, _opts) when is_binary(result),
+  defp ensure_handler_module_loaded(_handler), do: :ok
+
+  defp ensure_module_loaded(module) do
+    _ = Code.ensure_loaded(module)
+    :ok
+  end
+
+  defp normalize_tool_result(result, opts, context) do
+    case Output.canonicalize_detailed(result, output_canonicalization_opts(opts)) do
+      {:ok, normalized} ->
+        normalize_canonical_tool_result(normalized)
+
+      {:error, %Output.CanonicalizationError{} = error} ->
+        report_output_canonicalization_error(error, context)
+        %{}
+    end
+  end
+
+  defp normalize_canonical_tool_result(%{"content" => _} = result), do: result
+
+  defp normalize_canonical_tool_result(result) when is_map(result),
+    do: normalize_structured_tool_value(result)
+
+  defp normalize_canonical_tool_result(result) when is_binary(result),
     do: %{"content" => [%{"type" => "text", "text" => result}], "isError" => false}
 
-  defp normalize_tool_result(result, _opts) when is_number(result) or is_boolean(result),
+  defp normalize_canonical_tool_result(result) when is_number(result) or is_boolean(result),
     do: %{
       "structuredContent" => result,
       "content" => [%{"type" => "text", "text" => to_string(result)}],
       "isError" => false
     }
 
-  defp normalize_tool_result(result, _opts) when is_nil(result),
+  defp normalize_canonical_tool_result(result) when is_nil(result),
     do: %{
       "structuredContent" => nil,
       "content" => [%{"type" => "text", "text" => ""}],
       "isError" => false
     }
 
-  defp normalize_tool_result(result, _opts),
+  defp normalize_canonical_tool_result(result),
     do: %{
       "structuredContent" => result,
       "content" => [%{"type" => "text", "text" => "structured output"}],
       "isError" => false
     }
+
+  defp report_output_canonicalization_error(error, context) do
+    Telemetry.report_exception(
+      Map.get(context, :exception_reporter),
+      :output_canonicalization,
+      :error,
+      error,
+      [],
+      %{
+        method: Telemetry.protocol_method(Map.get(context, :method, "tools/call")),
+        transport: Map.get(context, :transport, :core),
+        correlation_id: telemetry_correlation(Map.get(context, :request_id)),
+        primitive_type: Map.get(context, :primitive_type),
+        primitive_identity: Map.get(context, :primitive_identity),
+        telemetry_metadata: Map.get(context, :telemetry_metadata)
+      }
+    )
+  end
 
   defp normalize_structured_tool_value(value),
     do: %{
@@ -7828,8 +8008,21 @@ defmodule AttestoMCP.Server do
     %{"ttlMs" => cache_ttl(opts), "cacheScope" => scope}
   end
 
-  defp principal(context),
-    do: Map.get(context, :principal, Map.get(context, "principal", "anonymous"))
+  # Handlers and definition policy receive the complete loaded principal in
+  # `context.principal`. Internal ownership, isolation, cursor, and accounting
+  # operations use the separately derived stable binding when a transport
+  # supplies one.
+  defp principal(context) do
+    Map.get(
+      context,
+      :principal_binding,
+      Map.get(
+        context,
+        "principal_binding",
+        Map.get(context, :principal, Map.get(context, "principal", "anonymous"))
+      )
+    )
+  end
 
   defp tenant(context), do: Map.get(context, :tenant, Map.get(context, "tenant"))
 
@@ -7856,6 +8049,14 @@ defmodule AttestoMCP.Server do
   end
 
   defp json_budget_opts(_opts), do: [max_bytes: Schema.default_instance_bytes()]
+
+  defp output_canonicalization_opts(opts) do
+    Keyword.put(
+      json_budget_opts(opts),
+      :output_canonicalization,
+      Keyword.get(opts, :output_canonicalization, :strict)
+    )
+  end
 
   # Handler-produced protocol objects may use atom keys, but every value that
   # reaches a wire encoder must be a bounded JSON value.  Canonicalize only

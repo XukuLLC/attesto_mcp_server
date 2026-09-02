@@ -6,6 +6,30 @@ defmodule AttestoMCP.Server.Output do
   @max_output_depth 64
   @max_output_nodes 10_000
   @default_output_bytes 2_000_000
+  @max_error_path_bytes 512
+  @error_path_hash_bytes 8
+
+  defmodule CanonicalizationError do
+    @moduledoc false
+
+    defexception [:path, :reason, :value_type, :encoder, :encoder_exception]
+
+    @type t :: %__MODULE__{
+            path: String.t(),
+            reason: atom(),
+            value_type: atom() | {:struct, module()},
+            encoder: :strict | :json | :jason,
+            encoder_exception: module() | atom() | nil
+          }
+
+    @impl true
+    def message(error) do
+      location = if error.path == "", do: "the document root", else: error.path
+      encoder = if error.encoder in [:json, :jason], do: " via #{error.encoder}", else: ""
+
+      "output canonicalization rejected #{inspect(error.value_type)} at #{location}#{encoder}: #{error.reason}"
+    end
+  end
 
   @type normalization_error ::
           :not_json
@@ -19,11 +43,26 @@ defmodule AttestoMCP.Server.Output do
   @doc false
   @spec canonicalize(term(), keyword()) :: {:ok, term()} | {:error, :not_json}
   def canonicalize(value, opts \\ []) do
-    max_bytes = configured_max_bytes(opts)
+    case canonicalize_detailed(value, opts) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, %CanonicalizationError{}} -> {:error, :not_json}
+    end
+  end
 
-    case canonicalize(value, 0, @max_output_nodes, 0, max_bytes) do
-      {:ok, normalized, _left, _used} -> {:ok, normalized}
-      {:error, :not_json} = error -> error
+  @doc false
+  @spec canonicalize_detailed(term(), keyword()) ::
+          {:ok, term()} | {:error, CanonicalizationError.t()}
+  def canonicalize_detailed(value, opts \\ []) do
+    max_bytes = configured_max_bytes(opts)
+    mode = configured_canonicalization(opts)
+
+    if max_bytes > 0 and mode in [:strict, :json, :jason] do
+      case canonicalize(value, 0, @max_output_nodes, 0, max_bytes, [], mode) do
+        {:ok, normalized, _left, _used} -> {:ok, normalized}
+        {:error, %CanonicalizationError{}} = error -> error
+      end
+    else
+      canonicalization_error([], :invalid_options, value, :strict)
     end
   end
 
@@ -49,6 +88,19 @@ defmodule AttestoMCP.Server.Output do
   @spec normalize_tool_result(term(), keyword()) :: {:ok, map()} | {:error, normalization_error()}
   def normalize_tool_result(value, opts \\ []),
     do: normalize(value, &valid_tool_result?/1, :invalid_tool_result, opts)
+
+  @doc false
+  @spec normalize_tool_result_detailed(term(), keyword()) ::
+          {:ok, map()} | {:error, normalization_error() | CanonicalizationError.t()}
+  def normalize_tool_result_detailed(value, opts \\ []) do
+    with {:ok, normalized} <- canonicalize_detailed(value, opts),
+         true <- valid_tool_result?(normalized) do
+      {:ok, normalized}
+    else
+      {:error, %CanonicalizationError{}} = error -> error
+      _other -> {:error, :invalid_tool_result}
+    end
+  end
 
   @doc false
   @spec normalize_resource_result(term(), keyword()) ::
@@ -254,11 +306,35 @@ defmodule AttestoMCP.Server.Output do
     not Map.has_key?(map, key) or (is_integer(map[key]) and map[key] >= 0)
   end
 
-  defp canonicalize(_value, depth, nodes, bytes, max_bytes)
-       when depth > @max_output_depth or nodes <= 0 or bytes > max_bytes,
-       do: {:error, :not_json}
+  defp canonicalize(value, depth, _nodes, _bytes, _max_bytes, path, encoder)
+       when depth > @max_output_depth,
+       do: canonicalization_error(path, :max_depth, value, encoder)
 
-  defp canonicalize(value, depth, nodes, bytes, max_bytes) when is_map(value) do
+  defp canonicalize(value, _depth, nodes, _bytes, _max_bytes, path, encoder)
+       when nodes <= 0,
+       do: canonicalization_error(path, :max_nodes, value, encoder)
+
+  defp canonicalize(value, _depth, _nodes, bytes, max_bytes, path, encoder)
+       when bytes > max_bytes,
+       do: canonicalization_error(path, :max_bytes, value, encoder)
+
+  defp canonicalize(%_{} = value, _depth, _nodes, _bytes, _max_bytes, path, :strict),
+    do: canonicalization_error(path, :unsupported_value, value, :strict)
+
+  defp canonicalize(%_{} = value, depth, nodes, bytes, max_bytes, path, encoder)
+       when encoder in [:json, :jason] do
+    with :ok <- bounded_encoder_input(value, max_bytes - bytes),
+         {:ok, encoded} <- encode_protocol_value(value, encoder, max_bytes - bytes, path),
+         {:ok, decoded} <- decode_protocol_value(encoded, encoder, path, value) do
+      canonicalize(decoded, depth, nodes, bytes, max_bytes, path, encoder)
+    else
+      {:error, %CanonicalizationError{}} = error -> error
+      {:error, reason} -> canonicalization_error(path, reason, value, encoder)
+    end
+  end
+
+  defp canonicalize(value, depth, nodes, bytes, max_bytes, path, encoder)
+       when is_map(value) do
     with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
       Enum.reduce_while(value, {:ok, %{}, nodes - 1, bytes, true}, fn {key, nested},
                                                                       {:ok, acc, left, used,
@@ -267,90 +343,420 @@ defmodule AttestoMCP.Server.Output do
              {:ok, used} <- add_bytes(used, if(first?, do: 1, else: 2), max_bytes),
              {:ok, used} <- add_json_string_bytes(key, used, max_bytes),
              {:ok, nested, left, used} <-
-               canonicalize(nested, depth + 1, left, used, max_bytes),
+               canonicalize(nested, depth + 1, left, used, max_bytes, [key | path], encoder),
              false <- Map.has_key?(acc, key) do
           {:cont, {:ok, Map.put(acc, key, nested), left, used, false}}
         else
-          _ -> {:halt, {:error, :not_json}}
+          {:error, %CanonicalizationError{}} = error ->
+            {:halt, error}
+
+          {:error, :not_json} ->
+            {:halt, canonicalization_error(path, :invalid_map_key, key, encoder)}
+
+          true ->
+            {:halt, canonicalization_error([key | path], :duplicate_map_key, key, encoder)}
+
+          _ ->
+            {:halt, canonicalization_error([key | path], :max_bytes, nested, encoder)}
         end
       end)
       |> case do
         {:ok, normalized, left, used, _first?} -> {:ok, normalized, left, used}
-        {:error, :not_json} = error -> error
+        {:error, %CanonicalizationError{}} = error -> error
       end
     else
-      :error -> {:error, :not_json}
+      :error -> canonicalization_error(path, :max_bytes, value, encoder)
     end
   end
 
-  defp canonicalize(value, depth, nodes, bytes, max_bytes) when is_list(value) do
+  defp canonicalize(value, depth, nodes, bytes, max_bytes, path, encoder)
+       when is_list(value) do
     with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
-      canonicalize_list(value, depth, nodes - 1, bytes, [], true, max_bytes)
+      canonicalize_list(value, depth, nodes - 1, bytes, [], true, max_bytes, path, encoder, 0)
     else
-      :error -> {:error, :not_json}
+      :error -> canonicalization_error(path, :max_bytes, value, encoder)
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when is_binary(value) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes, path, encoder)
+       when is_binary(value) do
     case add_json_string_bytes(value, bytes, max_bytes) do
-      {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
-      :error -> {:error, :not_json}
+      {:ok, bytes} ->
+        {:ok, value, nodes - 1, bytes}
+
+      :error ->
+        reason = if String.valid?(value), do: :max_bytes, else: :invalid_utf8
+        canonicalization_error(path, reason, value, encoder)
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when is_integer(value) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes, path, encoder)
+       when is_integer(value) do
     scalar_bytes = byte_size(Integer.to_string(value))
 
     case add_bytes(bytes, scalar_bytes, max_bytes) do
       {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
-      :error -> {:error, :not_json}
+      :error -> canonicalization_error(path, :max_bytes, value, encoder)
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when value in [true, nil] do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes, path, encoder)
+       when value in [true, nil] do
     case add_bytes(bytes, 4, max_bytes) do
       {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
-      :error -> {:error, :not_json}
+      :error -> canonicalization_error(path, :max_bytes, value, encoder)
     end
   end
 
-  defp canonicalize(false, _depth, nodes, bytes, max_bytes) do
+  defp canonicalize(false, _depth, nodes, bytes, max_bytes, path, encoder) do
     case add_bytes(bytes, 5, max_bytes) do
       {:ok, bytes} -> {:ok, false, nodes - 1, bytes}
-      :error -> {:error, :not_json}
+      :error -> canonicalization_error(path, :max_bytes, false, encoder)
     end
   end
 
-  defp canonicalize(value, _depth, nodes, bytes, max_bytes) when is_float(value) do
+  defp canonicalize(value, _depth, nodes, bytes, max_bytes, path, encoder)
+       when is_float(value) do
     if value == value and value <= 1.7976931348623157e308 and
          value >= -1.7976931348623157e308 do
       scalar_bytes = byte_size(:erlang.float_to_binary(value, [:short]))
 
       case add_bytes(bytes, scalar_bytes, max_bytes) do
         {:ok, bytes} -> {:ok, value, nodes - 1, bytes}
-        :error -> {:error, :not_json}
+        :error -> canonicalization_error(path, :max_bytes, value, encoder)
       end
     else
-      {:error, :not_json}
+      canonicalization_error(path, :non_finite_float, value, encoder)
     end
   end
 
-  defp canonicalize(_value, _depth, _nodes, _bytes, _max_bytes), do: {:error, :not_json}
+  defp canonicalize(value, depth, nodes, bytes, max_bytes, path, encoder)
+       when is_atom(value) and encoder in [:json, :jason] do
+    canonicalize(Atom.to_string(value), depth, nodes, bytes, max_bytes, path, encoder)
+  end
 
-  defp canonicalize_list([], _depth, nodes, bytes, items, _first?, _max_bytes),
-    do: {:ok, Enum.reverse(items), nodes, bytes}
+  defp canonicalize(value, _depth, _nodes, _bytes, _max_bytes, path, encoder),
+    do: canonicalization_error(path, :unsupported_value, value, encoder)
 
-  defp canonicalize_list([item | rest], depth, nodes, bytes, items, first?, max_bytes) do
+  defp canonicalize_list(
+         [],
+         _depth,
+         nodes,
+         bytes,
+         items,
+         _first?,
+         _max_bytes,
+         _path,
+         _encoder,
+         _index
+       ),
+       do: {:ok, Enum.reverse(items), nodes, bytes}
+
+  defp canonicalize_list(
+         [item | rest],
+         depth,
+         nodes,
+         bytes,
+         items,
+         first?,
+         max_bytes,
+         path,
+         encoder,
+         index
+       ) do
     with {:ok, bytes} <- add_bytes(bytes, if(first?, do: 0, else: 1), max_bytes),
-         {:ok, item, nodes, bytes} <- canonicalize(item, depth + 1, nodes, bytes, max_bytes) do
-      canonicalize_list(rest, depth, nodes, bytes, [item | items], false, max_bytes)
+         {:ok, item, nodes, bytes} <-
+           canonicalize(item, depth + 1, nodes, bytes, max_bytes, [index | path], encoder) do
+      canonicalize_list(
+        rest,
+        depth,
+        nodes,
+        bytes,
+        [item | items],
+        false,
+        max_bytes,
+        path,
+        encoder,
+        index + 1
+      )
     else
-      _ -> {:error, :not_json}
+      {:error, %CanonicalizationError{}} = error -> error
+      _ -> canonicalization_error([index | path], :max_bytes, item, encoder)
     end
   end
 
-  defp canonicalize_list(_improper, _depth, _nodes, _bytes, _items, _first?, _max_bytes),
-    do: {:error, :not_json}
+  defp canonicalize_list(
+         improper,
+         _depth,
+         _nodes,
+         _bytes,
+         _items,
+         _first?,
+         _max_bytes,
+         path,
+         encoder,
+         index
+       ),
+       do: canonicalization_error([index | path], :improper_list, improper, encoder)
+
+  defp encode_protocol_value(value, :json, remaining, path) when remaining >= 0 do
+    try do
+      value
+      |> JSON.encode_to_iodata!()
+      |> bounded_encoded_binary(remaining, path, value, :json)
+    catch
+      kind, reason -> encoder_failure(path, value, :json, kind, reason)
+    end
+  end
+
+  defp encode_protocol_value(value, :jason, remaining, path) when remaining >= 0 do
+    try do
+      case Jason.encode_to_iodata(value) do
+        {:ok, encoded} -> bounded_encoded_binary(encoded, remaining, path, value, :jason)
+        {:error, reason} -> encoder_failure(path, value, :jason, :error, reason)
+      end
+    catch
+      kind, reason -> encoder_failure(path, value, :jason, kind, reason)
+    end
+  end
+
+  defp encode_protocol_value(value, encoder, _remaining, path),
+    do: canonicalization_error(path, :max_bytes, value, encoder)
+
+  defp bounded_encoded_binary(encoded, remaining, path, value, encoder) do
+    if IO.iodata_length(encoded) <= remaining do
+      {:ok, IO.iodata_to_binary(encoded)}
+    else
+      canonicalization_error(path, :max_bytes, value, encoder)
+    end
+  rescue
+    error -> encoder_failure(path, value, encoder, :error, error)
+  catch
+    kind, reason -> encoder_failure(path, value, encoder, kind, reason)
+  end
+
+  defp decode_protocol_value(encoded, :json, path, value) do
+    case JSON.decode(encoded) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> canonicalization_error(path, :encoder_invalid_json, value, :json)
+    end
+  rescue
+    error -> encoder_failure(path, value, :json, :error, error)
+  catch
+    kind, reason -> encoder_failure(path, value, :json, kind, reason)
+  end
+
+  defp decode_protocol_value(encoded, :jason, path, value) do
+    case Jason.decode(encoded) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> canonicalization_error(path, :encoder_invalid_json, value, :jason)
+    end
+  rescue
+    error -> encoder_failure(path, value, :jason, :error, error)
+  catch
+    kind, reason -> encoder_failure(path, value, :jason, kind, reason)
+  end
+
+  defp encoder_failure(path, value, encoder, kind, reason) do
+    exception =
+      case reason do
+        %{__struct__: module} when is_atom(module) -> module
+        _other -> kind
+      end
+
+    {:error,
+     %CanonicalizationError{
+       path: json_pointer(path),
+       reason: :encoder_failure,
+       value_type: value_type(value),
+       encoder: encoder,
+       encoder_exception: exception
+     }}
+  end
+
+  # Encoder protocols are trusted host code, but invoking one still requires a
+  # finite input walk. The encoded iodata is independently bounded above and
+  # the decoded value is sent through the normal exact JSON budget afterward.
+  defp bounded_encoder_input(value, max_bytes) do
+    case encoder_input_budget(value, 0, @max_output_nodes, 0, max_bytes) do
+      {:ok, _nodes, _bytes} -> :ok
+      :error -> {:error, :encoder_input_limit}
+    end
+  end
+
+  defp encoder_input_budget(_value, depth, nodes, bytes, max_bytes)
+       when depth > @max_output_depth or nodes <= 0 or bytes > max_bytes,
+       do: :error
+
+  defp encoder_input_budget(value, depth, nodes, bytes, max_bytes) when is_map(value) do
+    with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
+      value
+      |> :maps.to_list()
+      |> Enum.reduce_while({:ok, nodes - 1, bytes}, fn {key, nested}, {:ok, left, used} ->
+        with {:ok, left, used} <-
+               encoder_input_budget(key, depth + 1, left, used, max_bytes),
+             {:ok, left, used} <-
+               encoder_input_budget(nested, depth + 1, left, used, max_bytes) do
+          {:cont, {:ok, left, used}}
+        else
+          _ -> {:halt, :error}
+        end
+      end)
+    else
+      _ -> :error
+    end
+  end
+
+  defp encoder_input_budget(value, depth, nodes, bytes, max_bytes) when is_list(value) do
+    with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
+      encoder_input_list_budget(value, depth, nodes - 1, bytes, max_bytes)
+    else
+      _ -> :error
+    end
+  end
+
+  defp encoder_input_budget(value, depth, nodes, bytes, max_bytes) when is_tuple(value) do
+    with {:ok, bytes} <- add_bytes(bytes, 2, max_bytes) do
+      value
+      |> Tuple.to_list()
+      |> encoder_input_list_budget(depth, nodes - 1, bytes, max_bytes)
+    else
+      _ -> :error
+    end
+  end
+
+  defp encoder_input_budget(value, _depth, nodes, bytes, max_bytes) when is_binary(value) do
+    case add_bytes(bytes, byte_size(value), max_bytes) do
+      {:ok, bytes} -> {:ok, nodes - 1, bytes}
+      :error -> :error
+    end
+  end
+
+  defp encoder_input_budget(value, _depth, nodes, bytes, max_bytes) when is_atom(value) do
+    case add_bytes(bytes, byte_size(Atom.to_string(value)), max_bytes) do
+      {:ok, bytes} -> {:ok, nodes - 1, bytes}
+      :error -> :error
+    end
+  end
+
+  defp encoder_input_budget(value, _depth, nodes, bytes, max_bytes) when is_integer(value) do
+    case add_bytes(bytes, byte_size(Integer.to_string(value)), max_bytes) do
+      {:ok, bytes} -> {:ok, nodes - 1, bytes}
+      :error -> :error
+    end
+  end
+
+  defp encoder_input_budget(_value, _depth, nodes, bytes, max_bytes) do
+    case add_bytes(bytes, 1, max_bytes) do
+      {:ok, bytes} -> {:ok, nodes - 1, bytes}
+      :error -> :error
+    end
+  end
+
+  defp encoder_input_list_budget([], _depth, nodes, bytes, _max_bytes),
+    do: {:ok, nodes, bytes}
+
+  defp encoder_input_list_budget([item | rest], depth, nodes, bytes, max_bytes) do
+    with {:ok, nodes, bytes} <-
+           encoder_input_budget(item, depth + 1, nodes, bytes, max_bytes) do
+      encoder_input_list_budget(rest, depth, nodes, bytes, max_bytes)
+    else
+      _ -> :error
+    end
+  end
+
+  defp encoder_input_list_budget(_improper, _depth, _nodes, _bytes, _max_bytes), do: :error
+
+  defp canonicalization_error(path, reason, value, encoder) do
+    {:error,
+     %CanonicalizationError{
+       path: json_pointer(path),
+       reason: reason,
+       value_type: value_type(value),
+       encoder: encoder
+     }}
+  end
+
+  defp json_pointer(path) do
+    path
+    |> Enum.reverse()
+    |> Enum.map_join(fn segment -> "/" <> escape_pointer_segment(to_string(segment)) end)
+    |> bound_error_path()
+  end
+
+  defp escape_pointer_segment(segment),
+    do:
+      segment
+      |> String.replace("~", "~0")
+      |> String.replace("/", "~1")
+      |> escape_control_bytes()
+
+  # Error paths are private diagnostics, but they can contain handler- or
+  # client-derived property names. Keep them safe for logs and bounded even
+  # when a rejected value contains a very large key. The digest is over the
+  # escaped pointer, so the marker is deterministic without retaining the
+  # rejected value anywhere in the error.
+  defp bound_error_path(path) when byte_size(path) <= @max_error_path_bytes, do: path
+
+  defp bound_error_path(path) do
+    digest =
+      :crypto.hash(:sha256, path)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, @error_path_hash_bytes * 2)
+
+    marker = "[path-truncated:" <> digest <> "]"
+    prefix = utf8_prefix(path, @max_error_path_bytes - byte_size(marker))
+    prefix <> marker
+  end
+
+  defp utf8_prefix(_value, max_bytes) when max_bytes <= 0, do: ""
+  defp utf8_prefix(value, max_bytes) when byte_size(value) <= max_bytes, do: value
+
+  defp utf8_prefix(value, max_bytes),
+    do: utf8_prefix(value, max_bytes, "")
+
+  defp utf8_prefix(<<>>, _remaining, acc), do: acc
+
+  defp utf8_prefix(<<codepoint::utf8, rest::binary>>, remaining, acc) do
+    encoded = <<codepoint::utf8>>
+
+    if byte_size(encoded) <= remaining do
+      utf8_prefix(rest, remaining - byte_size(encoded), acc <> encoded)
+    else
+      acc
+    end
+  end
+
+  defp utf8_prefix(_invalid, _remaining, acc), do: acc
+
+  defp escape_control_bytes(segment) do
+    # A bounded number of binary replacement passes avoids recursive descent
+    # over a potentially very large property name.
+    Enum.reduce(0..31, segment, fn byte, acc ->
+      String.replace(acc, <<byte>>, "\\u" <> hex_byte(byte))
+    end)
+    |> String.replace(<<0x7F>>, "\\u007f")
+  end
+
+  defp hex_byte(byte) do
+    <<hex_digit(div(byte, 16)), hex_digit(rem(byte, 16))>>
+  end
+
+  defp hex_digit(digit) when digit < 10, do: ?0 + digit
+  defp hex_digit(digit), do: ?a + digit - 10
+
+  defp value_type(%module{}) when is_atom(module), do: {:struct, module}
+  defp value_type(value) when is_map(value), do: :map
+  defp value_type(value) when is_list(value), do: :list
+  defp value_type(value) when is_binary(value), do: :binary
+  defp value_type(value) when is_integer(value), do: :integer
+  defp value_type(value) when is_float(value), do: :float
+  defp value_type(value) when is_atom(value), do: :atom
+  defp value_type(value) when is_tuple(value), do: :tuple
+  defp value_type(value) when is_pid(value), do: :pid
+  defp value_type(value) when is_reference(value), do: :reference
+  defp value_type(value) when is_function(value), do: :function
+  defp value_type(_value), do: :other
 
   # Count the default Jason JSON encoding without constructing escaped output. JSON
   # leaves valid non-ASCII UTF-8 bytes unchanged, while the ASCII cases below are
@@ -399,6 +805,15 @@ defmodule AttestoMCP.Server.Output do
   end
 
   defp configured_max_bytes(_opts), do: 0
+
+  defp configured_canonicalization(opts) when is_list(opts) do
+    case Keyword.get(opts, :output_canonicalization, :strict) do
+      mode when mode in [:strict, :json, :jason] -> mode
+      _other -> :invalid
+    end
+  end
+
+  defp configured_canonicalization(_opts), do: :invalid
 
   defp canonical_key(key) when is_binary(key) do
     if String.valid?(key), do: {:ok, key}, else: {:error, :not_json}

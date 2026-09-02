@@ -18,9 +18,14 @@ defmodule AttestoMCP.Server.SessionStore do
   must return the updated record. If the supplied timestamp is older than the
   record's current `"last_seen_ms"`, adapters must retain the newer value; a
   successful touch must never rewind session activity. Adapters may implement
-  `count_active/1` to let server stats
-  count sessions without materializing bounded record pages; otherwise the
-  server falls back to `list_active/1`. For externally supplied keys,
+  `count_active/1` to let server stats count sessions without materializing
+  bounded record pages; otherwise the server falls back to `list_active/1`.
+  They may also implement `list_active_keys/4` to provide bounded, cursor-based
+  operator visibility without loading principal bindings or complete session
+  records. The returned keys must be scoped to the requested namespace, ordered
+  by session ID in ascending binary/UTF-8 order, and accompanied by the last
+  returned ID as `next_cursor` only when more keys remain. For externally
+  supplied keys,
   `load/2`, `update/3`, and `update_ttl/3` should treat malformed or
   unrepresentable keys as absent, while `delete/2` should remain idempotent;
   valid keys from another configured namespace must still return the
@@ -30,6 +35,7 @@ defmodule AttestoMCP.Server.SessionStore do
   @type store :: term()
   @type key :: {String.t(), String.t()}
   @type session_record :: map()
+  @type active_key_page :: %{keys: [key()], next_cursor: String.t() | nil}
   @type update_fun ::
           (session_record() -> {:ok, session_record()} | :delete | {:error, term()})
 
@@ -38,13 +44,15 @@ defmodule AttestoMCP.Server.SessionStore do
   @callback delete(store(), key()) :: :ok | {:error, term()}
   @callback list_active(store()) :: {:ok, [{key(), session_record()}]} | {:error, term()}
   @callback count_active(store()) :: {:ok, non_neg_integer()} | {:error, term()}
+  @callback list_active_keys(store(), String.t(), String.t() | nil, pos_integer()) ::
+              {:ok, active_key_page()} | {:error, term()}
   @callback update_ttl(store(), key(), non_neg_integer()) ::
               {:ok, session_record()} | :not_found | {:error, term()}
   @callback update(store(), key(), update_fun()) ::
               {:ok, session_record()} | :not_found | {:error, term()}
   @callback cleanup_expired(store()) :: {:ok, [key()]} | {:error, term()}
 
-  @optional_callbacks count_active: 1
+  @optional_callbacks count_active: 1, list_active_keys: 4
 
   @typedoc "A configured adapter module and its opaque store handle."
   @type adapter :: {module(), store()}

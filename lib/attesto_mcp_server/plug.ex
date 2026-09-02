@@ -18,11 +18,18 @@ defmodule AttestoMCP.Server.Plug do
   Plug path and reused for metadata and audience verification. A resolver may
   not replace the boundary's canonical assign keys, and failures fail the
   request closed.
+
+  `:principal_binding` may derive a bounded stable identity from the complete
+  authenticated principal without replacing the value handlers receive.
+  `:authorize` is a separate mount-level business-policy callback. It receives
+  the authenticated base context once per protected HTTP leg; only literal
+  `true` permits the request, and denial is a neutral 403 before POST body
+  reading or protocol dispatch.
   """
   import Plug.Conn
 
   alias AttestoMCP.Server
-  alias AttestoMCP.Server.{Error, HostCallback, JSONRPC, Schema, ScopeMap, Telemetry}
+  alias AttestoMCP.Server.{Error, HostCallback, JSONRPC, Schema, ScopeMap, Session, Telemetry}
 
   @behaviour Plug
   @modern "2026-07-28"
@@ -44,6 +51,8 @@ defmodule AttestoMCP.Server.Plug do
     scopes_key: :attesto_mcp_scopes,
     sender_key: :attesto_mcp_sender
   }
+  @principal_binding_assign_key :attesto_mcp_principal_binding
+  @handler_context_private_key :attesto_mcp_handler_context
   @visible_definition_methods [
     "tools/list",
     "resources/list",
@@ -62,6 +71,8 @@ defmodule AttestoMCP.Server.Plug do
     :default_scopes,
     :scopes_supported,
     :context_builder,
+    :principal_binding,
+    :authorize,
     :subscription_scopes,
     :max_body_bytes,
     :max_message_bytes,
@@ -102,6 +113,9 @@ defmodule AttestoMCP.Server.Plug do
           | {:scopes_supported, [String.t()]}
           | {:context_builder,
              (Plug.Conn.t() -> map()) | {module(), atom()} | {module(), atom(), [term()]}}
+          | {:principal_binding,
+             (term() -> term()) | {module(), atom()} | {module(), atom(), [term()]}}
+          | {:authorize, (map() -> boolean()) | {module(), atom()} | {module(), atom(), [term()]}}
           | {:subscription_scopes, [String.t()]}
           | {:max_body_bytes, pos_integer()}
           | {:max_message_bytes, pos_integer()}
@@ -139,6 +153,8 @@ defmodule AttestoMCP.Server.Plug do
       end
 
     path = Keyword.get(opts, :path, "/mcp")
+    validate_principal_binding!(opts)
+    validate_mount_authorizer!(opts)
     validate_plug_options!(opts)
     validate_path!(path)
     validate_initial_transport_limits!(server, opts)
@@ -299,6 +315,40 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_context_builder!(callback) do
     unless HostCallback.valid?(callback, 1),
       do: raise(ArgumentError, ":context_builder must be a supported one-argument callback")
+  end
+
+  defp validate_principal_binding!(opts) do
+    case Keyword.get_values(opts, :principal_binding) do
+      [] ->
+        :ok
+
+      [nil] ->
+        :ok
+
+      [callback] ->
+        unless HostCallback.valid?(callback, 1),
+          do: raise(ArgumentError, ":principal_binding must be a supported one-argument callback")
+
+      _multiple ->
+        raise ArgumentError, ":principal_binding must be configured at most once"
+    end
+  end
+
+  defp validate_mount_authorizer!(opts) do
+    case Keyword.get_values(opts, :authorize) do
+      [] ->
+        :ok
+
+      [nil] ->
+        :ok
+
+      [callback] ->
+        unless HostCallback.valid?(callback, 1),
+          do: raise(ArgumentError, ":authorize must be a supported one-argument callback")
+
+      _multiple ->
+        raise ArgumentError, ":authorize must be configured at most once"
+    end
   end
 
   defp initialize_authentication(opts, path) do
@@ -608,23 +658,28 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp protected(conn, state) do
-    # POST scope requirements depend on the decoded MCP method/filter, so the
-    # literal Attesto ProtectResource boundary is entered by process_post.
-    # Session legs have no MCP operation scope and use the conservative read
-    # scope as their protected-resource gate.
-    case conn.method do
-      "POST" ->
-        protocol(conn, state)
+    # Authenticate every protected leg before reading a POST body. POST scope
+    # requirements still depend on the decoded MCP method/filter and are
+    # enforced later by process_post/3 without repeating authentication.
+    case protect_resource(conn, state, :authenticate_only) do
+      {:ok, authenticated_conn} ->
+        case authorize_mount(authenticated_conn, state) do
+          {:ok, authorized_conn} ->
+            protocol(authorized_conn, state)
 
-      _ ->
-        case protect_resource(conn, state, :authenticate_only) do
-          {:ok, conn} ->
-            protocol(conn, state)
+          {:error, %Error{} = error} ->
+            error_response(authenticated_conn, nil, error, state.auth_opts)
 
-          {:halt, auth_conn} ->
-            auth_refusal(:invalid_credentials)
-            auth_refusal_response(conn, auth_conn, state)
+          :denied ->
+            mount_forbidden(authenticated_conn)
         end
+
+      {:halt, auth_conn} ->
+        auth_refusal(:invalid_credentials)
+        auth_refusal_response(conn, auth_conn, state)
+
+      {:error, %Error{} = error} ->
+        error_response(conn, nil, error, state.auth_opts)
     end
   end
 
@@ -709,16 +764,7 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp post(conn, state) do
-    # Authenticate before reading or decoding any body. The operation-specific
-    # scope is checked again after the bounded decode in process_post/3.
-    case protect_resource(conn, state, :authenticate_only) do
-      {:ok, authenticated_conn} ->
-        post_body(authenticated_conn, state)
-
-      {:halt, auth_conn} ->
-        auth_refusal(:invalid_credentials)
-        auth_refusal_response(conn, auth_conn, state)
-    end
+    post_body(conn, state)
   end
 
   defp auth_failure_response(conn, auth_conn, state) do
@@ -902,14 +948,21 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp protect_resource(conn, state, _scopes) do
-    conn = clear_auth_assigns(conn, state.auth_opts)
+    conn =
+      conn
+      |> clear_auth_assigns(state.auth_opts)
+      |> put_private(@handler_context_private_key, nil)
 
     try do
       checked = AttestoMCP.Plug.ProtectResource.authenticate(conn, state.auth_boundary)
 
-      if checked.halted,
-        do: {:halt, checked},
-        else: {:ok, canonicalize_auth_assigns(checked, state.auth_opts)}
+      if checked.halted do
+        {:halt, checked}
+      else
+        checked
+        |> canonicalize_auth_assigns(state.auth_opts)
+        |> resolve_principal_binding(state)
+      end
     rescue
       _error ->
         auth_policy_failure(:verifier, :exception)
@@ -930,7 +983,11 @@ defmodule AttestoMCP.Server.Plug do
         Keyword.get(auth_opts, option, canonical_key)
       end)
 
-    auth_keys = Enum.uniq(Map.values(@resolver_assign_keys) ++ configured_keys)
+    auth_keys =
+      Enum.uniq([
+        @principal_binding_assign_key | Map.values(@resolver_assign_keys) ++ configured_keys
+      ])
+
     %{conn | assigns: Map.drop(conn.assigns, auth_keys)}
   end
 
@@ -955,6 +1012,53 @@ defmodule AttestoMCP.Server.Plug do
           %{conn | assigns: Map.delete(conn.assigns, canonical_key)}
       end
     end)
+  end
+
+  defp resolve_principal_binding(conn, state) do
+    principal = principal(conn)
+
+    case state.opts[:principal_binding] do
+      nil ->
+        {:ok, assign(conn, @principal_binding_assign_key, principal)}
+
+      callback ->
+        try do
+          binding = HostCallback.invoke(callback, [principal])
+
+          case {binding, Session.validate_binding(binding)} do
+            {nil, _validation} ->
+              principal_binding_failure(state, :invalid_return)
+
+            {_binding, :ok} ->
+              {:ok, assign(conn, @principal_binding_assign_key, binding)}
+
+            {_binding, {:error, reason}} ->
+              principal_binding_failure(state, reason)
+          end
+        catch
+          kind, reason ->
+            Telemetry.report_exception(
+              state.opts[:exception_reporter],
+              :principal_binding,
+              kind,
+              reason,
+              __STACKTRACE__,
+              telemetry_options(state, %{transport: :http})
+            )
+
+            principal_binding_failure(state, :exception)
+        end
+    end
+  end
+
+  defp principal_binding_failure(state, outcome) do
+    Telemetry.execute(
+      [:principal_binding, :exception],
+      %{count: 1},
+      telemetry_options(state, %{transport: :http, outcome: outcome})
+    )
+
+    {:error, Error.internal(%{"reason" => "principal_binding_failure"})}
   end
 
   # The initial ProtectResource call authenticates before reading the body.
@@ -1075,7 +1179,7 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp rate_limit_transport(conn, state, category) do
-    key = {:principal, principal(conn), conn.remote_ip}
+    key = {:principal, principal_binding(conn), conn.remote_ip}
 
     try do
       case Server.allow_rate(state.server, key, category) do
@@ -1153,7 +1257,7 @@ defmodule AttestoMCP.Server.Plug do
     case legacy_session_lookup(
            state.server,
            session_id,
-           principal(conn),
+           principal_binding(conn),
            tenant(conn),
            request
          ) do
@@ -1205,7 +1309,7 @@ defmodule AttestoMCP.Server.Plug do
     case AttestoMCP.Server.deliver_client_response(
            state.server,
            session_id,
-           principal(conn),
+           principal_binding(conn),
            tenant(conn),
            request
          ) do
@@ -1623,7 +1727,12 @@ defmodule AttestoMCP.Server.Plug do
   defp legacy_get(conn, state) do
     with {:ok, session_id} <- header_session(conn),
          {:ok, session} <-
-           AttestoMCP.Server.get_session(state.server, session_id, principal(conn), tenant(conn)) do
+           AttestoMCP.Server.get_session(
+             state.server,
+             session_id,
+             principal_binding(conn),
+             tenant(conn)
+           ) do
       cond do
         not session.initialized ->
           send_resp(conn, 404, "session not found")
@@ -1644,7 +1753,7 @@ defmodule AttestoMCP.Server.Plug do
     case AttestoMCP.Server.open_legacy_stream(
            state.server,
            session_id,
-           principal(conn),
+           principal_binding(conn),
            tenant(conn),
            self(),
            legacy_stream_authorizer(conn, state)
@@ -1767,7 +1876,12 @@ defmodule AttestoMCP.Server.Plug do
   defp legacy_delete(conn, state) do
     with {:ok, session_id} <- header_session(conn),
          {:ok, session} <-
-           AttestoMCP.Server.get_session(state.server, session_id, principal(conn), tenant(conn)) do
+           AttestoMCP.Server.get_session(
+             state.server,
+             session_id,
+             principal_binding(conn),
+             tenant(conn)
+           ) do
       case validate_legacy_version(conn, session) do
         :ok ->
           case AttestoMCP.Server.delete_session(state.server, session_id) do
@@ -1786,7 +1900,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp maybe_initialize_session(conn, request, state, @legacy)
        when request.kind == :request and request.method == "initialize" do
-    case AttestoMCP.Server.new_session(state.server, principal(conn), tenant(conn)) do
+    case AttestoMCP.Server.new_session(state.server, principal_binding(conn), tenant(conn)) do
       {:ok, session} ->
         {:ok, conn, session.id}
 
@@ -1856,7 +1970,7 @@ defmodule AttestoMCP.Server.Plug do
       case legacy_session_lookup(
              state.server,
              id,
-             principal(conn),
+             principal_binding(conn),
              tenant(conn),
              request
            ) do
@@ -1868,7 +1982,7 @@ defmodule AttestoMCP.Server.Plug do
                    session,
                    state,
                    id,
-                   principal(conn),
+                   principal_binding(conn),
                    tenant(conn)
                  ) do
             :ok
@@ -2980,6 +3094,7 @@ defmodule AttestoMCP.Server.Plug do
   defp auth_context(conn) do
     Map.merge(conn.assigns[:attesto_context] || %{}, %{
       principal: principal(conn),
+      principal_binding: principal_binding(conn),
       tenant: tenant(conn),
       scopes: conn.assigns[:attesto_mcp_scopes] || [],
       attesto_mcp_claims: conn.assigns[:attesto_mcp_claims],
@@ -2991,6 +3106,16 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp handler_context(conn, state) do
+    case Map.fetch(conn.private, @handler_context_private_key) do
+      {:ok, context} when is_map(context) ->
+        {:ok, context}
+
+      _ ->
+        build_handler_context(conn, state)
+    end
+  end
+
+  defp build_handler_context(conn, state) do
     case state.opts[:context_builder] do
       nil ->
         {:ok, auth_context(conn)}
@@ -3018,6 +3143,39 @@ defmodule AttestoMCP.Server.Plug do
             context_builder_failure(state, :exception)
         end
     end
+  end
+
+  defp authorize_mount(conn, state) do
+    case state.opts[:authorize] do
+      nil ->
+        {:ok, conn}
+
+      callback ->
+        with {:ok, context} <- handler_context(conn, state) do
+          allowed? =
+            try do
+              HostCallback.invoke(callback, [context]) == true
+            catch
+              kind, _reason ->
+                auth_policy_failure(:mount_policy, kind)
+                false
+            end
+
+          if allowed? do
+            {:ok, put_private(conn, @handler_context_private_key, context)}
+          else
+            auth_refusal(:mount_policy)
+            :denied
+          end
+        end
+    end
+  end
+
+  defp mount_forbidden(conn) do
+    conn
+    |> put_resp_header("cache-control", "private, no-store")
+    |> put_resp_header("vary", "authorization")
+    |> send_resp(403, "forbidden")
   end
 
   defp context_builder_failure(state, outcome) do
@@ -3091,7 +3249,7 @@ defmodule AttestoMCP.Server.Plug do
          ^initial_actor <- token_actor(current_claims),
          current_tenant <- current_claims["tenant"],
          current_scopes when is_list(current_scopes) <- token_scopes(current_claims),
-         true <- Map.get(initial_context, :principal) == owner_value(owner, :principal),
+         true <- context_principal_binding(initial_context) == owner_value(owner, :principal),
          true <- current_tenant == owner_value(owner, :tenant),
          true <- scope_sets_grant?(required_scope_sets, current_scopes) do
       true
@@ -3173,6 +3331,18 @@ defmodule AttestoMCP.Server.Plug do
 
   defp owner_value(_owner, _key), do: nil
 
+  defp context_principal_binding(context) when is_map(context) do
+    Map.get(
+      context,
+      :principal_binding,
+      Map.get(
+        context,
+        "principal_binding",
+        Map.get(context, :principal, Map.get(context, "principal"))
+      )
+    )
+  end
+
   defp scopes_grant?([], _granted), do: true
 
   defp scopes_grant?(required, granted) when is_list(required) and is_list(granted) do
@@ -3233,6 +3403,13 @@ defmodule AttestoMCP.Server.Plug do
       claim_value(conn, :sub) || claim_value(conn, "sub") ||
       claim_value(conn, :subject) || claim_value(conn, "subject") ||
       claim_value(conn, :client_id) || claim_value(conn, "client_id")
+  end
+
+  defp principal_binding(conn) do
+    case Map.fetch(conn.assigns, @principal_binding_assign_key) do
+      {:ok, binding} -> binding
+      :error -> principal(conn)
+    end
   end
 
   @doc false

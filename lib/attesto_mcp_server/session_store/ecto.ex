@@ -153,13 +153,17 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
     and runtime queries aligned.
 
     Record-bearing listings return the first eight active rows ordered by
-    expiry and session ID; they are bounded snapshots, not a pagination API.
-    Counting uses a separate SQL aggregate. Cleanup trusts the indexed expiry
-    column, selects only keys, and claims at most 1,000 rows. The server repeats
-    cleanup periodically, so a large expired backlog is drained in bounded
-    batches without loading record payloads. Corruption is detected and
-    reported only when a direct load or record-bearing listing validates the
-    complete record against its indexed expiry mirrors.
+    expiry and session ID; they are bounded restoration snapshots rather than
+    an operator pagination API. `list_active_keys/4` separately pages up to
+    1,000 active session keys in bytewise session-ID order without selecting
+    record payloads; its PostgreSQL query uses the `C` collation so ordering
+    remains consistent with the cursor contract regardless of database locale.
+    Counting uses a separate SQL aggregate. Cleanup trusts the
+    indexed expiry column, selects only keys, and claims at most 1,000 rows.
+    The server repeats cleanup periodically, so a large expired backlog is
+    drained in bounded batches without loading record payloads. Corruption is
+    detected and reported only when a direct load or record-bearing listing
+    validates the complete record against its indexed expiry mirrors.
     """
 
     @behaviour AttestoMCP.Server.SessionStore
@@ -175,6 +179,7 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
     @max_session_timeout_ms AttestoMCP.Server.Session.max_timeout_ms()
     @max_schema_prefix_bytes 63
     @max_list 8
+    @max_key_page 1_000
     @max_cleanup 1_000
     @query_timeout_ms 1_500
     @lock_timeout_ms 1_000
@@ -363,6 +368,47 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
             count when is_integer(count) and count >= 0 -> {:ok, count}
             _other -> {:error, :store_unavailable}
           end
+        end)
+      end
+    end
+
+    @impl true
+    @doc "Returns one bounded page of active session keys without loading record payloads."
+    @spec list_active_keys(store(), String.t(), String.t() | nil, pos_integer()) ::
+            {:ok, AttestoMCP.Server.SessionStore.active_key_page()} | {:error, term()}
+    def list_active_keys(store, namespace, cursor, limit) do
+      with {:ok, %{repo: repo, namespace: expected_namespace} = config} <- checked_store(store),
+           :ok <- ensure_namespace(expected_namespace, namespace),
+           :ok <- validate_key_page(cursor, limit) do
+        safely(fn ->
+          now = System.system_time(:millisecond)
+
+          query =
+            from(s in Session,
+              where: s.namespace == ^namespace and s.expires_at_ms >= ^now,
+              order_by: [asc: fragment("? COLLATE \"C\"", s.session_id)],
+              limit: ^(limit + 1),
+              select: {s.namespace, s.session_id}
+            )
+
+          query =
+            if is_binary(cursor),
+              do:
+                from(s in query,
+                  where:
+                    fragment(
+                      "? COLLATE \"C\" > ? COLLATE \"C\"",
+                      s.session_id,
+                      ^cursor
+                    )
+                ),
+              else: query
+
+          page = repo.all(query, query_opts(config))
+          keys = Enum.take(page, limit)
+          next_cursor = if length(page) > limit, do: keys |> List.last() |> elem(1)
+
+          {:ok, %{keys: keys, next_cursor: next_cursor}}
         end)
       end
     end
@@ -589,6 +635,13 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     defp ensure_namespace(namespace, namespace), do: :ok
     defp ensure_namespace(_expected, _actual), do: {:error, :namespace_mismatch}
+
+    defp validate_key_page(cursor, limit) do
+      if (is_nil(cursor) or valid_key_part?(cursor)) and is_integer(limit) and
+           limit in 1..@max_key_page,
+         do: :ok,
+         else: {:error, :invalid_page}
+    end
 
     defp record_attrs(key, record, expected_namespace) do
       with {:ok, {namespace, session_id}} <- valid_key(key),
