@@ -182,6 +182,107 @@ defmodule AttestoMCP.Server.ContentConstructorTest do
     assert_raise ArgumentError, fn -> Result.tool([], meta: "not-an-object") end
   end
 
+  test "tool result inherits the handler context budget and canonicalization mode" do
+    value = %{state: :ready, payload: String.duplicate("x", 2_010_000)}
+
+    context = %{
+      max_json_bytes: 2_100_000,
+      output_canonicalization: :jason,
+      principal: %{id: "customer-1"}
+    }
+
+    result =
+      Result.tool_from_context(Content.text("done"), context, structured_content: value)
+
+    assert get_in(result, ["structuredContent", "state"]) == "ready"
+    assert get_in(result, ["structuredContent", "payload"]) == value.payload
+    assert IO.iodata_length(Jason.encode_to_iodata!(result)) > 2_000_000
+  end
+
+  test "context-aware tool results retain inherited settings and accept result fields" do
+    context = %{
+      max_json_bytes: 2_000_000,
+      output_canonicalization: :json
+    }
+
+    assert Result.tool_from_context(Content.text("done"), context,
+             structured_content: %{state: :ready},
+             is_error: false,
+             meta: %{"trace" => "safe"}
+           ) == %{
+             "content" => [Content.text("done")],
+             "structuredContent" => %{"state" => "ready"},
+             "isError" => false,
+             "_meta" => %{"trace" => "safe"}
+           }
+  end
+
+  test "tool result context validation fails closed before result options" do
+    minimum = Schema.min_allowed_instance_bytes()
+
+    valid_result_opts = [meta: %{"safe" => true}]
+
+    invalid_contexts = [
+      nil,
+      [],
+      %{},
+      %{max_json_bytes: minimum},
+      %{output_canonicalization: :strict},
+      %{
+        "max_json_bytes" => minimum,
+        "output_canonicalization" => "strict"
+      }
+    ]
+
+    for context <- invalid_contexts do
+      assert_raise ArgumentError, ~r/handler context must be a map containing/, fn ->
+        Result.tool_from_context([], context, valid_result_opts)
+      end
+    end
+
+    assert_raise ArgumentError, ~r/max_json_bytes must be between/, fn ->
+      Result.tool_from_context(
+        [],
+        %{max_json_bytes: minimum - 1, output_canonicalization: :strict},
+        valid_result_opts
+      )
+    end
+
+    assert_raise ArgumentError, ~r/output_canonicalization must be/, fn ->
+      Result.tool_from_context(
+        [],
+        %{max_json_bytes: minimum, output_canonicalization: :automatic},
+        valid_result_opts
+      )
+    end
+  end
+
+  test "context-aware tool results reject unknown and duplicate explicit options" do
+    minimum = Schema.min_allowed_instance_bytes()
+
+    context = %{
+      max_json_bytes: minimum,
+      output_canonicalization: :strict
+    }
+
+    assert_raise ArgumentError, ~r/invalid or duplicate MCP result option/, fn ->
+      Result.tool_from_context([], context, unknown: true)
+    end
+
+    assert_raise ArgumentError, ~r/invalid or duplicate MCP result option/, fn ->
+      Result.tool_from_context([], context,
+        meta: %{},
+        meta: %{}
+      )
+    end
+
+    for setting <- [max_json_bytes: minimum, output_canonicalization: :json] do
+      assert_raise ArgumentError, ~r/invalid or duplicate MCP result option/, fn ->
+        Result.tool_from_context([], context, [setting])
+      end
+    end
+  end
+
   test "resource result validates every entry and its complete envelope" do
     content = Content.resource_text("urn:item", "body")
 

@@ -568,11 +568,11 @@ Callback inputs are deliberately explicit and primitive-specific:
 alias AttestoMCP.Server.{Content, Result}
 
 # Tool
-handler: fn %{"left" => left, "right" => right}, _context ->
+handler: fn %{"left" => left, "right" => right}, context ->
   total = left + right
 
   {:ok,
-   Result.tool(Content.text("total: #{total}"),
+   Result.tool_from_context(Content.text("total: #{total}"), context,
      structured_content: %{"total" => total}
    )}
 end
@@ -631,11 +631,16 @@ resource links, embedded resources, and structured tool output. Malformed
 handler output is converted to a safe protocol failure or `isError` tool
 result; business and upstream failures remain ordinary MCP error results.
 `AttestoMCP.Server.Content` constructs individual content and prompt values;
-`AttestoMCP.Server.Result.tool/2` and `resource/2` construct complete results.
-They emit canonical string-key maps, apply the same bounded validation as the
-wire path, and reject unknown or duplicate options. Image, audio, and blob
-arguments must already be canonical padded Base64. Valid handwritten maps
-remain supported for extensions.
+`AttestoMCP.Server.Result.tool/1,2` and `resource/1,2` construct complete
+results. Inside an arity-2 tool handler, prefer
+`AttestoMCP.Server.Result.tool_from_context/2,3`. It inherits the supervised
+server's JSON budget and output canonicalization settings, so shared adapters
+do not have to repeat those options. Its inherited settings cannot be
+overridden through that constructor; use standalone `Result.tool/2` for a
+deliberate per-result override. The constructors emit canonical string-key
+maps, apply the same bounded validation as the wire path, and reject unknown or
+duplicate options. Image, audio, and blob arguments must already be canonical
+padded Base64. Valid handwritten maps remain supported for extensions.
 
 The server rechecks the complete result after adding `resultType`, cache
 metadata, and server identity. A constructor value at the standalone ceiling
@@ -653,15 +658,17 @@ limits. Derive encoders with an explicit `:only` field list when a struct can
 contain private application data.
 
 Raw handler values automatically use the server setting. When constructing a
-complete result inside the handler, pass the same mode explicitly (it is also
-available as `context.output_canonicalization`):
+complete tool result inside the handler, use its context so the constructor
+applies the same setting and byte budget:
 
 ```elixir
-Result.tool(Content.text("loaded"),
-  structured_content: record,
-  output_canonicalization: context.output_canonicalization
+Result.tool_from_context(Content.text("loaded"), context,
+  structured_content: record
 )
 ```
+
+`Result.tool/1,2` retain their standalone `:strict` and 2,000,000-byte defaults
+for code that has no handler context.
 
 If canonicalization fails, the client still receives only a generic failure. A
 configured trusted `exception_reporter` additionally receives a bounded,
@@ -683,9 +690,13 @@ schema = %{
   }
 }
 
-handler: fn arguments, _context ->
+handler: fn arguments, context ->
   with {:ok, arguments} <- AttestoMCP.Server.Schema.apply_property_defaults(arguments, schema) do
-    {:ok, AttestoMCP.Server.Result.tool(AttestoMCP.Server.Content.text(arguments["format"]))}
+    {:ok,
+     AttestoMCP.Server.Result.tool_from_context(
+       AttestoMCP.Server.Content.text(arguments["format"]),
+       context
+     )}
   end
 end
 ```
@@ -914,6 +925,12 @@ limits above that budget fail before body reading. Configure all three together
 when opting into a larger payload. The stdio adapter defaults to the smaller of
 64,000 bytes and the supervised server's JSON budget unless
 `max_message_bytes` is supplied explicitly.
+
+`Result.tool_from_context/2,3` inherits the selected budget for the complete
+tool-result envelope. Individual `Content` constructors validate before that
+envelope is built, and `Result.resource/1,2` remains a standalone constructor;
+pass `max_json_bytes: selected_budget` to either when the value itself exceeds
+the secure 2,000,000-byte constructor default.
 
 For hosts that issue definition scopes instead of generic method grants, add an
 explicit Plug-only `scope_policy`:

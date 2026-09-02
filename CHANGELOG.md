@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0 - 2026-09-01
+
+- Add `AttestoMCP.Server.Result.tool_from_context/2,3` so tool handlers and
+  shared adapters inherit the supervised server's JSON budget and output
+  canonicalization settings without repeating or overriding those options.
+  The standalone result constructors and their secure defaults remain
+  unchanged.
+
 ## 1.0.0 - 2026-09-01
 
 - Establish the stable 1.0 host API while preserving the strict output and

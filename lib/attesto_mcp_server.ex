@@ -31,7 +31,9 @@ defmodule AttestoMCP.Server.API do
   `:attesto_mcp_scopes`, `:attesto_mcp_sender`, `:attesto_mcp_principal`, and
   `:attesto_context`) when the Plug boundary is used. The context also exposes
   the supervised server's `:max_json_bytes`, `:output_canonicalization`, and
-  `:tool_argument_keys` values for matching public result options. A successful callback
+  `:tool_argument_keys` values. `AttestoMCP.Server.Result.tool_from_context/2,3`
+  consumes the first two automatically; low-level constructors can still use
+  them as explicit options. A successful callback
   returns `{:ok, result}`, an application failure returns `{:error, reason}`,
   and an interactive callback returns `{:input_required, request_map}` with
   typed MRTR request entries. An HTTP `context_builder` contributes only the

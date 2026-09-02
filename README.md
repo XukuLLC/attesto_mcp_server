@@ -168,6 +168,29 @@ resources, prompts, images, audio, and canonical Base64 blobs. They catch
 malformed output before it reaches a client; raw maps remain supported for
 extensions. See [registration and handler results](docs/usage.md#registration).
 
+Inside an arity-2 tool handler, prefer the context-aware constructor. It uses
+the supervised server's JSON budget and output canonicalization settings,
+which also makes it the safe default for shared adapters:
+
+```elixir
+alias AttestoMCP.Server.{Content, Result}
+
+handler: fn _arguments, context ->
+  {:ok,
+   Result.tool_from_context(Content.text("loaded"), context,
+     structured_content: %{"status" => "ready"}
+   )}
+end
+```
+
+`Result.tool/1,2` remain available when no handler context exists.
+Use standalone `Result.tool/2` for an intentional per-result budget or
+canonicalization override; the context-aware constructor keeps its inherited
+settings.
+`Result.resource/1,2` and individual `Content` constructors continue to accept
+an explicit `max_json_bytes` option when they must construct a value above the
+secure 2,000,000-byte standalone default.
+
 Structured output remains strict by default. A server may explicitly select
 `output_canonicalization: :json` or `:jason` to stringify atom values and pass
 structs through the corresponding encoder protocol under the normal bounded
@@ -346,10 +369,12 @@ Bandit is the documented development/test adapter. The loopback example returns
 Secure defaults bound JSON values, outputs, queues, concurrency, and execution
 time. Applications with larger tool inputs or Base64 resources can raise the
 finite `max_json_bytes` budget together with the relevant `max_body_bytes` and
-`max_message_bytes` transport ceilings. Result constructors may also need an
-explicit higher limit for oversized content. Atomic catalogs, the bundled
-PostgreSQL session store, custom session-store adapters, clustered routing,
-cache policy, telemetry, and
+`max_message_bytes` transport ceilings. `Result.tool_from_context/2,3`
+inherits that budget for the complete tool-result envelope. Individual
+`Content` values and `Result.resource/1,2` still need an explicit higher limit
+when they exceed the standalone constructor default before wrapping. Atomic
+catalogs, the bundled PostgreSQL session store, custom session-store adapters,
+clustered routing, cache policy, telemetry, and
 exception reporting are documented in the [usage guide](docs/usage.md).
 
 Operator code can page active session-bound client IDs with
@@ -358,7 +383,7 @@ principals, or tenants. The session-free `2026-07-28` transport has no server
 session IDs to list.
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 1.0.0 in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 1.1.0 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

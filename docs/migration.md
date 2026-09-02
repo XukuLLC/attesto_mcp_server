@@ -114,19 +114,22 @@ Anubis tool components return a response together with a frame. An AttestoMCP
 tool handler returns `{:ok, result}` or `{:error, reason}` and does not return a
 mutable frame. Move durable mutations into application-owned storage and build
 the MCP result with `AttestoMCP.Server.Content` and
-`AttestoMCP.Server.Result`:
+`AttestoMCP.Server.Result`. In the table, `context` is the AttestoMCP handler's
+second callback argument:
 
 | Anubis tool response | AttestoMCP handler return |
 | --- | --- |
-| `Response.text(Response.tool(), text)` | `{:ok, Result.tool(Content.text(text))}` |
-| `Response.structured(Response.tool(), value)` | `{:ok, Result.tool(Content.text("structured response"), structured_content: value, output_canonicalization: :jason)}` |
-| `Response.json(Response.tool(), value)` | `{:ok, Result.tool(Content.text(Jason.encode!(value)))}` |
+| `Response.text(Response.tool(), text)` | `{:ok, Result.tool_from_context(Content.text(text), context)}` |
+| `Response.structured(Response.tool(), value)` | `{:ok, Result.tool_from_context(Content.text("structured response"), context, structured_content: value)}` |
+| `Response.json(Response.tool(), value)` | `{:ok, Result.tool_from_context(Content.text(Jason.encode!(value)), context)}` |
 | `Response.error(Response.tool(), message)` | `{:error, Result.error(message, "domain_code")}` |
 
-The `:jason` option in the structured-response row covers the atom-keyed maps
-and Jason-encoded structs common in existing components. If `value` is already
-JSON-native, omit that option. Review every derived encoder's field list before
-relying on it so private struct fields cannot become MCP output.
+Set the server's `output_canonicalization: :jason` option when the migrated
+structured values include the atom values or Jason-encoded structs common in
+existing components. `tool_from_context/2,3` inherits that setting and the
+server's JSON budget. If `value` is already JSON-native, retain the strict
+default. Review every derived encoder's field list before relying on it so
+private struct fields cannot become MCP output.
 
 `Result.error/2` is for bounded business text and an optional stable code that
 are deliberately safe to disclose. Unexpected failures should remain ordinary
@@ -150,7 +153,7 @@ alias AttestoMCP.Server.{Content, Result}
          value = %{"id" => item.id, "name" => item.name}
 
          {:ok,
-          Result.tool(Content.text(item.name),
+          Result.tool_from_context(Content.text(item.name), context,
             structured_content: value
           )}
 
@@ -226,14 +229,14 @@ conversion never creates atoms from request data.
 The default `output_canonicalization: :strict` accepts JSON-native values. It
 does not implicitly encode non-boolean atom values or structs. Convert enums,
 dates, times, decimals, and application structs to explicit JSON values before
-passing them to `Result.tool/2`, or deliberately select
+passing them to `Result.tool/1,2`, or deliberately select
 `output_canonicalization: :json` for the standard `JSON.Encoder` protocol or
 `:jason` for `Jason.Encoder`. Both opt-in modes stringify non-boolean atoms and
 still apply the server's output budgets, output schema, and final wire
-validation. Raw handler returns inherit the server mode. A handler that calls
-`Result.tool/2` passes the same `output_canonicalization:` value explicitly,
-normally from `context.output_canonicalization`, because the constructor
-validates before it returns to the server.
+validation. Raw handler returns inherit the server mode. A handler constructing
+a complete tool result should use `Result.tool_from_context/2,3`; it carries
+the server mode and JSON budget into the constructor before validation. Keep
+`Result.tool/1,2` for standalone construction when no handler context exists.
 
 After porting each component, use `AttestoMCP.Server.Test.call_tool/4` with a
 representative principal and scopes. It exercises the registered input schema,
@@ -329,6 +332,12 @@ prompt_messages = [
   Content.prompt_message(:user, Content.text("Review item 7"))
 ]
 ```
+
+The standalone values above use the secure constructor defaults. Inside an
+arity-2 tool handler or shared adapter, prefer `Result.tool_from_context/2,3`
+so the complete tool result inherits the supervised server's selected output
+setting and JSON budget. Use standalone `Result.tool/2` when a deliberate
+per-result override is required.
 
 `Content` also constructs image, audio, resource-link, embedded-resource, and
 blob content. Constructors emit canonical string-key maps and reject invalid,
@@ -444,8 +453,11 @@ The nominal HTTP defaults remain 2,000,000 body bytes and 1,000,000 message
 bytes; omitted values are automatically capped by a smaller selected JSON
 budget. Explicit limits above that budget fail during initialization. When
 opting into a larger payload, configure the server budget and the relevant
-transport limits together. Content and result constructors building a value
-above the default also accept `max_json_bytes: selected_budget`.
+transport limits together. `Result.tool_from_context/2,3` inherits the budget
+for the complete tool-result envelope. Individual `Content` constructors and
+`Result.resource/1,2` still validate before or independently of that helper;
+pass `max_json_bytes: selected_budget` when one of those values exceeds the
+standalone default.
 
 ## 7. Choose one metadata owner
 
@@ -505,7 +517,7 @@ one.
 Each resource-content entry has a safe `uri` and exactly one of `text` or
 canonical padded-Base64 `blob`; `mimeType` is optional. Prefer
 `Content.resource_text/3` and `Content.resource_blob/3`, then wrap the entry in
-`Result.resource/2` or `Content.embedded_resource/2` as appropriate. Keep
+`Result.resource/1,2` or `Content.embedded_resource/1,2` as appropriate. Keep
 credentials, proofs, private diagnostics, and secrets out of content,
 annotations, `_meta`, logs, and Telemetry.
 

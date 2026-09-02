@@ -132,6 +132,44 @@ defmodule AttestoMCP.Server.OutputArgumentErgonomicsTest do
     assert get_in(response, ["result", "isError"]) == false
   end
 
+  test "handler result constructor inherits the supervised server settings" do
+    parent = self()
+    payload = String.duplicate("x", 2_010_000)
+
+    server =
+      start_server(
+        max_json_bytes: 2_100_000,
+        output_canonicalization: :jason,
+        registrations: [
+          {:tool, "context-result",
+           %{
+             input_schema: %{"type" => "object"},
+             handler: fn _arguments, context ->
+               send(parent, {
+                 :result_context,
+                 Map.take(context, [:max_json_bytes, :output_canonicalization])
+               })
+
+               {:ok,
+                Result.tool_from_context(Content.text("done"), context,
+                  structured_content: %{state: :ready, payload: payload},
+                  is_error: false
+                )}
+             end
+           }}
+        ]
+      )
+
+    response = call_tool(server, 8, "context-result", %{})
+
+    assert get_in(response, ["result", "structuredContent", "state"]) == "ready"
+    assert get_in(response, ["result", "structuredContent", "payload"]) == payload
+    assert get_in(response, ["result", "isError"]) == false
+
+    assert_receive {:result_context,
+                    %{max_json_bytes: 2_100_000, output_canonicalization: :jason}}
+  end
+
   test "the trusted reporter receives the first rejected path without changing the client error" do
     parent = self()
 

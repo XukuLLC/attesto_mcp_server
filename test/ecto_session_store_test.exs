@@ -1092,15 +1092,7 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
     {:ok, second} = Server.start_link(opts)
     assert Server.stats(second).sessions == 1
 
-    on_exit(fn ->
-      if Process.alive?(second) do
-        try do
-          GenServer.stop(second)
-        catch
-          :exit, _ -> :ok
-        end
-      end
-    end)
+    on_exit(fn -> stop_server(second) end)
 
     assert {:ok, restored} =
              Server.get_session(second, session.id, %{"sub" => "alice"}, "tenant-a")
@@ -1122,9 +1114,7 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
   test "Server.active_session_ids pages keys from an Ecto-backed store", %{store: store} do
     {:ok, server} = Server.start_link(session_store: {Store, store}, session_namespace: "default")
 
-    on_exit(fn ->
-      if Process.alive?(server), do: GenServer.stop(server)
-    end)
+    on_exit(fn -> stop_server(server) end)
 
     assert {:ok, session} = Server.new_session(server, "operator-principal")
 
@@ -1517,6 +1507,14 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
   end
 
   defp send_all(tasks, message), do: Enum.each(tasks, &send(&1.pid, message))
+
+  defp stop_server(server) do
+    try do
+      GenServer.stop(server)
+    catch
+      :exit, {:noproc, _call} -> :ok
+    end
+  end
 
   defp stop_repo(repo) do
     case Process.whereis(repo) do
