@@ -11,6 +11,23 @@ defmodule AttestoMCP.Server.Telemetry do
   the bundled Ecto adapter. Its failure-specific metadata contains only the
   bounded operation atom in `:source` and a neutral `:unavailable` or
   `:corrupt_discarded` outcome.
+
+  The `[:attesto_mcp_server, :client_ip, :exception]` event reports an invalid
+  return or caught failure from an explicitly configured client-address
+  callback. It contains only the HTTP transport and a neutral outcome; callback
+  values and failure details are not attached.
+
+  The `[:attesto_mcp_server, :session_store, :cleanup]` heartbeat emits a
+  `:start` event for every periodic expiry pass and a `:stop` event after the
+  cleanup operation. The stop measurements contain a non-negative elapsed
+  `:duration` for the store call, bounded return normalization, failure
+  reporting, and namespace filtering, plus the bounded `:count` of sessions
+  reaped for this server namespace. Start-event dispatch, local stream closing,
+  and clustered close broadcast are excluded. Stop metadata reports `:success`
+  or `:unavailable`. The cleanup implementation never adds session keys,
+  records, principals, tenants, or adapter error details; explicitly configured
+  trusted `telemetry_metadata` remains attached. A failed pass still emits the
+  existing `session_store/failure` event.
   """
 
   @prefix [:attesto_mcp_server]

@@ -287,7 +287,7 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
     assert :ok = Subscriptions.close(subscriptions, subscription_id, self())
   end
 
-  test "a registry crash cannot recycle a revision and resurrect an invalidated cursor" do
+  test "a registry crash cannot resurrect a cursor invalidated by changed catalog content" do
     handler = fn _arguments, _context -> {:ok, "ok"} end
 
     original = [
@@ -299,7 +299,7 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
       Server.start_link(
         registrations: original,
         page_size: 1,
-        cursor_secret: "recovery-revision-cursor"
+        cursor_secret: "recovery-catalog-cursor"
       )
 
     assert Registry.revision(registry(server)) == 2

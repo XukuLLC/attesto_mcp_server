@@ -21,8 +21,11 @@ generic resource scope and any matched definition scopes. Legacy
 subscription-notification delivery reauthorizes catalog events with their
 generic category scope; resource-update notifications also require any matched
 definition scopes. If a Phoenix endpoint parses bodies before the router,
-install the exact-path parser bypass or enforce an equally strict parser limit
-before relying on the Plug's authenticate-before-decode guarantee.
+install the configured decoded path-prefix parser bypass (including every
+deeper child path) or enforce an equally strict parser limit before relying on
+the Plug's authenticate-before-decode guarantee. This bypass is a body-parsing
+boundary, not proof of router ownership; ordinary routes below the prefix also
+bypass parsing and must not overlap it.
 Definitions with empty required scopes are authenticated-only only under
 explicit definition policy; defaults and empty map entries retain generic scope
 checks. Report security issues privately to the maintainers.
@@ -82,11 +85,20 @@ carry authority or bypass authorization checks.
 External legacy-session adapters are part of the security boundary. They must
 implement atomic update and expiry callbacks, preserve unknown record fields,
 keep `{namespace, session_id}` as data rather than atoms, and enforce access
-controls appropriate to their backend. Cluster mode requires a shared adapter
-and explicit namespace. In 0.12.0, peer catalog drift cannot reduce
-publisher-required scopes; drain mixed old/new clusters rather than rely on
-them for resource notifications. Stream processes are node-local and must
-reconnect after failover; never treat a session identifier as authorization.
+controls appropriate to their backend. Cluster mode requires a shared adapter,
+explicit namespace, and the same explicit shared cursor secret (at least 16
+bytes) on every node; startup refuses a missing or short secret. A
+load-balanced multi-node deployment serving stateless `2026-07-28` requests
+also needs the same explicit cursor secret on every node when cursors may cross
+nodes, even with `session_clustered` false. Cursors bind to final visible
+catalog content rather than node-local mutation history; peers may reach
+identical content through different registration histories when the content and
+pagination context agree. Deterministic continuation assumes all nodes use the
+same OTP major, and a mixed-major rolling upgrade may invalidate in-flight
+cursors. Since 0.12.0, peer catalog drift cannot reduce publisher-required
+scopes; drain mixed old/new clusters rather than rely on them for resource
+notifications. Stream processes are node-local and must reconnect after
+failover; never treat a session identifier as authorization.
 
 `replace_catalog/2` atomically swaps the in-memory definition catalog, but the
 host remains responsible for the trusted source of those definitions. Validate

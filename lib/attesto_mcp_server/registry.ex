@@ -125,7 +125,7 @@ defmodule AttestoMCP.Server.Registry do
   @spec snapshot(pid()) :: %{primitive() => %{optional(term()) => definition()}}
   def snapshot(pid), do: GenServer.call(pid, :snapshot)
 
-  @doc "Returns the monotonic catalog revision used to bind cursors."
+  @doc "Returns the monotonic catalog revision used for invalidation and recovery."
   @spec revision(pid()) :: non_neg_integer()
   def revision(pid), do: GenServer.call(pid, :revision)
 

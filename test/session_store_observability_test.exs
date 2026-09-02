@@ -3,6 +3,7 @@ defmodule AttestoMCP.Server.SessionStoreObservabilityTest do
 
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Session
+  alias AttestoMCP.Server.SessionStore.ETS
 
   defmodule FailingStore do
     @moduledoc false
@@ -32,6 +33,14 @@ defmodule AttestoMCP.Server.SessionStoreObservabilityTest do
       do: {:error, {:server_session_update, make_ref(), :not_found}}
 
     def update(_store, _key, _fun), do: raise("private update failure")
+
+    def cleanup_expired(:oversized_cleanup) do
+      {:ok, for(index <- 1..1_001, do: {"namespace", "session-#{index}"})}
+    end
+
+    def cleanup_expired(:improper_cleanup),
+      do: {:ok, [{"namespace", "session"} | :private_improper_tail]}
+
     def cleanup_expired(_store), do: {:error, "private cleanup failure"}
   end
 
@@ -239,11 +248,170 @@ defmodule AttestoMCP.Server.SessionStoreObservabilityTest do
     end
   end
 
+  test "periodic cleanup emits a safe heartbeat for a zero-row pass" do
+    events = [
+      [:attesto_mcp_server, :session_store, :cleanup, :start],
+      [:attesto_mcp_server, :session_store, :cleanup, :stop]
+    ]
+
+    handler_id = {__MODULE__, :cleanup_empty, make_ref()}
+    :ok = :telemetry.attach_many(handler_id, events, &__MODULE__.cleanup_handler/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    {:ok, store} = ETS.start_link([])
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {ETS, store},
+        session_namespace: "cleanup-empty-#{System.unique_integer([:positive])}",
+        telemetry_metadata: %{deployment: "west"}
+      )
+
+    send(server, :cleanup_sessions)
+
+    assert_receive {:cleanup_heartbeat, [:attesto_mcp_server, :session_store, :cleanup, :start],
+                    %{system_time: system_time}, start_metadata},
+                   1_000
+
+    assert is_integer(system_time)
+    assert start_metadata == %{deployment: "west", server: nil}
+
+    assert_receive {:cleanup_heartbeat, [:attesto_mcp_server, :session_store, :cleanup, :stop],
+                    %{duration: duration, count: 0}, %{deployment: "west", outcome: :success}},
+                   1_000
+
+    assert is_integer(duration) and duration >= 0
+  end
+
+  test "periodic cleanup heartbeat reports the total reaped count" do
+    namespace = "cleanup-nonempty-#{System.unique_integer([:positive])}"
+    {:ok, store} = ETS.start_link([])
+    {:ok, server} = Server.start_link(session_store: {ETS, store}, session_namespace: namespace)
+    assert {:ok, session} = Server.new_session(server, "cleanup", "tenant")
+    assert {:ok, record} = Session.to_record(session)
+
+    assert :ok =
+             ETS.save(store, {namespace, session.id}, %{
+               record
+               | "created_at_ms" => 0,
+                 "last_seen_ms" => 0
+             })
+
+    events = [
+      [:attesto_mcp_server, :session_store, :cleanup, :start],
+      [:attesto_mcp_server, :session_store, :cleanup, :stop]
+    ]
+
+    handler_id = {__MODULE__, :cleanup_nonempty, make_ref()}
+    :ok = :telemetry.attach_many(handler_id, events, &__MODULE__.cleanup_handler/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    send(server, :cleanup_sessions)
+
+    assert_receive {:cleanup_heartbeat, [:attesto_mcp_server, :session_store, :cleanup, :start],
+                    %{system_time: _system_time}, %{}},
+                   1_000
+
+    assert_receive {:cleanup_heartbeat, [:attesto_mcp_server, :session_store, :cleanup, :stop],
+                    %{duration: duration, count: 1}, %{outcome: :success}},
+                   1_000
+
+    assert is_integer(duration) and duration >= 0
+  end
+
+  test "unavailable cleanup emits failure and an unavailable heartbeat without private data" do
+    cleanup_start = [:attesto_mcp_server, :session_store, :cleanup, :start]
+    cleanup_stop = [:attesto_mcp_server, :session_store, :cleanup, :stop]
+    failure = [:attesto_mcp_server, :session_store, :failure]
+    cleanup_handler_id = {__MODULE__, :cleanup_unavailable, make_ref()}
+    failure_handler_id = {__MODULE__, :cleanup_failure, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        cleanup_handler_id,
+        [cleanup_start, cleanup_stop],
+        &__MODULE__.cleanup_handler/4,
+        self()
+      )
+
+    :ok = :telemetry.attach(failure_handler_id, failure, &__MODULE__.telemetry_handler/4, self())
+
+    on_exit(fn ->
+      :telemetry.detach(cleanup_handler_id)
+      :telemetry.detach(failure_handler_id)
+    end)
+
+    {:ok, server} =
+      Server.start_link(
+        session_store: {FailingStore, :load_failure},
+        session_namespace: "cleanup-unavailable-#{System.unique_integer([:positive])}"
+      )
+
+    send(server, :cleanup_sessions)
+
+    assert_receive {:cleanup_heartbeat, ^cleanup_start, %{system_time: _}, %{}}, 1_000
+    assert_receive {:session_store_failure, ^failure, %{count: 1}, failure_metadata}, 1_000
+    assert %{source: :cleanup_expired, outcome: :unavailable} = failure_metadata
+    refute inspect(failure_metadata) =~ "private"
+
+    assert_receive {:cleanup_heartbeat, ^cleanup_stop, %{duration: duration, count: 0},
+                    %{outcome: :unavailable}},
+                   1_000
+
+    assert is_integer(duration) and duration >= 0
+  end
+
+  test "oversized and malformed custom cleanup batches fail closed" do
+    cleanup_stop = [:attesto_mcp_server, :session_store, :cleanup, :stop]
+    failure = [:attesto_mcp_server, :session_store, :failure]
+    cleanup_handler_id = {__MODULE__, :cleanup_oversized, make_ref()}
+    failure_handler_id = {__MODULE__, :cleanup_oversized_failure, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        cleanup_handler_id,
+        cleanup_stop,
+        &__MODULE__.cleanup_handler/4,
+        self()
+      )
+
+    :ok = :telemetry.attach(failure_handler_id, failure, &__MODULE__.telemetry_handler/4, self())
+
+    on_exit(fn ->
+      :telemetry.detach(cleanup_handler_id)
+      :telemetry.detach(failure_handler_id)
+    end)
+
+    for handle <- [:oversized_cleanup, :improper_cleanup] do
+      {:ok, server} =
+        Server.start_link(
+          session_store: {FailingStore, handle},
+          session_namespace: "namespace"
+        )
+
+      send(server, :cleanup_sessions)
+
+      assert_receive {:session_store_failure, ^failure, %{count: 1},
+                      %{source: :cleanup_expired, outcome: :unavailable}},
+                     1_000
+
+      assert_receive {:cleanup_heartbeat, ^cleanup_stop, %{duration: duration, count: 0},
+                      %{outcome: :unavailable}},
+                     1_000
+
+      assert is_integer(duration) and duration >= 0
+    end
+  end
+
   def telemetry_handler(event, measurements, metadata, owner) do
     send(owner, {:session_store_failure, event, measurements, metadata})
   end
 
   def stdio_handler(event, measurements, metadata, owner) do
     send(owner, {:stdio_stop, event, measurements, metadata})
+  end
+
+  def cleanup_handler(event, measurements, metadata, owner) do
+    send(owner, {:cleanup_heartbeat, event, measurements, metadata})
   end
 end

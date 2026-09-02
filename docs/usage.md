@@ -253,10 +253,14 @@ Keep both forwards outside browser-session and CSRF pipelines. The metadata
 route is intentionally public; the MCP route authenticates every protected
 leg. The installer inspects the selected Phoenix endpoint. For a direct,
 standard `Plug.Parsers` declaration it wraps that parser with
-`AttestoMCP.Server.PhoenixParser`, which bypasses the MCP route and its
-route-equivalent trailing slashes while leaving metadata, browser, JSON, and
-form routes unchanged. Custom or ambiguous parser setups make the installer
-stop before editing any project file and report the required remediation. Fix
+`AttestoMCP.Server.PhoenixParser`, which bypasses body parsing for the configured
+decoded path prefix, its route-equivalent trailing and repeated slashes, and
+every deeper child path, while leaving metadata, browser, JSON, and form routes
+outside that prefix unchanged. This is a path-prefix safety boundary, not
+proof of router ownership: ordinary routes below the configured prefix also
+bypass body parsing, so do not overlap the prefix with unrelated routes.
+Custom or ambiguous parser setups make the installer stop before editing any
+project file and report the required remediation. Fix
 the ambiguity or wire the parser and routes manually before deployment, then
 rerun the installer if appropriate. When the endpoint cannot be inferred from
 the selected router, or its source cannot be found, the installer warns and
@@ -264,11 +268,13 @@ continues without an endpoint edit; the host must then verify the parser
 pipeline manually. A statically proven simple endpoint with no direct parser
 also produces an informational warning and continues, leaving bounded body
 decoding to the MCP Plug; that case needs no immediate endpoint edit. Any
-host-owned parser added or discovered later must skip the exact MCP path and
-use a body-length limit at least as strict as the MCP Plug's `:max_body_bytes`,
-because host parsing otherwise occurs before MCP authentication. Run the task
-again safely after an interrupted install: generated modules, configuration,
-supervision, routes, and tests are idempotent. Use Igniter's
+host-owned parser added or discovered later must skip the configured decoded
+MCP path prefix and every deeper child path, and use a body-length limit at
+least as strict as the MCP Plug's `:max_body_bytes`, because host parsing
+otherwise occurs before MCP authentication. Do not place unrelated routes below
+that prefix. Run the task again safely after an interrupted install:
+generated modules, configuration, supervision, routes, and tests are
+idempotent. Use Igniter's
 global `--dry-run` option to inspect the edits first. If the router cannot be
 selected uniquely, pass `--router MyAppWeb.Router`; the task refuses ambiguous
 router selection and prints an exact manual snippet if no router exists.
@@ -339,9 +345,11 @@ end
 
 Replace the endpoint's ordinary `Plug.Parsers` declaration with the wrapper,
 retaining the host's parser options. One wrapper accepts up to 32 unique static
-MCP paths. It bypasses only an exact decoded path and its trailing-slash
-equivalents; parent paths, segment prefixes, and child paths still run the host
-parser:
+MCP paths. It matches each decoded configured path as a segment prefix and
+bypasses the prefix, trailing/repeated-slash equivalents, and every deeper child
+path; parent paths and sibling segment prefixes still run the host parser.
+Because this is a prefix-based body-parsing boundary, ordinary routes below a
+configured prefix also bypass parsing and must not overlap it:
 
 ```elixir
 plug AttestoMCP.Server.PhoenixParser,
@@ -544,7 +552,7 @@ outside the bounded local 2020-12/draft-07 subset. Anchors, local dynamic
 references, tuple items, unevaluated items, and content annotations are
 validated without network fetches. Registry output is stable
 by identity and pagination cursors are opaque, signed, expiring, and bound to
-the principal, tenant, scopes, visible catalog revision, page size, and
+the principal, tenant, scopes, visible catalog content, page size, and
 negotiated era.
 
 Resource templates use bounded reverse matching for an RFC 6570 subset. A
@@ -982,7 +990,16 @@ the session idle deadline.
 600/60s, 300/60s, 100/60s, and 120/60s respectively. A category can be set to
 `false` only when the host explicitly accepts unlimited traffic for that
 category; malformed settings fail closed. Rejections use HTTP 429 and
-JSON-RPC `-32029`, and are isolated by principal plus remote address.
+JSON-RPC `-32029`, and are isolated by principal plus client address. If
+`client_ip` is omitted, the Plug uses `conn.remote_ip` verbatim, including a
+non-IP local-peer term. An explicit `client_ip` callback, configured as a
+one-argument function or MFA, must return a trusted canonical IPv4 or IPv6
+tuple derived from the proxy-aware connection. The callback is used for both
+authenticated and failed-authentication buckets; invalid returns or callback
+failures fail closed and emit neutral `client_ip/exception` telemetry. Do not
+trust a raw client-supplied
+`X-Forwarded-For` entry; use only connection state normalized by a correctly
+configured trusted-proxy component.
 
 ### Atomic startup, telemetry, and durable sessions
 
@@ -1153,10 +1170,22 @@ process is lost; adapters with non-process handles fail closed when an operation
 cannot reach their backend.
 
 For multiple Erlang nodes, add `session_clustered: true` with a genuinely
-shared adapter and explicit namespace. Requests on any peer can load the same
-session, publishes fan out asynchronously once to each live peer, and explicit
-session deletion or periodic expired-row cleanup closes matching local streams
-on every reachable peer.
+shared adapter, explicit namespace, and one shared `cursor_secret` on every
+server. The cursor secret must be a binary of at least 16 bytes; 32 bytes is
+recommended. Startup rejects clustered session servers that omit it or use a
+short value instead of silently generating a per-process secret. A
+load-balanced multi-node deployment serving the session-free `2026-07-28`
+transport must also configure the same explicit cursor secret on every node,
+even when `session_clustered` is false, if cursors may cross nodes. Cursors bind
+to final visible catalog content rather than node-local mutation history, so
+peers may reach identical content through different registration histories when
+the catalog and pagination context agree. Deterministic continuation assumes
+all nodes use the same OTP major. Mixed-major rolling upgrades may invalidate
+in-flight cursors, so clients should restart pagination across that boundary.
+Requests
+on any peer can load the same session, publishes fan out asynchronously once to
+each live peer, and explicit session deletion or periodic expired-row cleanup
+closes matching local streams on every reachable peer.
 
 Peer catalog drift cannot reduce publisher-required scopes; drain mixed
 old/new clusters rather than rely on them for resource notifications. Use a
@@ -1398,7 +1427,9 @@ stable event contract is:
 * `mrtr/round`, `subscription/open`, `subscription/close`,
   `subscription/suppressed`, and `subscription/backpressure`.
 * `cache/choice`, `cache/invalidation`, `session/open`, `session/close`,
-  `session_store/failure`, and `supervision/restart`.
+  `session_store/failure`, `session_store/cleanup/start`,
+  `session_store/cleanup/stop`, `client_ip/exception`, and
+  `supervision/restart`.
 
 `auth/policy_failure` can report the `:mount_policy` category. A failed
 `principal_binding` callback emits `principal_binding/exception`, and a failed
@@ -1414,6 +1445,20 @@ kind; it never includes the callback reason, token claims, or principal.
 bundled Ecto adapter removes a structurally corrupt persisted row so later
 bounded passes can continue. Adapter reasons, session identifiers, records, and
 exception text are never included.
+
+Each periodic expiry pass emits `session_store/cleanup/start` and
+`session_store/cleanup/stop`. The stop measurement contains a non-negative
+`duration` for the store cleanup call and its bounded return normalization,
+failure reporting, and namespace filtering; it excludes start telemetry, local
+stream closing, and a clustered close broadcast. It also reports the bounded
+number of sessions reaped for this server's namespace in `count` (at most
+1,000); metadata reports `outcome: :success` or `outcome: :unavailable`. A
+custom adapter response over 1,000 keys, or an otherwise malformed response, is
+rejected as unavailable without truncating or processing any returned keys.
+Adapters must batch larger backlogs across later passes. A failed pass still emits
+`session_store/failure`, and the cleanup implementation adds no keys, records,
+principals, tenants, or adapter error details. Explicitly configured trusted
+`telemetry_metadata` remains attached to these events.
 
 Credential, proof, request-state, baggage, private content, and arbitrary
 callback values are removed before Telemetry emission.

@@ -5,6 +5,49 @@ This guide maps an existing MCP catalog and deployment onto
 authorization, and rollout safety. The [usage guide](usage.md) contains the
 complete option reference.
 
+## 2.0 deployment hardening
+
+Version 2.0 makes the Phoenix parser bypass match each configured decoded path
+as a segment prefix, including its trailing or repeated-slash equivalents and
+every deeper child path. This is a body-parsing boundary, not proof of router
+ownership: ordinary routes below that prefix also bypass host parsing. Do not
+place unrelated routes below a configured MCP parser prefix. Unsupported child
+requests remain unread until the authenticated MCP Plug rejects them. Hosts
+with a manual parser bypass should make the same segment-aware change.
+
+Rate-limit buckets still use `conn.remote_ip` verbatim by default, including a
+non-IP local-peer term. A deployment behind a proxy can set the MCP Plug's
+`client_ip` callback to return a canonical IPv4 or IPv6 tuple from the host's
+trusted, proxy-normalized connection state. Explicit callback failures and
+non-IP returns fail closed and emit neutral `client_ip/exception` telemetry.
+Use the same source for authenticated and failed-authentication traffic; never
+select a raw client-supplied `X-Forwarded-For` entry.
+
+Existing deployments with `session_clustered: true` must now configure the same
+explicit shared `cursor_secret` on every node. The secret must be at least 16
+bytes; 32 bytes is recommended. An omitted or short secret refuses startup
+rather than generating incompatible per-process cursor keys. Load-balanced
+multi-node deployments serving stateless `2026-07-28` requests must also
+configure the same explicit secret on every node, even when
+`session_clustered` is false, if cursors may cross nodes. Cursors bind to final
+visible catalog content rather than node-local mutation history, so peers may
+reach identical content through different registration histories when their
+catalog and pagination context agree. Deterministic continuation also assumes
+every node uses the same OTP major. A mixed-major rolling upgrade may
+invalidate in-flight cursors, so clients should restart pagination across that
+boundary. During a rolling deployment from 1.1.x to 2.0.0, the cursor payloads
+from those releases are mutually invalid; clients carrying an in-flight cursor
+must restart pagination from the first page.
+
+Every periodic session cleanup also emits `session_store/cleanup/start` and
+`session_store/cleanup/stop`; the stop event reports a bounded reaped count and
+a neutral success or unavailable outcome. Its duration covers the store cleanup
+call and the bounded return normalization, failure reporting, and namespace
+filtering around that call, but excludes start telemetry, local stream closing,
+and clustered close broadcast. An adapter response over 1,000 keys (or an
+otherwise malformed response) is rejected as unavailable rather than
+truncated; adapters must return bounded batches across later passes.
+
 ## 1.0 host integration controls
 
 Version 1.0 keeps the 0.14 transport, authentication, strict-output, and
@@ -432,15 +475,18 @@ neutral result as an unknown identity.
 
 Mount the protected MCP Plug outside browser-session and CSRF pipelines. If a
 Phoenix endpoint runs `Plug.Parsers` before routing, that parser would otherwise
-consume the request body before MCP authentication. The installer can add an
-exact-path `AttestoMCP.Server.PhoenixParser` bypass only when it can prove a
-direct standard parser declaration. It refuses custom or ambiguous parser
-setups without editing them.
+consume the request body before MCP authentication. The installer can add a
+decoded path-prefix `AttestoMCP.Server.PhoenixParser` bypass only when it can
+prove a direct standard parser declaration. It refuses custom or ambiguous
+parser setups without editing them.
 
-For a manual integration, bypass the MCP path and its route-equivalent trailing
-slashes before any host parser, or enforce an equally strict authenticated body
-reader yourself. Keep every upstream body limit at least as strict as the MCP
-Plug's `max_body_bytes`.
+For a manual integration, bypass the configured decoded MCP path prefix, its
+route-equivalent trailing or repeated slashes, and every deeper child path
+before any host parser, or enforce an equally strict authenticated body reader
+yourself. This prefix-based bypass also covers ordinary routes below the
+prefix, so do not overlap it with unrelated routes. The MCP Plug can then
+reject unsupported child paths without first parsing their bodies. Keep every
+upstream body limit at least as strict as the MCP Plug's `max_body_bytes`.
 
 `max_json_bytes` is the server-wide JSON value, schema-instance, and output
 budget. It defaults to 2,000,000 bytes and may be explicitly raised to at most
@@ -500,9 +546,20 @@ When sessions for earlier revisions must survive a rolling deploy, use the
 bundled PostgreSQL `AttestoMCP.Server.SessionStore.Ecto` adapter or implement
 `AttestoMCP.Server.SessionStore`. Configure a stable `session_namespace` and
 use the same durable backend on every eligible node. Enable
-`session_clustered: true` only with that shared store. Streams are still
-node-local and reconnect after node loss; cross-node delivery is asynchronous
-and does not promise replay or exactly-once delivery during a partition.
+`session_clustered: true` only with that shared store, the same explicit
+`session_namespace`, and the same explicit `cursor_secret` on every node. The
+cursor secret must be at least 16 bytes; 32 bytes is recommended. The same
+explicit secret is also required for a load-balanced multi-node deployment of
+the session-free `2026-07-28` transport when cursors may cross nodes, even if
+`session_clustered` is false. Cursors bind to final visible catalog content
+rather than node-local mutation history, so different registration histories are
+compatible when the visible content and pagination context agree. Deterministic
+continuation assumes all nodes use the same OTP major. Mixed-major rolling
+upgrades may invalidate in-flight cursors, so clients should restart pagination
+across that boundary.
+Streams are still node-local and reconnect after node loss; cross-node delivery
+is asynchronous and does not promise replay or exactly-once delivery during a
+partition.
 
 ## 9. Preserve neutral failures and canonical resource content
 

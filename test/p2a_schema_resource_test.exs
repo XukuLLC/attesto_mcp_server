@@ -157,7 +157,7 @@ defmodule AttestoMCP.Server.P2ASchemaResourceTest do
   end
 
   @tag :t39
-  test "pagination cursor binds tenant, scope, revision and page size" do
+  test "pagination cursor binds tenant, scope, catalog content and page size" do
     {:ok, server} = Server.start_link(page_size: 100, cursor_secret: "p2a-secret")
 
     for index <- 1..101 do
@@ -211,7 +211,9 @@ defmodule AttestoMCP.Server.P2ASchemaResourceTest do
     assert length(tools) == 1
 
     assert :ok =
-             Server.register_tool(server, "new_revision", %{handler: fn _, _ -> {:ok, "ok"} end})
+             Server.register_tool(server, "new_catalog_entry", %{
+               handler: fn _, _ -> {:ok, "ok"} end
+             })
 
     assert {1, %{"error" => %{"code" => -32602}}} =
              Server.dispatch(server, next, %{principal: "alice", tenant: "one", scopes: []},

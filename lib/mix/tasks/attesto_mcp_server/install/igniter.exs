@@ -3121,23 +3121,26 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
       {:ok, :replace} ->
         endpoint = inferred_endpoint_module(router)
 
-        Igniter.Project.Module.find_and_update_module!(igniter, endpoint, fn body ->
-          with parser_body = Sourceror.Zipper.node(body),
-               {:ok, parser} <-
-                 endpoint_parser_expression(parser_body),
-               {:ok, location} <-
-                 Igniter.Code.Common.move_to(body, fn candidate ->
-                   Sourceror.Zipper.node(candidate) == parser
-                 end) do
-            {:ok,
-             Igniter.Code.Common.replace_code(
-               location,
-               wrapped_parser_code(parser, path)
-             )}
-          else
-            _not_found -> {:ok, body}
-          end
-        end)
+        igniter =
+          Igniter.Project.Module.find_and_update_module!(igniter, endpoint, fn body ->
+            with parser_body = Sourceror.Zipper.node(body),
+                 {:ok, parser} <-
+                   endpoint_parser_expression(parser_body),
+                 {:ok, location} <-
+                   Igniter.Code.Common.move_to(body, fn candidate ->
+                     Sourceror.Zipper.node(candidate) == parser
+                   end) do
+              {:ok,
+               Igniter.Code.Common.replace_code(
+                 location,
+                 wrapped_parser_code(parser, path)
+               )}
+            else
+              _not_found -> {:ok, body}
+            end
+          end)
+
+        Igniter.add_notice(igniter, endpoint_parser_wrapped_notice(endpoint, path))
 
       {:warning, _message} ->
         igniter
@@ -3167,7 +3170,9 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
            "installation will continue without an endpoint edit. Verify the selected host " <>
            "endpoint manually; a direct standard `Plug.Parsers` declaration must be wrapped " <>
            "with `plug Elixir.AttestoMCP.Server.PhoenixParser, mcp_path: #{inspect(path)}, ...` " <>
-           "while preserving its options."}
+           "while preserving its options. Ordinary routes below the configured MCP prefix " <>
+           "#{inspect(path)} also bypass host body parsing, must not overlap the MCP forward, " <>
+           "and must be reviewed if added later."}
 
       endpoint ->
         endpoint_parser_preflight(igniter, router, path, endpoint)
@@ -3894,21 +3899,32 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
     endpoint_name = inspect(endpoint)
 
     "Phoenix parser preflight could not establish authentication-before-body-decoding for " <>
-      "the exact MCP path #{inspect(path)} in #{endpoint_name}: #{reason}. For a direct " <>
+      "the forwarded MCP subtree rooted at #{inspect(path)} in #{endpoint_name}: #{reason}. For a direct " <>
       "standard `Plug.Parsers` declaration, use `plug " <>
       "Elixir.AttestoMCP.Server.PhoenixParser, mcp_path: #{inspect(path)}, ...` while " <>
-      "preserving its options. A custom body reader/parser must itself skip the exact MCP " <>
-      "path or be reordered/removed; do not assume a wrapper makes custom behavior safe. " <>
+      "preserving its options. A custom body reader/parser must itself skip the complete MCP " <>
+      "forward subtree or be reordered/removed; do not assume a wrapper makes custom behavior safe. " <>
       "Then test malformed and oversized unauthenticated MCP bodies are refused by " <>
-      "authentication before JSON decoding; metadata and unrelated routes must remain parsed."
+      "authentication before JSON decoding; metadata and unrelated routes must remain parsed. " <>
+      "Ordinary routes below the configured MCP prefix #{inspect(path)} also bypass host body " <>
+      "parsing, must not overlap the MCP forward, and must be reviewed if added later."
   end
 
   defp endpoint_no_parser_warning(endpoint, path) do
     "Phoenix endpoint #{inspect(endpoint)} has a statically proven simple pipeline with no " <>
-      "direct `Plug.Parsers` declaration for the exact MCP path #{inspect(path)}. No endpoint " <>
+      "direct `Plug.Parsers` declaration for the MCP forward rooted at #{inspect(path)}. No endpoint " <>
       "edit is required; the MCP Plug remains responsible for bounded body decoding. If a " <>
-      "host parser is added later, it must skip the exact MCP path and use a body-length limit " <>
-      "at least as strict as the MCP Plug's `:max_body_bytes`."
+      "host parser is added later, it must skip the complete MCP forward subtree and use a body-length limit " <>
+      "at least as strict as the MCP Plug's `:max_body_bytes`. Ordinary routes below the configured " <>
+      "MCP prefix #{inspect(path)} also bypass host body parsing, must not overlap the MCP forward, " <>
+      "and must be reviewed if added later."
+  end
+
+  defp endpoint_parser_wrapped_notice(endpoint, path) do
+    "Wrapped #{inspect(endpoint)}'s standard Plug.Parsers with " <>
+      "Elixir.AttestoMCP.Server.PhoenixParser for the MCP forward rooted at #{inspect(path)}. " <>
+      "Ordinary routes below the configured MCP prefix #{inspect(path)} also bypass host body " <>
+      "parsing, must not overlap the MCP forward, and must be reviewed if added later."
   end
 
   defp forward_status(

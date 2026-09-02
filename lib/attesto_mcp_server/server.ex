@@ -60,6 +60,7 @@ defmodule AttestoMCP.Server do
   @session_close_message_version 1
   @max_session_close_ids 128
   @max_session_close_key_bytes 256
+  @max_session_cleanup_keys 1_000
   @max_active_session_page_size 1_000
   @session_close_reasons [:session_deleted, :session_expired]
   @max_cluster_resource_scope_sets 8
@@ -1660,7 +1661,30 @@ defmodule AttestoMCP.Server do
 
   @impl true
   def handle_info(:cleanup_sessions, state) do
-    expired = cleanup_session_records(state)
+    state_telemetry(
+      state,
+      [:session_store, :cleanup, :start],
+      %{system_time: System.system_time()},
+      %{}
+    )
+
+    cleanup_started = System.monotonic_time()
+
+    {expired, cleanup_outcome} =
+      case cleanup_session_records(state) do
+        {:ok, expired} -> {expired, :success}
+        {:error, :session_store_unavailable} -> {[], :unavailable}
+      end
+
+    state_telemetry(
+      state,
+      [:session_store, :cleanup, :stop],
+      %{
+        duration: max(System.monotonic_time() - cleanup_started, 0),
+        count: length(expired)
+      },
+      %{outcome: cleanup_outcome}
+    )
 
     if expired != [] do
       state_telemetry(
@@ -2347,6 +2371,12 @@ defmodule AttestoMCP.Server do
         _ -> raise ArgumentError, "#{key} must be a non-empty binary"
       end
     end)
+
+    if opts[:session_clustered] == true and
+         not (is_binary(opts[:cursor_secret]) and byte_size(opts[:cursor_secret]) >= 16) do
+      raise ArgumentError,
+            ":session_clustered requires an explicit shared :cursor_secret of at least 16 bytes (32 bytes recommended)"
+    end
 
     if Keyword.get(opts, :request_timeout) > Keyword.get(opts, :max_request_timeout),
       do: raise(ArgumentError, ":request_timeout cannot exceed :max_request_timeout")
@@ -3529,14 +3559,14 @@ defmodule AttestoMCP.Server do
   defp cleanup_session_records(state) do
     case safe_session_store_call(state, :cleanup_expired, []) do
       {:ok, keys} when is_list(keys) ->
-        keys
-        |> Enum.flat_map(fn
-          {namespace, id} when namespace == state.session_namespace -> [id]
-          _ -> []
-        end)
+        {:ok,
+         Enum.flat_map(keys, fn
+           {namespace, id} when namespace == state.session_namespace -> [id]
+           _ -> []
+         end)}
 
-      _ ->
-        []
+      {:error, :session_store_unavailable} ->
+        {:error, :session_store_unavailable}
     end
   end
 
@@ -3546,11 +3576,12 @@ defmodule AttestoMCP.Server do
   defp safe_session_store_call(state, function, arguments, semantic_error_ref) do
     result =
       try do
-        apply(state.session_store_module, function, [state.session_store | arguments])
+        state.session_store_module
+        |> apply(function, [state.session_store | arguments])
+        |> normalize_session_store_result(function, semantic_error_ref)
       catch
         _kind, _reason -> {:error, :session_store_unavailable}
       end
-      |> normalize_session_store_result(function, semantic_error_ref)
 
     if session_store_failure?(result) do
       state_telemetry(
@@ -3605,7 +3636,7 @@ defmodule AttestoMCP.Server do
 
   defp valid_session_store_result?(function, {:ok, value})
        when function == :cleanup_expired,
-       do: is_list(value) and Enum.all?(value, &valid_session_key?/1)
+       do: valid_session_cleanup_keys?(value, 0)
 
   defp valid_session_store_result?(:count_active, {:ok, value}),
     do: is_integer(value) and value >= 0
@@ -3627,6 +3658,14 @@ defmodule AttestoMCP.Server do
 
   defp valid_session_store_result?(_function, {:error, _reason}), do: true
   defp valid_session_store_result?(_function, _result), do: false
+
+  defp valid_session_cleanup_keys?([], count) when count <= @max_session_cleanup_keys, do: true
+
+  defp valid_session_cleanup_keys?([key | rest], count)
+       when count < @max_session_cleanup_keys,
+       do: valid_session_key?(key) and valid_session_cleanup_keys?(rest, count + 1)
+
+  defp valid_session_cleanup_keys?(_keys, _count), do: false
 
   defp session_store_failure?({:error, {:server_session_update, ref, _reason}})
        when is_reference(ref),
@@ -5408,7 +5447,7 @@ defmodule AttestoMCP.Server do
 
   defp list_result(registry, type, params, context, era, key, opts) do
     values = Registry.list(registry, type) |> Enum.filter(&definition_visible?(&1, context, opts))
-    page = page(values, params["cursor"], context, era, opts, registry, type)
+    page = page(values, params["cursor"], context, era, opts, type)
 
     if page[:error] do
       {:error, page.error}
@@ -5437,9 +5476,9 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp page(values, nil, context, era, opts, registry, type) do
+  defp page(values, nil, context, era, opts, type) do
     page_size = page_size(opts)
-    cursor_opts = cursor_options(values, context, era, opts, registry, page_size, type)
+    cursor_opts = cursor_options(values, context, era, opts, page_size, type)
 
     %{
       items: Enum.take(values, page_size),
@@ -5450,9 +5489,9 @@ defmodule AttestoMCP.Server do
     }
   end
 
-  defp page(values, cursor, context, era, opts, registry, type) do
+  defp page(values, cursor, context, era, opts, type) do
     page_size = page_size(opts)
-    cursor_opts = cursor_options(values, context, era, opts, registry, page_size, type)
+    cursor_opts = cursor_options(values, context, era, opts, page_size, type)
 
     case Cursor.verify(cursor, principal(context), era, cursor_opts) do
       {:ok, position} when is_integer(position) ->
@@ -5469,7 +5508,7 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp cursor_options(values, context, era, opts, registry, page_size, type) do
+  defp cursor_options(values, context, era, opts, page_size, type) do
     [
       secret: opts[:cursor_secret],
       ttl: opts[:cursor_ttl],
@@ -5477,7 +5516,7 @@ defmodule AttestoMCP.Server do
       tenant: tenant(context),
       scopes: Map.get(context, :scopes, Map.get(context, "scopes", [])) || [],
       visibility: Enum.map(values, & &1.identity),
-      revision: Registry.revision(registry),
+      catalog_digest: Cursor.catalog_digest(values),
       page_size: page_size,
       version: era
     ]

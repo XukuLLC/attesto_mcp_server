@@ -21,6 +21,11 @@ defmodule AttestoMCP.Server.Plug do
 
   `:principal_binding` may derive a bounded stable identity from the complete
   authenticated principal without replacing the value handlers receive.
+  `:client_ip` may derive the canonical IPv4 or IPv6 tuple used by both
+  authenticated and failed-authentication rate-limit buckets. It accepts a
+  one-argument function or MFA receiving the `Plug.Conn`; when omitted,
+  `conn.remote_ip` is used verbatim. Explicit callback failures and non-IP
+  returns fail closed and emit neutral `client_ip/exception` telemetry.
   `:authorize` is a separate mount-level business-policy callback. It receives
   the authenticated base context once per protected HTTP leg; only literal
   `true` permits the request, and denial is a neutral 403 before POST body
@@ -72,6 +77,7 @@ defmodule AttestoMCP.Server.Plug do
     :scopes_supported,
     :context_builder,
     :principal_binding,
+    :client_ip,
     :authorize,
     :subscription_scopes,
     :max_body_bytes,
@@ -115,6 +121,10 @@ defmodule AttestoMCP.Server.Plug do
              (Plug.Conn.t() -> map()) | {module(), atom()} | {module(), atom(), [term()]}}
           | {:principal_binding,
              (term() -> term()) | {module(), atom()} | {module(), atom(), [term()]}}
+          | {:client_ip,
+             (Plug.Conn.t() -> :inet.ip_address())
+             | {module(), atom()}
+             | {module(), atom(), [term()]}}
           | {:authorize, (map() -> boolean()) | {module(), atom()} | {module(), atom(), [term()]}}
           | {:subscription_scopes, [String.t()]}
           | {:max_body_bytes, pos_integer()}
@@ -154,6 +164,7 @@ defmodule AttestoMCP.Server.Plug do
 
     path = Keyword.get(opts, :path, "/mcp")
     validate_principal_binding!(opts)
+    validate_client_ip!(opts)
     validate_mount_authorizer!(opts)
     validate_plug_options!(opts)
     validate_path!(path)
@@ -331,6 +342,23 @@ defmodule AttestoMCP.Server.Plug do
 
       _multiple ->
         raise ArgumentError, ":principal_binding must be configured at most once"
+    end
+  end
+
+  defp validate_client_ip!(opts) do
+    case Keyword.get_values(opts, :client_ip) do
+      [] ->
+        :ok
+
+      [nil] ->
+        :ok
+
+      [callback] ->
+        unless HostCallback.valid?(callback, 1),
+          do: raise(ArgumentError, ":client_ip must be a supported one-argument callback")
+
+      _multiple ->
+        raise ArgumentError, ":client_ip must be configured at most once"
     end
   end
 
@@ -1179,12 +1207,18 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp rate_limit_transport(conn, state, category) do
-    key = {:principal, principal_binding(conn), conn.remote_ip}
-
     try do
-      case Server.allow_rate(state.server, key, category) do
-        :ok -> :ok
-        {:error, :rate_limited} -> {:error, Error.rate_limited()}
+      case client_ip(conn, state) do
+        {:ok, ip} ->
+          key = {:principal, principal_binding(conn), ip}
+
+          case Server.allow_rate(state.server, key, category) do
+            :ok -> :ok
+            {:error, :rate_limited} -> {:error, Error.rate_limited()}
+          end
+
+        :error ->
+          {:error, Error.rate_limited()}
       end
     rescue
       _ -> {:error, Error.rate_limited()}
@@ -1197,7 +1231,7 @@ defmodule AttestoMCP.Server.Plug do
     # Consume the auth-failure bucket before rendering the refusal. This keeps
     # each attempt to one response and allows the first exhausted request to
     # become a clean 429 instead of trying to overwrite a sent 401.
-    case consume_auth_failure(state.server, conn.remote_ip) do
+    case auth_failure_rate_decision(conn, state) do
       :rate_limited ->
         cond do
           conn.state in [:sent, :chunked] -> conn
@@ -1210,8 +1244,63 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp consume_auth_failure(server, remote_ip) do
-    case Server.allow_rate(server, {:ip, remote_ip}, :auth_failures) do
+  defp auth_failure_rate_decision(conn, state) do
+    case client_ip(conn, state) do
+      {:ok, ip} -> consume_auth_failure(state.server, ip)
+      :error -> :rate_limited
+    end
+  rescue
+    _ -> :rate_limited
+  catch
+    _, _ -> :rate_limited
+  end
+
+  defp client_ip(conn, state) do
+    case state.opts[:client_ip] do
+      nil ->
+        # Preserve the pre-option behavior exactly. Bandit can expose a
+        # non-IP peer term for local or otherwise unusual transports.
+        {:ok, conn.remote_ip}
+
+      callback ->
+        try do
+          ip = HostCallback.invoke(callback, [conn])
+
+          if canonical_ip?(ip),
+            do: {:ok, ip},
+            else: client_ip_failure(state, :invalid_return)
+        catch
+          kind, reason ->
+            Telemetry.report_exception(
+              state.opts[:exception_reporter],
+              :client_ip,
+              kind,
+              reason,
+              __STACKTRACE__,
+              telemetry_options(state, %{transport: :http})
+            )
+
+            client_ip_failure(state, :exception)
+        end
+    end
+  end
+
+  defp client_ip_failure(state, outcome) do
+    Telemetry.execute(
+      [:client_ip, :exception],
+      %{count: 1},
+      telemetry_options(state, %{transport: :http, outcome: outcome})
+    )
+
+    :error
+  end
+
+  defp canonical_ip?(ip) do
+    :inet.is_ip_address(ip)
+  end
+
+  defp consume_auth_failure(server, client_ip) do
+    case Server.allow_rate(server, {:ip, client_ip}, :auth_failures) do
       :ok -> :ok
       {:error, :rate_limited} -> :rate_limited
     end

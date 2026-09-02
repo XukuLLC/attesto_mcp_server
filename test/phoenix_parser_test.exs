@@ -1,7 +1,74 @@
 defmodule AttestoMCP.Server.PhoenixParserTest do
   use ExUnit.Case, async: true
 
-  test "bypasses the MCP route and its trailing-slash equivalent" do
+  import Plug.Conn, only: [put_req_header: 3]
+  import Plug.Test, only: [conn: 3]
+
+  defmodule ForwardTarget do
+    @moduledoc false
+    import Plug.Conn
+
+    def init(options), do: options
+
+    def call(conn, _options) do
+      unread? = match?(%Plug.Conn.Unfetched{aspect: :body_params}, conn.body_params)
+      send_resp(conn, 404, if(unread?, do: "unread", else: "parsed"))
+    end
+  end
+
+  defmodule ForwardRouter do
+    @moduledoc false
+    use Phoenix.Router
+
+    forward("/mcp", ForwardTarget)
+  end
+
+  defmodule EndpointPipeline do
+    @moduledoc false
+    use Plug.Builder
+
+    plug AttestoMCP.Server.PhoenixParser,
+      mcp_path: "/mcp",
+      parsers: [:urlencoded, :multipart, :json],
+      json_decoder: Jason,
+      length: 16
+
+    plug(ForwardRouter)
+  end
+
+  test "Phoenix forward child paths reach the mount with an unread body" do
+    response = EndpointPipeline.call(json_conn("/mcp/anything"), [])
+
+    assert response.status == 404
+    assert response.resp_body == "unread"
+  end
+
+  test "Phoenix forward child paths bypass malformed, oversized, and multipart bodies" do
+    boundary = "attesto-boundary"
+
+    requests = [
+      conn(:post, "/mcp/malformed", "{")
+      |> put_req_header("content-type", "application/json"),
+      conn(:post, "/mcp/oversized", Jason.encode!(%{"value" => String.duplicate("x", 32)}))
+      |> put_req_header("content-type", "application/json"),
+      conn(
+        :post,
+        "/mcp/upload",
+        "--#{boundary}\r\ncontent-disposition: form-data; name=\"file\"; " <>
+          "filename=\"payload.txt\"\r\ncontent-type: text/plain\r\n\r\npayload\r\n" <>
+          "--#{boundary}--\r\n"
+      )
+      |> put_req_header("content-type", "multipart/form-data; boundary=#{boundary}")
+    ]
+
+    for request <- requests do
+      response = EndpointPipeline.call(request, [])
+      assert response.status == 404
+      assert response.resp_body == "unread"
+    end
+  end
+
+  test "bypasses the MCP forward and its complete subtree" do
     parser =
       AttestoMCP.Server.PhoenixParser.init(
         mcp_path: "/mcp",
@@ -27,15 +94,15 @@ defmodule AttestoMCP.Server.PhoenixParserTest do
 
     nested = json_conn("/mcp/admin")
 
-    parsed = AttestoMCP.Server.PhoenixParser.call(nested, parser)
-    assert parsed.body_params == %{"ok" => true}
+    assert AttestoMCP.Server.PhoenixParser.call(nested, parser).body_params ==
+             %Plug.Conn.Unfetched{aspect: :body_params}
 
     unrelated = json_conn("/health")
 
     assert AttestoMCP.Server.PhoenixParser.call(unrelated, parser).body_params == %{"ok" => true}
   end
 
-  test "bypasses every configured MCP route without bypassing parents, prefixes, or children" do
+  test "bypasses every configured MCP subtree without bypassing parents or sibling prefixes" do
     parser =
       AttestoMCP.Server.PhoenixParser.init(
         mcp_path: ["/mcp/a", "/mcp/b", "/mcp/c"],
@@ -43,12 +110,12 @@ defmodule AttestoMCP.Server.PhoenixParserTest do
         json_decoder: Jason
       )
 
-    for path <- ["/mcp/a", "/mcp/b/", "/mcp/c//"] do
+    for path <- ["/mcp/a", "/mcp/a/admin", "/mcp/b/", "/mcp/b/child", "/mcp/c//"] do
       assert AttestoMCP.Server.PhoenixParser.call(json_conn(path), parser).body_params ==
                %Plug.Conn.Unfetched{aspect: :body_params}
     end
 
-    for path <- ["/mcp", "/mcp/a/admin", "/mcp/ab", "/mcp/copy", "/health"] do
+    for path <- ["/mcp", "/mcp/ab", "/mcp/copy", "/health"] do
       assert AttestoMCP.Server.PhoenixParser.call(json_conn(path), parser).body_params == %{
                "ok" => true
              }
@@ -75,7 +142,9 @@ defmodule AttestoMCP.Server.PhoenixParserTest do
            }
 
     traversal = json_conn("/mcp/a/%2e%2e")
-    assert AttestoMCP.Server.PhoenixParser.call(traversal, parser).body_params == %{"ok" => true}
+
+    assert AttestoMCP.Server.PhoenixParser.call(traversal, parser).body_params ==
+             %Plug.Conn.Unfetched{aspect: :body_params}
   end
 
   test "rejects non-canonical paths" do

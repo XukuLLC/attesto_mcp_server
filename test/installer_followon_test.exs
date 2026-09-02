@@ -1359,7 +1359,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
     end
   end
 
-  test "wraps a direct endpoint parser with an exact MCP bypass" do
+  test "wraps a direct endpoint parser with an MCP forward-subtree bypass" do
     installed =
       project(
         extra_files: %{
@@ -1380,6 +1380,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
     assert diff =~ ~s(mcp_path: "/mcp")
     assert diff =~ "parsers: [:json]"
     assert diff =~ "json_decoder: Jason"
+    assert_parser_subtree_guidance(installed.notices, "/mcp")
 
     applied = installed |> apply_igniter!() |> install(@args)
     assert applied.issues == []
@@ -1452,6 +1453,8 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
              &String.contains?(&1, "custom or ambiguous endpoint plug")
            )
 
+    assert_parser_subtree_guidance(installed.issues, "/mcp")
+
     assert Igniter.Test.diff(installed) == ""
   end
 
@@ -1519,6 +1522,30 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
            )
 
     assert Enum.any?(installed.warnings, &String.contains?(&1, "No endpoint edit is required"))
+    assert_parser_subtree_guidance(installed.warnings, "/mcp")
+    assert Igniter.Test.diff(installed) != ""
+    refute Igniter.Test.diff(installed) =~ "AttestoMCP.Server.PhoenixParser"
+  end
+
+  test "warns with parser-prefix guidance when endpoint cannot be inferred" do
+    installed =
+      project(
+        router_source: """
+        defmodule Sample.Router do
+          use SampleWeb, :router
+        end
+        """
+      )
+      |> install(@args ++ ["--router", "Sample.Router"])
+
+    assert installed.issues == []
+
+    assert Enum.any?(
+             installed.warnings,
+             &String.contains?(&1, "Phoenix endpoint could not be inferred")
+           )
+
+    assert_parser_subtree_guidance(installed.warnings, "/mcp")
     assert Igniter.Test.diff(installed) != ""
     refute Igniter.Test.diff(installed) =~ "AttestoMCP.Server.PhoenixParser"
   end
@@ -1564,11 +1591,26 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
                &String.contains?(&1, "parser preflight could not establish")
              )
 
+      assert_parser_subtree_guidance(installed.issues, "/mcp")
+
       assert Igniter.Test.diff(installed) == ""
     end
   end
 
   defp install(igniter, args), do: Igniter.compose_task(igniter, @task, args)
+
+  defp assert_parser_subtree_guidance(messages, path) do
+    message =
+      Enum.find(messages, fn message ->
+        String.contains?(message, "Ordinary routes below the configured MCP prefix")
+      end)
+
+    assert message
+    assert message =~ path
+    assert message =~ "also bypass host body parsing"
+    assert message =~ "must not overlap the MCP forward"
+    assert message =~ "must be reviewed if added later"
+  end
 
   defp project(options \\ []) do
     router_source = Keyword.get(options, :router_source, router_source())

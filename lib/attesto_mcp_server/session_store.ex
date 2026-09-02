@@ -12,9 +12,8 @@ defmodule AttestoMCP.Server.SessionStore do
   ordinary loads, updates, touches, and expiry cleanup. A preserved future
   record returned by `update/3` or `update_ttl/3` is reported as
   `{:ok, opaque_record}` so callers can distinguish it from an absent row.
-  `update_ttl/3` must
-  delete an already expired record with a version understood by the adapter
-  and return `:not_found` rather than renewing it. On success it
+  `update_ttl/3` must delete an already expired record with a version understood
+  by the adapter and return `:not_found` rather than renewing it. On success it
   must return the updated record. If the supplied timestamp is older than the
   record's current `"last_seen_ms"`, adapters must retain the newer value; a
   successful touch must never rewind session activity. Adapters may implement
@@ -25,11 +24,12 @@ defmodule AttestoMCP.Server.SessionStore do
   records. The returned keys must be scoped to the requested namespace, ordered
   by session ID in ascending binary/UTF-8 order, and accompanied by the last
   returned ID as `next_cursor` only when more keys remain. For externally
-  supplied keys,
-  `load/2`, `update/3`, and `update_ttl/3` should treat malformed or
+  supplied keys, `load/2`, `update/3`, and `update_ttl/3` should treat malformed or
   unrepresentable keys as absent, while `delete/2` should remain idempotent;
   valid keys from another configured namespace must still return the
-  namespace-mismatch error.
+  namespace-mismatch error. `cleanup_expired/1` must return no more than 1,000
+  valid keys per call; adapters with more expired records must clean them in
+  bounded batches across later calls.
   """
 
   @type store :: term()

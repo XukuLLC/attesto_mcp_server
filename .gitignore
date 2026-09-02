@@ -4,6 +4,7 @@ cover/
 doc/
 deps/
 *.tar
+erl_crash.dump
 attesto_mcp_server-*/
 examples/consumer/mix.lock
 mix.lock

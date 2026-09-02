@@ -271,9 +271,20 @@ The Ecto store keeps negotiated `2025-11-25` and `2025-06-18` sessions across
 application restarts. The `2026-07-28` transport is session-free. Live streams
 reconnect after process loss; persisted session state does not promise event
 replay. Distributed Erlang deployments that need cross-node notification
-fanout can additionally enable `session_clustered: true`. Treat the session
-table as authorization-sensitive data and use a least-privilege PostgreSQL
-role; the [durable-session guidance](docs/usage.md#atomic-startup-telemetry-and-durable-sessions)
+fanout can additionally enable `session_clustered: true`. Clustered servers
+must use the same genuinely shared adapter, namespace, and explicit
+`cursor_secret` (at least 16 bytes; 32 bytes is recommended); omitting it or
+using a short value refuses startup. Any load-balanced multi-node deployment
+serving the stateless `2026-07-28` transport must also configure the same
+explicit cursor secret on every node, even when `session_clustered` is false,
+if cursors may cross nodes. Cursors bind to the final visible catalog content,
+so peers may reach that content through different registration histories, but
+their catalogs and pagination parameters must agree. Deterministic continuation
+also assumes every node uses the same OTP major; a mixed-major rolling upgrade
+may invalidate in-flight cursors, so clients should restart pagination across
+that boundary. Treat the session table as authorization-sensitive data and use a
+least-privilege PostgreSQL role; the
+[durable-session guidance](docs/usage.md#atomic-startup-telemetry-and-durable-sessions)
 covers database timeouts, capacity, and cutover requirements.
 
 ### Enable Client ID Metadata Documents
@@ -346,7 +357,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 1.0"}]
+  [{:attesto_mcp_server, "~> 2.0"}]
 end
 ```
 
@@ -383,7 +394,7 @@ principals, or tenants. The session-free `2026-07-28` transport has no server
 session IDs to list.
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 1.1.0 in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 2.0.0 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

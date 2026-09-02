@@ -4,13 +4,16 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
   import ExUnit.CaptureLog
 
   alias AttestoMCP.Server
+  alias AttestoMCP.Server.Registry
   alias AttestoMCP.Server.Session
   alias AttestoMCP.Server.SessionStore.ETS
   alias AttestoMCP.Server.Subscriptions
 
+  @modern "2026-07-28"
   @legacy "2025-11-25"
   @resources_read AttestoMCP.Scopes.resources_read()
   @tools_read AttestoMCP.Scopes.tools_read()
+  @cluster_cursor_secret "cluster-shared-cursor-secret"
 
   defmodule FailingUpdates do
     @moduledoc false
@@ -749,7 +752,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     opts = [
       session_store: {ETS, store},
       session_namespace: namespace,
-      session_clustered: true
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret
     ]
 
     {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
@@ -804,6 +808,158 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert_receive {:mcp_legacy_event, ^legacy_stream, 2, _catalog_event}, 1_000
   end
 
+  test "cluster peers accept shared cursors across every paginated catalog and era" do
+    {:ok, store} = start_supervised(ETS)
+    namespace = unique_namespace()
+
+    opts = [
+      session_store: {ETS, store},
+      session_namespace: namespace,
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret,
+      page_size: 1
+    ]
+
+    {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+    {:ok, second} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+
+    registrations = [
+      {:tool, "cluster-cursor-tool-a", %{handler: fn _, _ -> {:ok, "ok"} end}},
+      {:tool, "cluster-cursor-tool-b", %{handler: fn _, _ -> {:ok, "ok"} end}},
+      {:resource, "urn:cluster/cursor/a", %{handler: fn _, _ -> {:ok, []} end}},
+      {:resource, "urn:cluster/cursor/b", %{handler: fn _, _ -> {:ok, []} end}},
+      {:template, "urn:cluster/cursor/{id}", %{handler: fn _, _ -> {:ok, []} end}},
+      {:template, "urn:cluster/cursor/{id}/detail", %{handler: fn _, _ -> {:ok, []} end}},
+      {:prompt, "cluster-cursor-prompt-a", %{handler: fn _, _ -> {:ok, []} end}},
+      {:prompt, "cluster-cursor-prompt-b", %{handler: fn _, _ -> {:ok, []} end}}
+    ]
+
+    for server <- [first, second] do
+      for {type, identity, definition} <- registrations do
+        result =
+          case type do
+            :tool -> Server.register_tool(server, identity, definition)
+            :resource -> Server.register_resource(server, identity, definition)
+            :template -> Server.register_resource_template(server, identity, definition)
+            :prompt -> Server.register_prompt(server, identity, definition)
+          end
+
+        assert result == :ok
+      end
+    end
+
+    catalogs = [
+      {"tools/list", "tools"},
+      {"resources/list", "resources"},
+      {"resources/templates/list", "resourceTemplates"},
+      {"prompts/list", "prompts"}
+    ]
+
+    for version <- [@modern, @legacy, "2025-06-18"], {method, result_key} <- catalogs do
+      params = if version == @modern, do: modern_cursor_params(), else: %{}
+      request_id = System.unique_integer([:positive])
+
+      assert {^request_id, %{"result" => %{"nextCursor" => cursor}}} =
+               Server.dispatch(
+                 first,
+                 %{kind: :request, id: request_id, method: method, params: params},
+                 %{principal: "cluster-cursor", tenant: "tenant-a", scopes: []},
+                 version: version
+               )
+
+      next_id = request_id + 1
+
+      assert {^next_id, %{"result" => result}} =
+               Server.dispatch(
+                 second,
+                 %{
+                   kind: :request,
+                   id: next_id,
+                   method: method,
+                   params: Map.put(params, "cursor", cursor)
+                 },
+                 %{principal: "cluster-cursor", tenant: "tenant-a", scopes: []},
+                 version: version
+               )
+
+      assert is_list(result[result_key])
+      refute Map.has_key?(result, "nextCursor")
+    end
+  end
+
+  test "catalog cursors bind final content rather than registration history" do
+    {:ok, first_store} = start_supervised(%{ETS.child_spec([]) | id: make_ref()})
+    {:ok, second_store} = start_supervised(%{ETS.child_spec([]) | id: make_ref()})
+    namespace = unique_namespace()
+
+    opts = [
+      session_store: {ETS, first_store},
+      session_namespace: namespace <> "-first",
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret,
+      page_size: 1
+    ]
+
+    second_opts = [
+      session_store: {ETS, second_store},
+      session_namespace: namespace <> "-second",
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret,
+      page_size: 1
+    ]
+
+    {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
+    {:ok, second} = start_supervised(%{Server.child_spec(second_opts) | id: make_ref()})
+
+    registrations = cursor_registrations()
+
+    assert :ok = Server.register_all(first, registrations)
+
+    assert :ok =
+             Server.register_tool(second, "history-only", %{handler: fn _, _ -> {:ok, "ok"} end})
+
+    assert :ok = Server.replace_catalog(second, registrations)
+    assert Server.snapshot(first) == Server.snapshot(second)
+
+    assert Registry.revision(:sys.get_state(first).registry) !=
+             Registry.revision(:sys.get_state(second).registry)
+
+    catalogs = [
+      {"tools/list", "tools", :tool, "cluster-cursor-tool-a"},
+      {"resources/list", "resources", :resource, "urn:cluster/cursor/a"},
+      {"resources/templates/list", "resourceTemplates", :template, "urn:cluster/cursor/{id}"},
+      {"prompts/list", "prompts", :prompt, "cluster-cursor-prompt-a"}
+    ]
+
+    for version <- [@modern, @legacy, "2025-06-18"],
+        {method, result_key, type, identity} <- catalogs do
+      params = if version == @modern, do: modern_cursor_params(), else: %{}
+      request_id = System.unique_integer([:positive])
+      request = %{kind: :request, id: request_id, method: method, params: params}
+      context = %{principal: "history-independent", tenant: "tenant-a", scopes: []}
+
+      assert {^request_id, %{"result" => %{"nextCursor" => cursor}}} =
+               Server.dispatch(first, request, context, version: version)
+
+      next_request = %{request | id: request_id + 1, params: Map.put(params, "cursor", cursor)}
+
+      assert {next_id, %{"result" => %{} = result}} =
+               Server.dispatch(second, next_request, context, version: version)
+
+      assert next_id == request_id + 1
+      assert is_list(result[result_key])
+      refute Map.has_key?(result, "nextCursor")
+
+      changed = replace_cursor_registration(registrations, type, identity)
+      assert :ok = Server.replace_catalog(second, changed)
+
+      assert {^next_id, %{"error" => %{"data" => %{"reason" => "invalid_cursor"}}}} =
+               Server.dispatch(second, next_request, context, version: version)
+
+      assert :ok = Server.replace_catalog(second, registrations)
+    end
+  end
+
   test "clustered session deletion and expiry close legacy streams on peers" do
     {:ok, store} = start_supervised(ETS)
     namespace = unique_namespace()
@@ -811,7 +967,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     opts = [
       session_store: {ETS, store},
       session_namespace: namespace,
-      session_clustered: true
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret
     ]
 
     {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
@@ -877,7 +1034,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     opts = [
       session_store: {ETS, store},
       session_namespace: namespace,
-      session_clustered: true
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret
     ]
 
     {:ok, first} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
@@ -1669,9 +1827,35 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert_invalid_start(session_clustered: true, session_store: {ETS, store})
   end
 
+  test "cluster mode requires an explicit shared cursor secret of at least 16 bytes" do
+    {:ok, store} = start_supervised(ETS)
+
+    base_opts = [
+      session_clustered: true,
+      session_store: {ETS, store},
+      session_namespace: unique_namespace()
+    ]
+
+    assert_invalid_cursor_secret_start(base_opts)
+    assert_invalid_cursor_secret_start(Keyword.put(base_opts, :cursor_secret, "too-short"))
+
+    {:ok, server} =
+      start_supervised(%{
+        Server.child_spec(Keyword.put(base_opts, :cursor_secret, String.duplicate("x", 16)))
+        | id: make_ref()
+      })
+
+    assert is_pid(server)
+  end
+
   test "session namespaces require valid UTF-8 without NUL bytes and allow 256-byte values" do
     {:ok, store} = start_supervised(ETS)
-    base_opts = [session_clustered: true, session_store: {ETS, store}]
+
+    base_opts = [
+      session_clustered: true,
+      session_store: {ETS, store},
+      cursor_secret: @cluster_cursor_secret
+    ]
 
     assert_invalid_namespace_start(Keyword.put(base_opts, :session_namespace, <<255>>))
     assert_invalid_namespace_start(Keyword.put(base_opts, :session_namespace, <<0>>))
@@ -1715,7 +1899,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     opts = [
       session_store: {ETS, store},
       session_namespace: namespace,
-      session_clustered: true
+      session_clustered: true,
+      cursor_secret: @cluster_cursor_secret
     ]
 
     {:ok, publisher} = start_supervised(%{Server.child_spec(opts) | id: make_ref()})
@@ -1744,6 +1929,44 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     {_pid, monitor} = spawn_monitor(fn -> Server.start_link(opts) end)
     assert_receive {:DOWN, ^monitor, :process, _pid, reason}, 1_000
     assert inspect(reason) =~ "requires an explicit shared"
+  end
+
+  defp assert_invalid_cursor_secret_start(opts) do
+    {_pid, monitor} = spawn_monitor(fn -> Server.start_link(opts) end)
+    assert_receive {:DOWN, ^monitor, :process, _pid, reason}, 1_000
+    assert inspect(reason) =~ "cursor_secret"
+  end
+
+  defp modern_cursor_params do
+    %{
+      "_meta" => %{
+        "io.modelcontextprotocol/protocolVersion" => @modern,
+        "io.modelcontextprotocol/clientCapabilities" => %{}
+      }
+    }
+  end
+
+  defp cursor_registrations do
+    [
+      {:tool, "cluster-cursor-tool-a", %{handler: fn _, _ -> {:ok, "ok"} end}},
+      {:tool, "cluster-cursor-tool-b", %{handler: fn _, _ -> {:ok, "ok"} end}},
+      {:resource, "urn:cluster/cursor/a", %{handler: fn _, _ -> {:ok, []} end}},
+      {:resource, "urn:cluster/cursor/b", %{handler: fn _, _ -> {:ok, []} end}},
+      {:template, "urn:cluster/cursor/{id}", %{handler: fn _, _ -> {:ok, []} end}},
+      {:template, "urn:cluster/cursor/{id}/detail", %{handler: fn _, _ -> {:ok, []} end}},
+      {:prompt, "cluster-cursor-prompt-a", %{handler: fn _, _ -> {:ok, []} end}},
+      {:prompt, "cluster-cursor-prompt-b", %{handler: fn _, _ -> {:ok, []} end}}
+    ]
+  end
+
+  defp replace_cursor_registration(registrations, type, identity) do
+    Enum.map(registrations, fn
+      {^type, ^identity, definition} ->
+        {type, identity, Map.put(definition, :description, "changed")}
+
+      registration ->
+        registration
+    end)
   end
 
   defp assert_invalid_namespace_start(opts) do

@@ -6,9 +6,11 @@ defmodule AttestoMCP.Server.PhoenixParser do
   adapter keeps that parser unchanged for every request except the configured
   MCP routes, which must reach the MCP Plug with their bodies still unread so
   that authentication can run first. `:mcp_path` accepts one path or a
-  non-empty list of at most 32 unique paths. Matching uses decoded `path_info`,
-  covering route-equivalent trailing or repeated slashes that Phoenix also
-  routes to each configured forward.
+  non-empty list of at most 32 unique paths. Matching uses decoded `path_info`
+  and covers each configured path's complete forwarded subtree, including
+  route-equivalent trailing or repeated slashes. This mirrors Phoenix
+  `forward/4`: a request below an MCP mount must reach that mount with its body
+  unread even when the MCP Plug will reject the remaining sub-path.
   """
 
   @behaviour Plug
@@ -46,7 +48,7 @@ defmodule AttestoMCP.Server.PhoenixParser do
     # Plug.Parsers before reaching the authenticated MCP boundary.
     decoded_path_info = Enum.map(path_info, &URI.decode/1)
 
-    if MapSet.member?(mcp_path_infos, decoded_path_info),
+    if Enum.any?(mcp_path_infos, &List.starts_with?(decoded_path_info, &1)),
       do: conn,
       else: Plug.Parsers.call(conn, parser_options)
   end

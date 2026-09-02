@@ -115,6 +115,16 @@ installed_http_smoke() {
       raise("oversized unauthenticated MCP body reached the handler before authorization")
     end
 
+    forwarded_child =
+      Plug.Test.conn(:post, "/mcp/anything", "{")
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> endpoint.()
+
+    unless forwarded_child.status == 404 and
+             match?(%Plug.Conn.Unfetched{aspect: :body_params}, forwarded_child.body_params) do
+      raise("unsupported MCP child body was parsed before the forwarded mount rejected it")
+    end
+
     unrelated_json =
       Plug.Test.conn(:post, "/unrelated-json", ~s({"ok":true}))
       |> Plug.Conn.put_req_header("content-type", "application/json")

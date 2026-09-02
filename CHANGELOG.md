@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.0 - 2026-09-02
+
+- Make `PhoenixParser` treat each configured path as a decoded segment prefix:
+  the prefix, route-equivalent trailing or repeated slashes, and every child
+  path bypass host body parsing before authentication. This includes ordinary
+  routes below the configured prefix, so unrelated routes must not overlap it.
+  Malformed, oversized, multipart, and otherwise unsupported child requests
+  reach the authenticated MCP boundary without prior body parsing.
+- Add a validated Plug `client_ip` callback for authenticated and
+  failed-authentication rate-limit buckets. The default remains
+  `conn.remote_ip` verbatim, including non-IP local-peer terms; explicit
+  callback failures fail closed and emit neutral `client_ip/exception`
+  telemetry.
+- Require `session_clustered: true` servers to configure the same explicit,
+  shared `cursor_secret` on every node; an omitted or shorter-than-16-byte
+  secret now refuses startup instead of generating incompatible per-process
+  cursor keys. Load-balanced multi-node deployments serving stateless
+  `2026-07-28` requests must also configure the same explicit secret, even when
+  `session_clustered` is false, if cursors may cross nodes. Pagination cursors
+  now bind to deterministic visible catalog content rather than node-local
+  mutation history, so peers on the same OTP major with the same final catalog,
+  secret, and pagination context can continue them across nodes even when their
+  registration histories differ. A mixed-OTP-major rolling upgrade may
+  invalidate in-flight cursors, so clients should restart pagination when that
+  boundary is crossed.
+- Emit periodic session-cleanup start/stop telemetry with a bounded reaped
+  count and neutral outcome. Custom session-store cleanup responses must be
+  valid batches of at most 1,000 keys; oversized or malformed responses are
+  rejected as unavailable rather than truncated. Cleanup duration covers the
+  store cleanup call and its bounded return normalization, failure reporting,
+  and namespace filtering, but excludes start telemetry, local stream closing,
+  and clustered close broadcast.
+
 ## 1.1.0 - 2026-09-01
 
 - Add `AttestoMCP.Server.Result.tool_from_context/2,3` so tool handlers and

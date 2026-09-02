@@ -1,5 +1,6 @@
 defmodule AttestoMCP.Server.CursorSessionTest do
   use ExUnit.Case, async: false
+  alias AttestoMCP.Server
   alias AttestoMCP.Server.{Cursor, Session}
 
   @cursor_secret_key {Cursor, :secret}
@@ -14,6 +15,66 @@ defmodule AttestoMCP.Server.CursorSessionTest do
 
     assert {:error, :invalid_cursor} =
              Cursor.verify(cursor, "alice", "2025-11-25", secret: "test-secret")
+  end
+
+  test "catalog digests bind deterministic definition content but not runtime callbacks" do
+    first = %{
+      identity: "alpha",
+      description: "same",
+      handler: fn _, _ -> {:ok, "first"} end,
+      authorize: fn _ -> true end
+    }
+
+    second =
+      [
+        authorize: fn _ -> false end,
+        handler: fn _, _ -> {:ok, "second"} end,
+        description: "same",
+        identity: "alpha"
+      ]
+      |> Map.new()
+
+    assert Cursor.catalog_digest([first]) == Cursor.catalog_digest([second])
+
+    refute Cursor.catalog_digest([first]) ==
+             Cursor.catalog_digest([Map.put(second, :description, "changed")])
+  end
+
+  test "catalog digest pins deterministic encoding for a wide normalized definition" do
+    {:ok, server} = Server.start_link([])
+
+    metadata = Enum.into(1..40, %{}, fn index -> {"metadata_#{index}", index} end)
+
+    assert :ok =
+             Server.register_tool(
+               server,
+               "wide",
+               Map.merge(metadata, %{
+                 description: "wide definition",
+                 handler: fn _, _ -> {:ok, "one"} end
+               })
+             )
+
+    [normalized] = Server.snapshot(server).tool |> Map.values()
+    assert map_size(normalized) > 32
+
+    digestible = Map.drop(normalized, [:handler, :authorize, "handler", "authorize"])
+    item_digest = :crypto.hash(:sha256, :erlang.term_to_binary(digestible, [:deterministic]))
+
+    expected =
+      :crypto.hash(:sha256, :erlang.term_to_binary([item_digest], [:deterministic]))
+      |> Base.url_encode64(padding: false)
+
+    assert Cursor.catalog_digest([normalized]) == expected
+
+    reordered =
+      digestible
+      |> Map.to_list()
+      |> Enum.reverse()
+      |> Map.new()
+      |> Map.put(:handler, fn _, _ -> {:ok, "two"} end)
+
+    assert Cursor.catalog_digest([reordered]) == expected
   end
 
   test "sessions bind principal and have bounded lifetime" do

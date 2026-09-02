@@ -1,6 +1,14 @@
 defmodule AttestoMCP.Server.Cursor do
   @moduledoc "Opaque, signed, expiring authorization-bound pagination cursors."
 
+  @doc false
+  @spec catalog_digest([map()]) :: String.t()
+  def catalog_digest(catalog) when is_list(catalog) do
+    catalog
+    |> Enum.map(&(&1 |> digestible_definition() |> raw_digest()))
+    |> digest()
+  end
+
   @spec issue(term(), String.t(), String.t(), keyword()) :: String.t()
   def issue(position, principal, version, opts \\ []) do
     ttl = positive_ttl(Keyword.get(opts, :ttl), 300_000)
@@ -13,7 +21,7 @@ defmodule AttestoMCP.Server.Cursor do
       "v" => version,
       "t" => digest(Keyword.get(opts, :tenant)),
       "c" => context_digest(opts),
-      "r" => Keyword.get(opts, :revision, 0),
+      "d" => Keyword.get(opts, :catalog_digest),
       "z" => page_size,
       "e" => System.system_time(:millisecond) + ttl
     }
@@ -38,7 +46,7 @@ defmodule AttestoMCP.Server.Cursor do
          true <- data["v"] == version,
          true <- data["t"] == digest(Keyword.get(opts, :tenant)),
          true <- data["c"] == context_digest(opts),
-         true <- data["r"] == Keyword.get(opts, :revision, 0),
+         true <- data["d"] == Keyword.get(opts, :catalog_digest),
          true <- data["z"] == positive_integer(Keyword.get(opts, :page_size), 100),
          true <- is_integer(data["e"]) and data["e"] >= System.system_time(:millisecond) do
       {:ok, data["p"]}
@@ -52,9 +60,9 @@ defmodule AttestoMCP.Server.Cursor do
   defp context_digest(opts) do
     context = %{
       "catalog" => Keyword.get(opts, :catalog),
+      "catalog_digest" => Keyword.get(opts, :catalog_digest),
       "scopes" => opts |> Keyword.get(:scopes, []) |> List.wrap() |> Enum.sort(),
       "visibility" => Keyword.get(opts, :visibility, Keyword.get(opts, :visibility_digest)),
-      "revision" => Keyword.get(opts, :revision, 0),
       "page_size" => positive_integer(Keyword.get(opts, :page_size), 100)
     }
 
@@ -67,10 +75,16 @@ defmodule AttestoMCP.Server.Cursor do
   defp positive_integer(value, _fallback) when is_integer(value) and value > 0, do: value
   defp positive_integer(_, fallback), do: fallback
 
+  defp digestible_definition(definition) when is_map(definition),
+    do: Map.drop(definition, [:handler, :authorize, "handler", "authorize"])
+
   defp digest(nil), do: "anonymous"
 
   defp digest(value),
-    do: :crypto.hash(:sha256, :erlang.term_to_binary(value)) |> Base.url_encode64(padding: false)
+    do: value |> raw_digest() |> Base.url_encode64(padding: false)
+
+  defp raw_digest(value),
+    do: :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic]))
 
   defp secret do
     case Application.get_env(:attesto_mcp_server, :cursor_secret) do
