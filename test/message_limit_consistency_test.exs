@@ -425,7 +425,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
         capabilities: capabilities
       )
 
-    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+    on_exit(fn -> stop_if_running(server) end)
     assert Server.options(server)[:capabilities] == capabilities
 
     assert {1, %{"result" => %{"protocolVersion" => @legacy}}} =
@@ -498,7 +498,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     const_value = String.duplicate("r", Schema.max_instance_bytes() + 100_000)
     input_schema = %{"type" => "object", "properties" => %{"value" => %{"const" => const_value}}}
     {:ok, server} = Server.start_link(max_json_bytes: @large_budget)
-    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+    on_exit(fn -> stop_if_running(server) end)
 
     assert :ok =
              Server.register_tool(server, "restart-large-schema", input_schema: input_schema)
@@ -533,9 +533,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
         max_json_bytes: @large_budget
       )
 
-    on_exit(fn ->
-      if Process.whereis(name), do: GenServer.stop(name)
-    end)
+    on_exit(fn -> stop_if_running(name) end)
 
     assert %{server: ^name} =
              Server.Plug.init(
@@ -571,9 +569,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
   } do
     name = __MODULE__.LateBoundBudgetServer
 
-    on_exit(fn ->
-      if Process.whereis(name), do: GenServer.stop(name)
-    end)
+    on_exit(fn -> stop_if_running(name) end)
 
     plug =
       Server.Plug.init(
@@ -667,7 +663,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
         capabilities: %{"logging" => %{}}
       )
 
-    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+    on_exit(fn -> stop_if_running(server) end)
     owner = self()
     data = String.duplicate("d", Schema.max_instance_bytes() + 100_000)
 
@@ -713,7 +709,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
         server_name: String.duplicate("n", 1_000)
       )
 
-    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+    on_exit(fn -> stop_if_running(server) end)
 
     {:ok, source} = Agent.start_link(fn -> 0 end)
 
@@ -749,7 +745,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
   test "stdio preserves a normal response whose JSON is 511 bytes" do
     {:ok, text_size} = Agent.start_link(fn -> 0 end)
     {:ok, server} = Server.start_link([])
-    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+    on_exit(fn -> stop_if_running(server) end)
 
     assert :ok =
              Server.register_tool(server, "exact-frame", %{
@@ -813,7 +809,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
 
   test "stdio input frame boundaries include the line-feed delimiter" do
     {:ok, server} = Server.start_link([])
-    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+    on_exit(fn -> stop_if_running(server) end)
 
     base = %{
       "jsonrpc" => "2.0",
