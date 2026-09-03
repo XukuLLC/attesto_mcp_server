@@ -16,6 +16,19 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
+Use `attesto_phoenix` 3.x when one Phoenix host serves multiple named profiles.
+It binds each automatic protected-resource callback to the named profile
+loaded from the `otp_app` passed to the helper, keeping those profiles
+isolated. It does not select a profile from `conn.private`. The 2.14
+compatibility path supports one globally configured profile; using it for
+multiple profiles can route persistent replay or revocation reads through that
+global profile's store.
+
+These bindings cover the DPoP, mTLS, URL, revocation, and principal callbacks
+listed above. Token signature verification uses the keystore carried by the
+derived `Attesto.Config`; each named profile must therefore configure a
+keystore that is safe to invoke without Phoenix request-local configuration.
+
 On this automatic path, every authenticated token subject must resolve through
 the host's `load_principal` callback. A revoked JTI, an unresolved subject, or
 a callback failure denies the request with a neutral invalid-token response.

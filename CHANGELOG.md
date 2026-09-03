@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+## 2.0.1 - 2026-09-02
+
+- Bind automatic protected-resource callbacks to the named profile loaded from
+  the helper's `otp_app` argument on `attesto_phoenix` 3.x, keeping multiple
+  named profiles isolated. The helper does not select a profile from
+  `conn.private`. The `attesto_phoenix` 2.14 compatibility path supports one
+  globally configured profile; using it for multiple profiles can route
+  persistent replay or revocation reads through that global profile's store.
+
 ## 2.0.0 - 2026-09-02
 
 - Make `PhoenixParser` treat each configured path as a decoded segment prefix:

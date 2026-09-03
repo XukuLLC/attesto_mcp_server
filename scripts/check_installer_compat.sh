@@ -62,6 +62,33 @@ digest_tree() {
     fi
 }
 
+write_compatibility_callback_probe() {
+  host_dir=$1
+
+  (cd "$host_dir" && elixir -e '
+    source = """
+    defmodule InstallerHost.CompatibilityNonceStore do
+      @moduledoc false
+
+      def issue(_ttl_seconds), do: "compat-nonce"
+      def valid?(nonce), do: nonce == "compat-nonce"
+    end
+
+    defmodule InstallerHost.CompatibilityCallbacks do
+      @moduledoc false
+
+      def replay("replay", _ttl_seconds), do: {:error, :replay}
+      def replay(_jti, _ttl_seconds), do: :ok
+      def cert_der(_conn), do: nil
+      def htu(_conn), do: "https://mcp.example.com/mcp"
+    end
+    """
+
+    formatted = Code.format_string!(source) |> IO.iodata_to_binary() |> Kernel.<>("\n")
+    File.write!("lib/installer_host/compatibility_callback_probe.ex", formatted)
+  ')
+}
+
 installed_http_smoke() {
   mix run -e '
     defmodule InstallerHost.InstallerSmokeKeystore do
@@ -292,6 +319,8 @@ installed_http_smoke() {
   INSTALLER_HOST_SIGNING_PEM=$(openssl genpkey -algorithm ED25519 2>/dev/null)
   export INSTALLER_HOST_SIGNING_PEM
 
+  write_compatibility_callback_probe "$phoenix_floor_host_dir"
+
   elixir -e '
     path = "mix.exs"
     source = File.read!(path)
@@ -312,6 +341,33 @@ installed_http_smoke() {
   mix format --check-formatted
   mix compile --warnings-as-errors
   mix run -e '
+    default_protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+    unless is_function(default_protected[:replay_check], 2) and
+             is_function(default_protected[:htu], 1) and
+             is_function(default_protected[:principal], 2) and
+             not Keyword.has_key?(default_protected, :nonce_check) and
+             not Keyword.has_key?(default_protected, :nonce_issue) and
+             not Keyword.has_key?(default_protected, :cert_der) do
+      raise("attesto_phoenix 2.14.1 default protected-resource callbacks failed")
+    end
+
+    current = Application.fetch_env!(:installer_host, AttestoPhoenix.Config)
+
+    Application.put_env(
+      :installer_host,
+      AttestoPhoenix.Config,
+      Keyword.merge(current,
+        replay_check: {InstallerHost.CompatibilityCallbacks, :replay},
+        nonce_store: InstallerHost.CompatibilityNonceStore,
+        dpop_nonce_required: true,
+        mtls_enabled: true,
+        trusted_proxies: ["127.0.0.1/32"],
+        cert_der: {InstallerHost.CompatibilityCallbacks, :cert_der},
+        htu: {InstallerHost.CompatibilityCallbacks, :htu}
+      )
+    )
+
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
     unless to_string(Application.spec(:attesto_phoenix, :vsn)) == "2.14.1" do
@@ -319,12 +375,43 @@ installed_http_smoke() {
     end
 
     unless match?(%Attesto.Config{}, protected[:config]) and
-             is_function(protected[:principal], 2) and
-             protected[:principal].(
-               %{"sub" => "svc_installer", "client_id" => "installer"},
-               %{binding: :bearer}
-             ) == {:ok, %{id: "svc_installer"}} do
+             is_function(protected[:replay_check], 2) and
+             is_function(protected[:nonce_check], 1) and
+             is_function(protected[:nonce_issue], 0) and
+             is_function(protected[:cert_der], 1) and
+             is_function(protected[:htu], 1) and
+             is_function(protected[:principal], 2) do
       raise("attesto_phoenix 2.14.1 protected-resource integration failed")
+    end
+
+    unless protected[:replay_check].("fresh", 60) == :ok and
+             protected[:replay_check].("replay", 60) == {:error, :replay} do
+      raise("attesto_phoenix 2.14.1 replay callback result/failure behavior failed")
+    end
+
+    nonce = protected[:nonce_issue].()
+
+    unless nonce == "compat-nonce" and
+             protected[:nonce_check].(nonce) == :ok and
+             protected[:nonce_check].("invalid-nonce") == {:error, :use_dpop_nonce} do
+      raise("attesto_phoenix 2.14.1 nonce callback result/failure behavior failed")
+    end
+
+    cert_conn =
+      Plug.Test.conn(:get, "/mcp")
+      |> Plug.Test.put_peer_data(%{address: {127, 0, 0, 1}})
+
+    unless protected[:cert_der].(cert_conn) == nil and
+             protected[:htu].(Plug.Test.conn(:get, "/mcp")) == "https://mcp.example.com/mcp" do
+      raise("attesto_phoenix 2.14.1 certificate or URL callback behavior failed")
+    end
+
+    unless protected[:principal].(
+             %{"sub" => "svc_installer", "client_id" => "installer"},
+             %{binding: :bearer}
+           ) == {:ok, %{id: "svc_installer"}} and
+             protected[:principal].(%{}, %{binding: :bearer}) == {:error, :principal_load_failed} do
+      raise("attesto_phoenix 2.14.1 principal callback result/failure behavior failed")
     end
   '
 
@@ -335,6 +422,8 @@ installed_http_smoke() {
   export ATTESTO_MCP_SERVER_PATH="$repo_dir"
   INSTALLER_HOST_SIGNING_PEM=$(openssl genpkey -algorithm ED25519 2>/dev/null)
   export INSTALLER_HOST_SIGNING_PEM
+
+  write_compatibility_callback_probe "$phoenix_three_host_dir"
 
   elixir -e '
     path = "mix.exs"
@@ -363,6 +452,33 @@ installed_http_smoke() {
   mix compile --warnings-as-errors
   mix test
   mix run -e '
+    default_protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
+
+    unless is_function(default_protected[:replay_check], 2) and
+             is_function(default_protected[:htu], 1) and
+             is_function(default_protected[:principal], 2) and
+             not Keyword.has_key?(default_protected, :nonce_check) and
+             not Keyword.has_key?(default_protected, :nonce_issue) and
+             not Keyword.has_key?(default_protected, :cert_der) do
+      raise("attesto_phoenix 3.x default protected-resource callbacks failed")
+    end
+
+    current = Application.fetch_env!(:installer_host, AttestoPhoenix.Config)
+
+    Application.put_env(
+      :installer_host,
+      AttestoPhoenix.Config,
+      Keyword.merge(current,
+        replay_check: {InstallerHost.CompatibilityCallbacks, :replay},
+        nonce_store: InstallerHost.CompatibilityNonceStore,
+        dpop_nonce_required: true,
+        mtls_enabled: true,
+        trusted_proxies: ["127.0.0.1/32"],
+        cert_der: {InstallerHost.CompatibilityCallbacks, :cert_der},
+        htu: {InstallerHost.CompatibilityCallbacks, :htu}
+      )
+    )
+
     version = Application.spec(:attesto_phoenix, :vsn) |> to_string()
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
@@ -372,13 +488,42 @@ installed_http_smoke() {
 
     unless match?(%Attesto.Config{}, protected[:config]) and
              is_function(protected[:replay_check], 2) and
+             is_function(protected[:nonce_check], 1) and
+             is_function(protected[:nonce_issue], 0) and
+             is_function(protected[:cert_der], 1) and
              is_function(protected[:htu], 1) and
-             is_function(protected[:principal], 2) and
-             protected[:principal].(
-               %{"sub" => "svc_installer", "client_id" => "installer"},
-               %{binding: :bearer}
-             ) == {:ok, %{id: "svc_installer"}} do
+             is_function(protected[:principal], 2) do
       raise("attesto_phoenix 3.x protected-resource integration failed")
+    end
+
+    unless protected[:replay_check].("fresh", 60) == :ok and
+             protected[:replay_check].("replay", 60) == {:error, :replay} do
+      raise("attesto_phoenix 3.x replay callback result/failure behavior failed")
+    end
+
+    nonce = protected[:nonce_issue].()
+
+    unless nonce == "compat-nonce" and
+             protected[:nonce_check].(nonce) == :ok and
+             protected[:nonce_check].("invalid-nonce") == {:error, :use_dpop_nonce} do
+      raise("attesto_phoenix 3.x nonce callback result/failure behavior failed")
+    end
+
+    cert_conn =
+      Plug.Test.conn(:get, "/mcp")
+      |> Plug.Test.put_peer_data(%{address: {127, 0, 0, 1}})
+
+    unless protected[:cert_der].(cert_conn) == nil and
+             protected[:htu].(Plug.Test.conn(:get, "/mcp")) == "https://mcp.example.com/mcp" do
+      raise("attesto_phoenix 3.x certificate or URL callback behavior failed")
+    end
+
+    unless protected[:principal].(
+             %{"sub" => "svc_installer", "client_id" => "installer"},
+             %{binding: :bearer}
+           ) == {:ok, %{id: "svc_installer"}} and
+             protected[:principal].(%{}, %{binding: :bearer}) == {:error, :principal_load_failed} do
+      raise("attesto_phoenix 3.x principal callback result/failure behavior failed")
     end
   '
 

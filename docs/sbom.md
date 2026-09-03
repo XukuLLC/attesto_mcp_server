@@ -1,6 +1,6 @@
-# Production dependency inventory (2.0.0)
+# Production dependency inventory (2.0.1)
 
-This candidate evidence was observed locally on 2026-09-02 for 2.0.0 after
+This candidate evidence was observed locally on 2026-09-02 for 2.0.1 after
 resolving its published dependency packages from Hex with `mix deps.get` and
 checking the graph with `mix deps.tree --only prod`. This library does not
 maintain or ship a project lockfile, so consumers resolve the declared version
@@ -9,7 +9,7 @@ ranges.
 | Component | Resolved version | License policy | Production path |
 |---|---:|---|---|
 | attesto_mcp | 1.3.0 | MIT | direct |
-| attesto | 2.0.0 | MIT | attesto_mcp |
+| attesto | 2.0.1 | MIT | attesto_mcp |
 | jose | 1.11.12 | MIT | attesto_mcp; attesto |
 | plug | 1.20.3 | Apache-2.0 | direct; attesto_mcp; attesto |
 | jason | 1.4.5 | Apache-2.0 | direct |
@@ -40,9 +40,9 @@ HTTP client at runtime. The reusable and generated-host compatibility checks
 accepted public-Hex `attesto_phoenix` requirements overlapping
 `>= 2.14.1 and < 4.0.0` and Req requirements overlapping
 `>= 0.6.1 and < 1.0.0`; the exact floor check resolved `attesto_phoenix`
-2.14.1, the current 2.x check resolved 2.14.2, the 3.x check resolved 3.0.0,
+2.14.1, the current 2.x check resolved 2.14.2, the 3.x check resolved 3.1.0,
 and the enabled CIMD path resolved Req 0.7.4. The 2.x hosts resolved Attesto
-1.15.0, while the 3.x host resolved Attesto 2.0.0. Automatic routes call the
+1.15.0, while the 3.x host resolved Attesto 2.0.1. Automatic routes call the
 public AttestoPhoenix protected-resource APIs at request time so replay, nonce,
 canonical-request, certificate, access-token revocation, and principal-loading
 policies remain host-owned. The explicit-callback installer path does not add
