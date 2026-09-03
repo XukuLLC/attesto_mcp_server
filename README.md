@@ -44,6 +44,12 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
+If one Phoenix host serves multiple named authorization profiles, use
+`attesto_phoenix` 3.x. The automatic integration keeps each profile's runtime
+callbacks isolated. The 2.14 compatibility path supports one globally
+configured profile; using it for multiple profiles can route persistent replay
+or revocation reads through that global profile's store.
+
 Review every installer notice, including any migration command and exact manual
 verification emitted when endpoint source is unavailable. When the installer
 selects the bundled Ecto store, run the command it prints and then migrate:
@@ -394,7 +400,7 @@ principals, or tenants. The session-free `2026-07-28` transport has no server
 session IDs to list.
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 2.0.0 in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 2.0.1 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST

@@ -1,13 +1,13 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 2.0.0, not a
+This is reproducible test evidence for `attesto_mcp_server` 2.0.1, not a
 certification, endorsement, or claim of support for every optional MCP
 extension.
 
 ## Tested candidate
 
 - source fingerprint:
-  `f320491018ec16cb204ac06baf2183dc701048797aef6e18c06a775278ba90b2`
+  `58fd63cf3d0f87eca79e681abcca899210b89bc5122bb09b65ff91a308b3b4ae`
 - official runner: `@modelcontextprotocol/conformance` `0.2.0-alpha.11`
 - runner commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - runner archive SHA-256:
@@ -47,8 +47,11 @@ printf '%s  %s\n' \
   "$ARCHIVE" | sha256sum -c -
 mkdir -p "$RUNNER_DIR"
 tar -xzf "$ARCHIVE" -C "$RUNNER_DIR" --strip-components=1
-npx --yes npm@12.0.2 ci --prefix "$RUNNER_DIR"
-npx --yes npm@12.0.2 run build --prefix "$RUNNER_DIR"
+(
+  cd "$RUNNER_DIR"
+  npx --yes npm@12.0.2 ci
+  npx --yes npm@12.0.2 run build
+)
 scripts/run_conformance_fixture.sh "$RUNNER_DIR" 2026-07-28
 scripts/run_conformance_fixture.sh "$RUNNER_DIR" 2025-11-25
 ```
@@ -71,15 +74,20 @@ token acquisition.
 
 ## Package gates
 
-- The default lane passed 656 checks: one doctest and 655 tests, with the 39
-  database-gated tests skipped. Coverage for this default lane was 80.23%.
+- The default lane passed 657 checks: one doctest and 656 tests, with the 39
+  database-gated tests skipped. Coverage for this default lane was 80.28%.
   A separate non-coverage PostgreSQL lane then passed all 39 durable Ecto
   session-store tests.
 - Dialyzer completed with zero errors and zero skips.
 - Package construction and the Hex advisory audit passed.
 - The installer matrix passed with AttestoMCP 1.3.0 across Attesto 1.15.0 and
-  2.0.0, AttestoPhoenix 2.14.1, 2.14.2, and 3.0.0, and a generated Phoenix
+  2.0.1, AttestoPhoenix 2.14.1, 2.14.2, and 3.1.0, and a generated Phoenix
   1.8.13 host.
+- The coordinated-source installer lane additionally passed against the exact
+  Attesto 2.0.1 and AttestoPhoenix 3.1.0 release commits with AttestoMCP 1.3.0,
+  including authenticated requests across two named profiles, profile-specific
+  principal and revocation checks, and Ecto replay/code-store repo and prefix
+  selection.
 
 The frozen runner does not score `2025-06-18`. Package-owned HTTP, stdio,
 lifecycle, revision-filtering, and configuration regressions cover that

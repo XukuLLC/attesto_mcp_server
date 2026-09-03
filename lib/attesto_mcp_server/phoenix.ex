@@ -64,6 +64,14 @@ defmodule AttestoMCP.Server.Phoenix do
   the adapter callbacks close over the current validated configuration and
   must not be baked into a compiled Phoenix router.
 
+  `attesto_phoenix` 3.x binds each callback to the named profile loaded from
+  the `otp_app` argument, so multiple named host profiles remain isolated.
+  This helper does not select a profile from `conn.private`. The 2.14
+  compatibility path supports one globally configured profile; using it for
+  multiple profiles can route persistent replay or revocation reads through
+  that global profile's store. Use `attesto_phoenix` 3.x when serving more than
+  one named profile.
+
   This helper fails closed when the optional package or its supported public
   configuration/adapter API is unavailable.
   """
@@ -101,36 +109,39 @@ defmodule AttestoMCP.Server.Phoenix do
       phoenix_config = apply(config_module, :from_otp_app, [otp_app])
       attesto_config = apply(config_module, :to_attesto_config, [phoenix_config])
       adapter_options = apply(adapter_module, :protected_resource_opts, [phoenix_config])
+      request_config_binding? = function_exported?(config_module, :with_request_config, 2)
 
       principal = fn claims, sender ->
         try do
-          case apply(protected_resource_module, :access_token_revoked?, [phoenix_config, claims]) do
-            true ->
-              {:error, :revoked}
+          with_request_config(request_config_binding?, config_module, phoenix_config, fn ->
+            case apply(protected_resource_module, :access_token_revoked?, [phoenix_config, claims]) do
+              true ->
+                {:error, :revoked}
 
-            false ->
-              case claims["sub"] do
-                subject when is_binary(subject) and subject != "" ->
-                  load_principal = apply(config_module, :load_principal_fun, [phoenix_config])
+              false ->
+                case claims["sub"] do
+                  subject when is_binary(subject) and subject != "" ->
+                    load_principal = apply(config_module, :load_principal_fun, [phoenix_config])
 
-                  case apply(callback_module, :invoke, [load_principal, [subject]]) do
-                    {:ok, principal} when not is_nil(principal) ->
-                      apply_principal_wrapper(principal_wrapper, principal, claims, sender)
+                    case apply(callback_module, :invoke, [load_principal, [subject]]) do
+                      {:ok, principal} when not is_nil(principal) ->
+                        apply_principal_wrapper(principal_wrapper, principal, claims, sender)
 
-                    {:error, _reason} = rejected ->
-                      rejected
+                      {:error, _reason} = rejected ->
+                        rejected
 
-                    _other ->
-                      {:error, :principal_load_failed}
-                  end
+                      _other ->
+                        {:error, :principal_load_failed}
+                    end
 
-                _missing_subject ->
-                  {:error, :principal_load_failed}
-              end
+                  _missing_subject ->
+                    {:error, :principal_load_failed}
+                end
 
-            _other ->
-              authorization_check_failed(:invalid_revocation_result)
-          end
+              _other ->
+                authorization_check_failed(:invalid_revocation_result)
+            end
+          end)
         rescue
           _error -> authorization_check_failed(:exception)
         catch
@@ -142,6 +153,7 @@ defmodule AttestoMCP.Server.Phoenix do
         adapter_options
         |> Keyword.delete(:config)
         |> Keyword.put(:config, attesto_config)
+        |> bind_request_callbacks(config_module, phoenix_config, request_config_binding?)
         |> Keyword.put(:principal, principal)
       else
         raise ArgumentError,
@@ -199,6 +211,85 @@ defmodule AttestoMCP.Server.Phoenix do
       _other -> {:error, :principal_wrapper_failed}
     end
   end
+
+  # AttestoPhoenix's stores intentionally resolve the current Repo and schema
+  # prefix from request-local configuration. Protected-resource options may be
+  # constructed for a named profile and invoked later or across requests, so
+  # every callback must install that profile for the duration of its
+  # invocation.
+  defp bind_request_callbacks(options, config_module, phoenix_config, request_config_binding?) do
+    validate_adapter_callbacks!(options)
+
+    if request_config_binding? do
+      options
+      |> bind_request_callback(:replay_check, 2, config_module, phoenix_config)
+      |> bind_request_callback(:nonce_check, 1, config_module, phoenix_config)
+      |> bind_request_callback(:nonce_issue, 0, config_module, phoenix_config)
+      |> bind_request_callback(:cert_der, 1, config_module, phoenix_config)
+      |> bind_request_callback(:htu, 1, config_module, phoenix_config)
+    else
+      options
+    end
+  end
+
+  defp validate_adapter_callbacks!(options) do
+    for {key, arity} <- [replay_check: 2, nonce_check: 1, nonce_issue: 0, cert_der: 1, htu: 1] do
+      case Keyword.fetch(options, key) do
+        {:ok, callback} when is_function(callback, arity) ->
+          :ok
+
+        {:ok, _callback} ->
+          raise ArgumentError,
+                "attesto_phoenix adapter #{key} callback must be a function of arity #{arity}"
+
+        :error ->
+          :ok
+      end
+    end
+  end
+
+  defp bind_request_callback(options, key, arity, config_module, phoenix_config) do
+    case Keyword.fetch(options, key) do
+      {:ok, callback} ->
+        Keyword.put(
+          options,
+          key,
+          request_callback(callback, arity, config_module, phoenix_config)
+        )
+
+      :error ->
+        options
+    end
+  end
+
+  defp request_callback(callback, 0, config_module, phoenix_config) do
+    fn ->
+      with_request_config(true, config_module, phoenix_config, fn ->
+        apply(callback, [])
+      end)
+    end
+  end
+
+  defp request_callback(callback, 1, config_module, phoenix_config) do
+    fn argument ->
+      with_request_config(true, config_module, phoenix_config, fn ->
+        apply(callback, [argument])
+      end)
+    end
+  end
+
+  defp request_callback(callback, 2, config_module, phoenix_config) do
+    fn first, second ->
+      with_request_config(true, config_module, phoenix_config, fn ->
+        apply(callback, [first, second])
+      end)
+    end
+  end
+
+  defp with_request_config(true, config_module, phoenix_config, fun),
+    do: apply(config_module, :with_request_config, [phoenix_config, fun])
+
+  defp with_request_config(false, _config_module, _phoenix_config, fun), do: fun.()
 
   defp authorization_check_failed(error) do
     Telemetry.execute(

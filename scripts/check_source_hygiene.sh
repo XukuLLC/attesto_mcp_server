@@ -29,7 +29,8 @@ report_matches() {
 
   matches=$(
     find "$root" \
-      \( -type d \( -name .git -o -name '_build*' -o -name cover -o -name deps -o -name doc \) -prune \) -o \
+      \( -name .git -prune \) -o \
+      \( -type d \( -name '_build*' -o -name cover -o -name deps -o -name doc \) -prune \) -o \
       \( -type f ! -path "$script_path" -exec grep -I -n -E -- "$pattern" {} + \) 2>/dev/null || :
   )
 
@@ -43,7 +44,8 @@ report_matches() {
 report_paths() {
   paths=$(
     find "$root" \
-      \( -type d \( -name .git -o -name '_build*' -o -name cover -o -name deps -o -name doc \) -prune \) -o \
+      \( -name .git -prune \) -o \
+      \( -type d \( -name '_build*' -o -name cover -o -name deps -o -name doc \) -prune \) -o \
       \( -type f \( \
         -name .DS_Store -o \
         -name '*.pem' -o \
@@ -67,7 +69,8 @@ report_paths() {
   if [ "$mode" = package ]; then
     paths=$(
       find "$root" \
-        \( -type d \( -name .git -o -name '_build*' -o -name cover -o -name deps -o -name doc \) -print \) -o \
+        \( -name .git -print -prune \) -o \
+        \( -type d \( -name '_build*' -o -name cover -o -name deps -o -name doc \) -print \) -o \
         \( -type f -name mix.lock -print \) 2>/dev/null || :
     )
 

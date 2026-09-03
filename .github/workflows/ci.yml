@@ -38,8 +38,8 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: validate lowercase immutable coordinated refs
         env:
-          ATTESTO_REF: 955aba026ab4f1efeda59077829e5e5341d6007c
-          ATTESTO_PHOENIX_REF: a119149176482e9da494c014d34dad8b9be104de
+          ATTESTO_REF: 8440ee06cea523ffee5d4514a3a1db221c6187c5
+          ATTESTO_PHOENIX_REF: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
           ATTESTO_MCP_REF: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
         run: |
           for ref in "$ATTESTO_REF" "$ATTESTO_PHOENIX_REF" "$ATTESTO_MCP_REF"; do
@@ -51,13 +51,13 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           repository: XukuLLC/attesto
-          ref: 955aba026ab4f1efeda59077829e5e5341d6007c
+          ref: 8440ee06cea523ffee5d4514a3a1db221c6187c5
           path: coordinated/attesto
           persist-credentials: false
       - uses: actions/checkout@v7.0.1
         with:
           repository: XukuLLC/attesto_phoenix
-          ref: a119149176482e9da494c014d34dad8b9be104de
+          ref: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
           path: coordinated/attesto_phoenix
           persist-credentials: false
       - uses: actions/checkout@v7.0.1
@@ -68,8 +68,8 @@ jobs:
           persist-credentials: false
       - name: verify coordinated checkout commits
         env:
-          ATTESTO_REF: 955aba026ab4f1efeda59077829e5e5341d6007c
-          ATTESTO_PHOENIX_REF: a119149176482e9da494c014d34dad8b9be104de
+          ATTESTO_REF: 8440ee06cea523ffee5d4514a3a1db221c6187c5
+          ATTESTO_PHOENIX_REF: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
           ATTESTO_MCP_REF: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
         run: |
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "$ATTESTO_REF"
@@ -86,8 +86,8 @@ jobs:
           ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_mcp
           ATTESTO_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto
           ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
-          ATTESTO_REF: 955aba026ab4f1efeda59077829e5e5341d6007c
-          ATTESTO_PHOENIX_REF: a119149176482e9da494c014d34dad8b9be104de
+          ATTESTO_REF: 8440ee06cea523ffee5d4514a3a1db221c6187c5
+          ATTESTO_PHOENIX_REF: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
           ATTESTO_MCP_REF: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
         run: scripts/check_installer_coordinated.sh
 
@@ -253,8 +253,11 @@ jobs:
           mkdir -p "$CONFORMANCE_DIR"
           tar -xzf "$CONFORMANCE_ARCHIVE" -C "$CONFORMANCE_DIR" --strip-components=1
           test "$(node -p "require('$CONFORMANCE_DIR/package.json').version")" = "0.2.0-alpha.11"
-          npx --yes npm@12.0.2 ci --prefix "$CONFORMANCE_DIR"
-          npx --yes npm@12.0.2 run build --prefix "$CONFORMANCE_DIR"
+          (
+            cd "$CONFORMANCE_DIR"
+            npx --yes npm@12.0.2 ci
+            npx --yes npm@12.0.2 run build
+          )
           scripts/run_conformance_fixture.sh "$CONFORMANCE_DIR" 2026-07-28
           scripts/run_conformance_fixture.sh "$CONFORMANCE_DIR" 2025-11-25
       - name: exact official TypeScript client smoke
