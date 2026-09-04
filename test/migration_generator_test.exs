@@ -65,40 +65,76 @@ if Code.ensure_loaded?(Mix.Ecto) do
       ])
     end
 
-    defp generated_migration(tmp_dir) do
+    defp generated_migration(tmp_dir, base_name) do
       files =
-        Path.wildcard(Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_sessions.exs"))
+        Path.wildcard(Path.join(migrations_dir(tmp_dir), "*_#{base_name}.exs"))
 
       assert [file] = files
       File.read!(file)
     end
 
-    test "generates the session table and contract columns", %{tmp_dir: tmp_dir} do
+    test "generates the session and url elicitation tables with contract columns", %{
+      tmp_dir: tmp_dir
+    } do
       run!([], tmp_dir)
-      source = generated_migration(tmp_dir)
 
-      assert source == source |> Code.format_string!() |> IO.iodata_to_binary()
+      session_source = generated_migration(tmp_dir, "create_attesto_mcp_sessions")
+      assert session_source == session_source |> Code.format_string!() |> IO.iodata_to_binary()
 
-      assert source =~
+      assert session_source =~
                "defmodule Mix.Tasks.AttestoMcpServer.Gen.MigrationTest.TestRepo.Migrations.CreateAttestoMcpSessions"
 
-      assert source =~ "use Ecto.Migration"
-      assert source =~ "create table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)"
-      assert source =~ "add(:namespace, :string, size: 256, primary_key: true, null: false)"
-      assert source =~ "add(:session_id, :string, size: 256, primary_key: true, null: false)"
-      assert source =~ "add(:record, :map, null: false)"
-      assert source =~ "add(:created_at_ms, :bigint, null: false)"
-      assert source =~ "add(:last_seen_ms, :bigint, null: false)"
-      assert source =~ "add(:absolute_timeout_ms, :bigint, null: false)"
-      assert source =~ "add(:idle_timeout_ms, :bigint, null: false)"
-      assert source =~ "add(:expires_at_ms, :bigint, null: false)"
-      assert source =~ "timestamps(type: :utc_datetime_usec)"
+      assert session_source =~ "use Ecto.Migration"
 
-      assert source =~
+      assert session_source =~
+               "create table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)"
+
+      assert session_source =~
+               "add(:namespace, :string, size: 256, primary_key: true, null: false)"
+
+      assert session_source =~
+               "add(:session_id, :string, size: 256, primary_key: true, null: false)"
+
+      assert session_source =~ "add(:record, :map, null: false)"
+      assert session_source =~ "add(:created_at_ms, :bigint, null: false)"
+      assert session_source =~ "add(:last_seen_ms, :bigint, null: false)"
+      assert session_source =~ "add(:absolute_timeout_ms, :bigint, null: false)"
+      assert session_source =~ "add(:idle_timeout_ms, :bigint, null: false)"
+      assert session_source =~ "add(:expires_at_ms, :bigint, null: false)"
+      assert session_source =~ "timestamps(type: :utc_datetime_usec)"
+
+      assert session_source =~
                "index(:attesto_mcp_sessions, [:namespace, :expires_at_ms, :session_id],"
 
-      assert source =~ "def up do"
-      assert source =~ "def down do"
+      assert session_source =~ "def up do"
+      assert session_source =~ "def down do"
+
+      url_source = generated_migration(tmp_dir, "create_attesto_mcp_url_elicitations")
+      assert url_source == url_source |> Code.format_string!() |> IO.iodata_to_binary()
+
+      assert url_source =~
+               "defmodule Mix.Tasks.AttestoMcpServer.Gen.MigrationTest.TestRepo.Migrations.CreateAttestoMcpUrlElicitations"
+
+      assert url_source =~ "use Ecto.Migration"
+
+      assert url_source =~
+               "create table(:attesto_mcp_url_elicitations, primary_key: false, prefix: prefix)"
+
+      assert url_source =~ "add(:namespace, :string, size: 256, primary_key: true, null: false)"
+      assert url_source =~ "add(:id, :string, size: 256, primary_key: true, null: false)"
+      assert url_source =~ "add(:subject_hash, :string, size: 64, null: false)"
+      assert url_source =~ "add(:action, :string, size: 256, null: false)"
+      assert url_source =~ "add(:fields, :map, null: false)"
+      assert url_source =~ "add(:created_at_ms, :bigint, null: false)"
+      assert url_source =~ "add(:expires_at_ms, :bigint, null: false)"
+      assert url_source =~ "add(:consumed_at_ms, :bigint)"
+      assert url_source =~ "timestamps(type: :utc_datetime_usec)"
+
+      assert url_source =~
+               "index(:attesto_mcp_url_elicitations, [:namespace, :expires_at_ms, :consumed_at_ms],"
+
+      assert url_source =~ "def up do"
+      assert url_source =~ "def down do"
     end
 
     test "rejects a missing SQL migration layer before parsing or writing", %{
@@ -142,22 +178,59 @@ if Code.ensure_loaded?(Mix.Ecto) do
 
     test "applies an explicit schema prefix to the table and index", %{tmp_dir: tmp_dir} do
       run!(["--schema-prefix", "mcp_sessions"], tmp_dir)
-      source = generated_migration(tmp_dir)
+      session_source = generated_migration(tmp_dir, "create_attesto_mcp_sessions")
 
-      assert source =~ ~s|prefix = "mcp_sessions"|
-      assert source =~ "CREATE SCHEMA IF NOT EXISTS"
-      assert source =~ "prefix: prefix"
-      refute source =~ "mcp_sessions_attesto_mcp_sessions"
+      assert session_source =~ ~s|prefix = "mcp_sessions"|
+      assert session_source =~ "CREATE SCHEMA IF NOT EXISTS"
+      assert session_source =~ "prefix: prefix"
+      refute session_source =~ "mcp_sessions_attesto_mcp_sessions"
+
+      url_source = generated_migration(tmp_dir, "create_attesto_mcp_url_elicitations")
+
+      assert url_source =~ ~s|prefix = "mcp_sessions"|
+      assert url_source =~ "CREATE SCHEMA IF NOT EXISTS"
+      assert url_source =~ "prefix: prefix"
+      refute url_source =~ "mcp_sessions_attesto_mcp_url_elicitations"
     end
 
-    test "refuses to generate a duplicate migration", %{tmp_dir: tmp_dir} do
+    test "produces two files and rerun produces only the missing one", %{tmp_dir: tmp_dir} do
       run!([], tmp_dir)
 
-      assert_raise Mix.Error, ~r/migration.*already exists/, fn ->
-        run!([], tmp_dir)
-      end
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
 
+      assert [_] =
+               Path.wildcard(
+                 Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_sessions.exs")
+               )
+
+      assert [_] =
+               Path.wildcard(
+                 Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_url_elicitations.exs")
+               )
+
+      run!([], tmp_dir)
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
+
+      [url_migration] =
+        Path.wildcard(
+          Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_url_elicitations.exs")
+        )
+
+      File.rm!(url_migration)
       assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 1
+
+      run!([], tmp_dir)
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
+
+      assert [_] =
+               Path.wildcard(
+                 Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_sessions.exs")
+               )
+
+      assert [_] =
+               Path.wildcard(
+                 Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_url_elicitations.exs")
+               )
     end
 
     test "rejects unsafe schema prefixes", %{tmp_dir: tmp_dir} do

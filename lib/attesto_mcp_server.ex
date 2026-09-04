@@ -39,6 +39,9 @@ defmodule AttestoMCP.Server.API do
   typed MRTR request entries. An HTTP `context_builder` contributes only the
   nested `:host_context` map. Use `AttestoMCP.Server.Result.error/2` when an
   error message and stable code are intentionally safe to disclose.
+  For interactive workflows with `mode: "url"`, `AttestoMCP.Server.API` provides
+  staged, single-use, subject-bound approval records via `stage_url_elicitation/5`,
+  `resolve_url_elicitation/3`, and `consume_url_elicitation/3`.
   """
 
   @typedoc "A supervised server pid or a registered server name."
@@ -86,6 +89,7 @@ defmodule AttestoMCP.Server.API do
           | {:session_store, AttestoMCP.Server.SessionStore.adapter()}
           | {:session_namespace, String.t()}
           | {:session_clustered, boolean()}
+          | {:url_elicitation_store, AttestoMCP.Server.UrlElicitationStore.adapter()}
           | {:telemetry_metadata, map()}
           | {:exception_reporter, term()}
           | {:handler_task_init, term()}
@@ -284,4 +288,30 @@ defmodule AttestoMCP.Server.API do
   """
   @spec cancel_request(server(), term(), term()) :: :ok | {:error, term()}
   defdelegate cancel_request(server, principal, request_id), to: AttestoMCP.Server
+
+  @doc """
+  Stages a URL elicitation record before returning a mode: "url" input request.
+  """
+  @spec stage_url_elicitation(server(), map(), String.t(), map(), keyword()) ::
+          {:ok, %{id: String.t(), expires_at_ms: non_neg_integer()}} | {:error, term()}
+  defdelegate stage_url_elicitation(server, context, action, fields, opts \\ []),
+    to: AttestoMCP.Server.UrlElicitation
+
+  @doc """
+  Resolves a staged URL elicitation record for the host's approval page.
+  """
+  @spec resolve_url_elicitation(server(), String.t(), term()) ::
+          {:ok, %{action: String.t(), fields: map(), expires_at_ms: non_neg_integer()}}
+          | {:error, :not_found | :foreign | :consumed | :expired | :store_unavailable}
+  defdelegate resolve_url_elicitation(server, id, principal_binding),
+    to: AttestoMCP.Server.UrlElicitation
+
+  @doc """
+  Atomically consumes a staged URL elicitation record upon confirmation.
+  """
+  @spec consume_url_elicitation(server(), String.t(), term()) ::
+          {:ok, %{action: String.t(), fields: map(), expires_at_ms: non_neg_integer()}}
+          | {:error, :not_found | :foreign | :consumed | :expired | :store_unavailable}
+  defdelegate consume_url_elicitation(server, id, principal_binding),
+    to: AttestoMCP.Server.UrlElicitation
 end

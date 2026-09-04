@@ -1,22 +1,27 @@
 defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
-  @shortdoc "Generates the Ecto migration backing AttestoMCP.Server.SessionStore.Ecto"
+  @shortdoc "Generates Ecto migrations backing AttestoMCP.Server.SessionStore.Ecto and AttestoMCP.Server.UrlElicitationStore.Ecto"
 
   @moduledoc """
-  Generates the Ecto migration backing
-  `AttestoMCP.Server.SessionStore.Ecto`.
+  Generates the Ecto migrations backing
+  `AttestoMCP.Server.SessionStore.Ecto` and
+  `AttestoMCP.Server.UrlElicitationStore.Ecto`.
 
-  The generated migration creates one PostgreSQL table,
-  `attesto_mcp_sessions`. Rows are keyed by the pair `{namespace,
-  session_id}` so several independently named MCP servers can safely share a
-  repository. The complete versioned session record is stored as JSONB in
-  `record`; `created_at_ms`, `last_seen_ms`, `absolute_timeout_ms`, and
-  `idle_timeout_ms` mirror the record for validation, while `expires_at_ms`
-  is a denormalized value used for bounded SQL-side expiry filtering and
-  cleanup. The record remains the source of truth; these query values are
-  refreshed whenever the record is saved or touched.
+  The generated migrations create two PostgreSQL tables:
+  `attesto_mcp_sessions` and `attesto_mcp_url_elicitations`. Rows are keyed by
+  the namespace and an identifier so several independently named MCP servers
+  can safely share a repository.
 
-  This task only writes a migration file. It never invokes `Ecto.Migrator` or
-  changes the database. Apply the file from the host application's normal
+  The `attesto_mcp_sessions` table stores complete versioned session records as
+  JSONB in `record`; `created_at_ms`, `last_seen_ms`, `absolute_timeout_ms`, and
+  `idle_timeout_ms` mirror the record for validation, while `expires_at_ms` is a
+  denormalized value used for bounded SQL-side expiry filtering and cleanup.
+
+  The `attesto_mcp_url_elicitations` table stores staged approval records with
+  their action, JSONB fields, timestamps, and optional consumed timestamp for
+  atomic single-use verification.
+
+  This task only writes migration files. It never invokes `Ecto.Migrator` or
+  changes the database. Apply the files from the host application's normal
   migration workflow.
 
   ## Usage
@@ -25,31 +30,33 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
 
   ## Options
 
-    * `--repo` - the Ecto repo the migration is generated for. It may be
+    * `--repo` - the Ecto repo the migrations are generated for. It may be
       supplied more than once when several repos intentionally share the
       same application package. When omitted, configured Ecto repos are
       discovered using `Mix.Ecto`, and none or an ambiguous set is rejected.
     * `--schema-prefix` - an optional validated PostgreSQL schema used as
       Ecto's `prefix:` for every table and index. The schema is created with
       `CREATE SCHEMA IF NOT EXISTS` by the migration and is left in place on
-      rollback. The table name is fixed because the runtime schema queries
-      `attesto_mcp_sessions`.
-    * `--migrations-path` - directory in which the migration is written. It
+      rollback. Table names are fixed because the runtime schemas query
+      `attesto_mcp_sessions` and `attesto_mcp_url_elicitations`.
+    * `--migrations-path` - directory in which migrations are written. It
       defaults to the repo's `priv/<repo>/migrations` directory. An explicit
       path may only be used with one repo so generation cannot partially
-      write two competing migrations into the same directory.
+      write competing migrations into the same directory.
 
-  A second invocation refuses to create a duplicate migration for the same
-  path. This makes the table layout discoverable and prevents two generated
-  migrations from competing over the same runtime schema.
+  Each migration file is skipped when a file with that base name already exists
+  in the path. An existing host that reruns the task therefore receives only the
+  new file.
   """
 
   use Mix.Task
 
   import Mix.Generator
 
-  @table_name "attesto_mcp_sessions"
-  @base_name "create_attesto_mcp_sessions"
+  @sessions_table_name "attesto_mcp_sessions"
+  @sessions_base_name "create_attesto_mcp_sessions"
+  @url_elicitations_table_name "attesto_mcp_url_elicitations"
+  @url_elicitations_base_name "create_attesto_mcp_url_elicitations"
   @max_schema_prefix_bytes 63
   @max_key_bytes 256
 
@@ -64,9 +71,6 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
     ensure_ecto!()
 
     {opts, positional, invalid} = OptionParser.parse(args, strict: @switches)
-    # OptionParser reports an option followed by another option as an
-    # invalid option with a nil value. Check this first so a missing repo
-    # value receives the actionable repo-specific error below.
     reject_empty_repo_args!(args)
     reject_invalid_args!(positional, invalid)
     reject_duplicate_options!(args)
@@ -82,12 +86,21 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
 
     reject_shared_explicit_path!(repos, opts)
 
-    # Validate every target before creating any directory or migration file.
-    # A later invalid Repo must not leave an earlier Repo with a half-applied
-    # generation run.
-    plans = Enum.map(repos, &prepare_migration(&1, opts, prefix))
-    reject_duplicate_target_paths!(plans)
+    # Load and validate every repo before any path is derived from it: the
+    # default migrations path reads the repo's configuration, and the repo
+    # module of a host application is not loaded until Mix.Ecto ensures it.
+    # Validating every target first also means a later invalid repo cannot
+    # leave an earlier one with a half-applied generation run.
+    Enum.each(repos, &ensure_repo!/1)
+    reject_duplicate_target_paths!(repos, opts)
+
+    plans = Enum.flat_map(repos, &prepare_migrations(&1, opts, prefix))
     Enum.each(plans, &write_migration/1)
+  end
+
+  defp ensure_repo!(repo) do
+    apply(Mix.Ecto, :ensure_repo, [repo, []])
+    ensure_postgres_repo!(repo)
   end
 
   defp resolve_repos!([], _args) do
@@ -230,44 +243,76 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
     Mix.raise("invalid --schema-prefix: expected nil or a lowercase PostgreSQL schema identifier")
   end
 
-  defp prepare_migration(repo, opts, prefix) do
-    apply(Mix.Ecto, :ensure_repo, [repo, []])
-    ensure_postgres_repo!(repo)
-
+  defp prepare_migrations(repo, opts, prefix) do
     path = migrations_path(repo, opts)
     validate_migrations_path!(path)
     path = Path.expand(path)
 
-    file = Path.join(path, "#{timestamp()}_#{@base_name}.exs")
+    sessions_exists? = Path.wildcard(Path.join(path, "*_#{@sessions_base_name}.exs")) != []
 
-    if Path.wildcard(Path.join(path, "*_#{@base_name}.exs")) != [] do
-      Mix.raise(
-        "migration #{inspect(@base_name)} already exists in #{path}; " <>
-          "remove it before regenerating to avoid duplicate tables"
-      )
-    end
+    url_elicitations_exists? =
+      Path.wildcard(Path.join(path, "*_#{@url_elicitations_base_name}.exs")) != []
 
-    assigns = [
-      module: migration_module(repo),
-      prefix: prefix,
-      table_name: @table_name,
-      key_size: @max_key_bytes
-    ]
+    items =
+      case {sessions_exists?, url_elicitations_exists?} do
+        {false, false} ->
+          [{:sessions, 0}, {:url_elicitations, 1}]
 
-    source =
-      assigns
-      |> migration_template()
-      |> Code.format_string!()
-      |> IO.iodata_to_binary()
+        {false, true} ->
+          [{:sessions, 0}]
 
-    %{path: path, file: file, source: source}
+        {true, false} ->
+          [{:url_elicitations, 0}]
+
+        {true, true} ->
+          []
+      end
+
+    Enum.map(items, fn
+      {:sessions, offset} ->
+        file = Path.join(path, "#{timestamp(offset)}_#{@sessions_base_name}.exs")
+
+        assigns = [
+          module: migration_module(repo, @sessions_base_name),
+          prefix: prefix,
+          table_name: @sessions_table_name,
+          key_size: @max_key_bytes
+        ]
+
+        source =
+          assigns
+          |> migration_template()
+          |> Code.format_string!()
+          |> IO.iodata_to_binary()
+
+        %{path: path, file: file, source: source}
+
+      {:url_elicitations, offset} ->
+        file = Path.join(path, "#{timestamp(offset)}_#{@url_elicitations_base_name}.exs")
+
+        assigns = [
+          module: migration_module(repo, @url_elicitations_base_name),
+          prefix: prefix,
+          table_name: @url_elicitations_table_name,
+          key_size: @max_key_bytes
+        ]
+
+        source =
+          assigns
+          |> url_elicitation_migration_template()
+          |> Code.format_string!()
+          |> IO.iodata_to_binary()
+
+        %{path: path, file: file, source: source}
+    end)
   end
 
-  defp reject_duplicate_target_paths!(plans) do
+  defp reject_duplicate_target_paths!(repos, opts) do
     duplicate_paths =
-      plans
-      |> Enum.group_by(& &1.path)
-      |> Enum.filter(fn {_path, plans_for_path} -> length(plans_for_path) > 1 end)
+      repos
+      |> Enum.map(&Path.expand(migrations_path(&1, opts)))
+      |> Enum.group_by(& &1)
+      |> Enum.filter(fn {_path, repos_for_path} -> length(repos_for_path) > 1 end)
       |> Enum.map(&elem(&1, 0))
 
     if duplicate_paths != [] do
@@ -283,7 +328,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
     create_file(file, source)
   end
 
-  defp ensure_ecto! do
+  defp ensure_ecto!() do
     sql_modules = [Mix.Ecto, Mix.EctoSQL, Ecto.Migration, Ecto.Adapters.Postgres]
 
     unless Enum.all?(sql_modules, &Code.ensure_loaded?/1) do
@@ -344,11 +389,6 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
         end
 
       _not_available ->
-        # Keep the task usable with an Ecto installation that does not expose
-        # Mix.EctoSQL (for example, while loading this always-defined task
-        # without ecto_sql). EctoSQL's source_repo_priv/1 is authoritative
-        # whenever it is available; this branch preserves the historical
-        # single-application fallback only.
         legacy_default_migrations_path(repo)
     end
   end
@@ -368,11 +408,16 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
     Path.join([root, priv, "migrations"])
   end
 
-  defp migration_module(repo),
-    do: Module.concat([repo, Migrations, Macro.camelize(@base_name)])
+  defp migration_module(repo, base_name),
+    do: Module.concat([repo, Migrations, Macro.camelize(base_name)])
 
-  defp timestamp do
-    {{year, month, day}, {hour, minute, second}} = :calendar.universal_time()
+  defp timestamp(offset_seconds) do
+    now =
+      :calendar.universal_time()
+      |> :calendar.datetime_to_gregorian_seconds()
+
+    {{year, month, day}, {hour, minute, second}} =
+      :calendar.gregorian_seconds_to_datetime(now + offset_seconds)
 
     [year, month, day, hour, minute, second]
     |> Enum.map_join(&pad/1)
@@ -434,6 +479,49 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
       create index(:<%= @table_name %>, [:namespace, :expires_at_ms, :session_id],
                prefix: prefix
              )
+    end
+
+    def down do
+      prefix = <%= inspect @prefix %>
+      drop table(:<%= @table_name %>, prefix: prefix)
+    end
+  end
+  """)
+
+  embed_template(:url_elicitation_migration, """
+  defmodule <%= inspect @module %> do
+    @moduledoc false
+
+    # Generated by `mix attesto_mcp_server.gen.migration`.
+    #
+    # Backs AttestoMCP.Server.UrlElicitationStore.Ecto.
+
+    use Ecto.Migration
+
+    def up do
+      prefix = <%= inspect @prefix %>
+
+      # A non-default runtime prefix is a PostgreSQL schema. Create it when
+      # needed, but leave it in place on rollback because it may be shared by
+      # other host-application tables and migrations.
+      <%= if @prefix do %>
+      execute(~s|CREATE SCHEMA IF NOT EXISTS "\#{prefix}"|)
+      <% end %>
+
+      create table(:<%= @table_name %>, primary_key: false, prefix: prefix) do
+        add :namespace, :string, size: <%= @key_size %>, primary_key: true, null: false
+        add :id, :string, size: <%= @key_size %>, primary_key: true, null: false
+        add :subject_hash, :string, size: 64, null: false
+        add :action, :string, size: <%= @key_size %>, null: false
+        add :fields, :map, null: false
+        add :created_at_ms, :bigint, null: false
+        add :expires_at_ms, :bigint, null: false
+        add :consumed_at_ms, :bigint
+
+        timestamps(type: :utc_datetime_usec)
+      end
+
+      create index(:<%= @table_name %>, [:namespace, :expires_at_ms, :consumed_at_ms], prefix: prefix)
     end
 
     def down do

@@ -1370,6 +1370,131 @@ responses use `action` (and accepted `content`), sampling responses use
 `role`, `content`, `model`, and `stopReason`, and roots responses use a
 `roots` array.
 
+#### URL elicitations
+
+An `elicitation/create` request with `mode: "url"` hands the client a link for a
+human to open. The `2025-11-25` and `2026-07-28` revisions accept the mode; the
+`2025-06-18` revision cannot carry it. The server checks only that `url` is a
+string in URI form. Everything that makes the link safe to act on is the host's
+job, and one requirement is load-bearing: the link must carry the operation the
+human is approving, by an opaque staged-record id, never as a bare route. A
+bare `/confirm` link lands the person on a page with nothing to approve,
+because the only copy of the proposed action was inside the tool call that
+already returned. A page that then falls back to a manual form asks the human
+to reconstruct an action they never saw.
+
+Decide first whether an operation deserves a browser gate at all. Reaching a
+protected tool already means holding an OAuth token, scoped to the capability,
+resolving to a named subject that is recorded on whatever the write produces. A
+second gate in a browser re-establishes none of that; it moves the human to a
+worse screen to repeat an assertion the token already made. Gate operations
+that are irreversible or that leave the building: publishing to a
+partner-facing site, granting an outside party access, filing a legal record.
+Do not gate frequent, versioned, revertible internal edits; the friction drives
+people around the tool. Where a gate is warranted, stage the approval with the
+helpers below so the safety properties hold by construction:
+
+* the staged action is bound to the subject it was minted for, so the link is
+  an invitation to its author rather than to whoever holds it;
+* the fields the approval binds are the exact fields the call executes with;
+* the record is single use and expires;
+* an expired, consumed, or foreign link renders an explicit dead end, never a
+  fallback form;
+* staged records are swept, because they hold what the reviewer had to read.
+
+Whether a principal can act on a browser link is a host decision. A machine
+principal can legitimately receive a URL elicitation when the client relays it
+to a person, and an agent acting for a person on a machine token is a valid
+topology, so the library does not refuse the mode by principal type. Decide it
+in the handler before staging.
+
+`AttestoMCP.Server.API.stage_url_elicitation/5` stores a record bound to a
+SHA-256 digest of the handler context's `:principal_binding` (the binding
+itself is never persisted), the action name, and the exact fields, with a TTL
+that defaults to ten minutes and may be set between one second and 24 hours.
+It returns an opaque 256-bit id to embed in the URL. The stored fields must be
+a JSON object within the server's `max_json_bytes` budget. Staging fails with
+`{:error, :principal_binding_required}` when the context has no binding, which
+is the case for a transport that supplies none.
+
+```elixir
+def publish(arguments, context) do
+  fields = %{"site" => arguments["site"], "revision" => arguments["revision"]}
+
+  case AttestoMCP.Server.API.stage_url_elicitation(
+         MyApp.MCPServer,
+         context,
+         "publish_site",
+         fields,
+         ttl_ms: 600_000
+       ) do
+    {:ok, %{id: id}} ->
+      {:input_required,
+       %{
+         "approve" => %{
+           "method" => "elicitation/create",
+           "params" => %{
+             "mode" => "url",
+             "message" => "Approve publishing #{fields["site"]} at #{fields["revision"]}.",
+             "url" => "https://app.example/approvals/#{id}"
+           }
+         }
+       }}
+
+    {:error, reason} ->
+      {:error, reason}
+  end
+end
+```
+
+The approval page resolves the record with the identity the browser session
+established, renders the staged action and fields for review, and consumes the
+record only when the person confirms. The action then runs with the fields
+returned by `consume_url_elicitation/3`, never with values taken from the
+browser request. `resolve_url_elicitation/3` is read-only and returns
+`{:error, :foreign}` before revealing anything when the identity does not
+match; `{:error, :consumed}`, `{:error, :expired}`, and `{:error, :not_found}`
+(unknown or malformed id) are the other dead ends. Render each as a terminal
+message. `consume_url_elicitation/3` is atomic: under concurrent confirmations
+exactly one succeeds and the rest see `{:error, :consumed}`.
+
+```elixir
+def show(conn, %{"id" => id}) do
+  binding = conn.assigns.current_user.id
+
+  case AttestoMCP.Server.API.resolve_url_elicitation(MyApp.MCPServer, id, binding) do
+    {:ok, %{action: action, fields: fields}} -> render(conn, :review, action: action, fields: fields)
+    {:error, reason} -> render(conn, :dead_end, reason: reason)
+  end
+end
+
+def confirm(conn, %{"id" => id}) do
+  binding = conn.assigns.current_user.id
+
+  case AttestoMCP.Server.API.consume_url_elicitation(MyApp.MCPServer, id, binding) do
+    {:ok, %{action: "publish_site", fields: fields}} -> MyApp.Publishing.run(fields)
+    {:error, reason} -> render(conn, :dead_end, reason: reason)
+  end
+end
+```
+
+The browser-side binding must be derived from the same source as the
+transport's `:principal_binding`; otherwise every link resolves as foreign.
+
+Records live in the server's `url_elicitation_store`. The default is an
+in-process store owned by the server, suitable for a single node. Clustered
+deployments configure `url_elicitation_store: {AttestoMCP.Server.UrlElicitationStore.Ecto, store}`
+with a handle from `AttestoMCP.Server.UrlElicitationStore.Ecto.new/1`
+(`repo:`, `namespace:` matching `session_namespace`, optional
+`schema_prefix:`). `mix attesto_mcp_server.gen.migration` generates the
+`attesto_mcp_url_elicitations` migration alongside the session table, and an
+existing host that reruns the task receives only the missing file. Expired
+records are swept on the server's periodic cleanup tick, reported by the
+`[:attesto_mcp_server, :url_elicitation_store, :cleanup]` start and stop
+events; a failing store emits
+`[:attesto_mcp_server, :url_elicitation_store, :failure]` and never affects
+tool results.
+
 ## Era separation
 
 The JSON-RPC decoder rejects batches, invalid UTF-8, fractional/null IDs,
