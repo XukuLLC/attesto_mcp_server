@@ -5965,7 +5965,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
     migration_command = session_migration_command(repo, schema_prefix)
 
     """
-    Preserved the existing bundled Ecto session store with #{inspect(repo)} and namespace #{inspect(namespace)}. Ensure its table has already been migrated. If no migration has been generated, run:
+    Preserved the existing bundled Ecto session store with #{inspect(repo)} and namespace #{inspect(namespace)}. Ensure its tables have already been migrated. If no migration has been generated, run:
 
         #{migration_command}
 
@@ -5982,7 +5982,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
     migration_command = session_migration_command(repo, schema_prefix)
 
     """
-    2025-era session-bound MCP requests use the bundled Ecto store with #{inspect(repo)} and namespace #{inspect(namespace)}. This keeps sessions across application restarts. Generate its table with:
+    2025-era session-bound MCP requests use the bundled Ecto store with #{inspect(repo)} and namespace #{inspect(namespace)}. This keeps sessions across application restarts. Generate its tables with:
 
         #{migration_command}
 

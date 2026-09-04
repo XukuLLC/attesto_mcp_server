@@ -28,6 +28,22 @@ defmodule AttestoMCP.Server.Telemetry do
   records, principals, tenants, or adapter error details; explicitly configured
   trusted `telemetry_metadata` remains attached. A failed pass still emits the
   existing `session_store/failure` event.
+
+  The `[:attesto_mcp_server, :url_elicitation_store, :cleanup]` heartbeat emits
+  a `:start` event for every periodic expiry pass and a `:stop` event after the
+  cleanup operation. The stop measurements contain a non-negative elapsed
+  `:duration` for the store call, bounded return normalization, and failure
+  reporting, plus the bounded `:count` of URL elicitations reaped for this
+  server namespace. Stop metadata reports `:success` or `:unavailable`. The
+  cleanup implementation never adds elicitation IDs, action names, staged fields,
+  subject hashes, or adapter error details; explicitly configured trusted
+  `telemetry_metadata` remains attached. A failed pass still emits the
+  `[:attesto_mcp_server, :url_elicitation_store, :failure]` event.
+
+  The `[:attesto_mcp_server, :url_elicitation_store, :failure]` event reports a
+  URL-elicitation-store operation that failed. Its failure-specific metadata
+  contains only the bounded operation atom in `:source` and a neutral
+  `:unavailable` outcome.
   """
 
   @prefix [:attesto_mcp_server]

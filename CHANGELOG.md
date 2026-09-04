@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 2.1.0 - 2026-09-03
+
+- Add staged URL elicitation support for modern interactive requests in the
+  `2026-07-28` protocol revision (`AttestoMCP.Server.UrlElicitation` and
+  `AttestoMCP.Server.API` helpers: `stage_url_elicitation/5`,
+  `resolve_url_elicitation/3`, `consume_url_elicitation/3`).
+- Add `AttestoMCP.Server.UrlElicitationStore` behaviour with built-in
+  in-process ETS adapter (`AttestoMCP.Server.UrlElicitationStore.ETS`) and
+  optional PostgreSQL Ecto adapter (`AttestoMCP.Server.UrlElicitationStore.Ecto`).
+- Implement atomic single-use consume semantics with foreign subject precedence
+  to prevent cross-user state disclosure.
+- Add periodic cleanup sweep of expired URL elicitations running alongside session
+  cleanup with dedicated start, stop, and failure telemetry events.
+- Make `mix attesto_mcp_server.gen.migration` write a second migration,
+  `create_attesto_mcp_url_elicitations`, and skip each file whose base name
+  already exists, so an existing host that reruns the task receives only the
+  new table.
+- Document `mode: "url"` elicitations in the usage guide: the link must carry
+  the staged approval by opaque id, never as a bare route, and the staged
+  record is subject-bound, single-use, time-limited, an explicit dead end when
+  expired, consumed, or foreign, and swept. The section also states which
+  operations deserve a browser gate and why the library does not refuse the
+  mode by principal type.
+
 ## 2.0.1 - 2026-09-02
 
 - Bind automatic protected-resource callbacks to the named profile loaded from

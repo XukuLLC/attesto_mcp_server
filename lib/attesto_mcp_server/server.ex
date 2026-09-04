@@ -39,7 +39,8 @@ defmodule AttestoMCP.Server do
     :request_state_store,
     :request_store,
     :request_store_external,
-    :session_store
+    :session_store,
+    :url_elicitation_store
   ]
   @max_trace_state_bytes 4096
   @max_template_uri_bytes 4_096
@@ -110,6 +111,7 @@ defmodule AttestoMCP.Server do
     :session_store,
     :session_namespace,
     :session_clustered,
+    :url_elicitation_store,
     :telemetry_metadata,
     :exception_reporter,
     :handler_task_init,
@@ -141,6 +143,10 @@ defmodule AttestoMCP.Server do
     :session_store_monitor,
     :session_namespace,
     :session_cluster_group,
+    :url_elicitation_store_module,
+    :url_elicitation_store,
+    :url_elicitation_store_external,
+    :url_elicitation_store_monitor,
     :active,
     :rate_buckets,
     :legacy_streams,
@@ -578,6 +584,13 @@ defmodule AttestoMCP.Server do
   @spec options(pid() | atom()) :: keyword()
   def options(server), do: GenServer.call(server, :options)
 
+  @doc false
+  def url_elicitation_store(server) do
+    GenServer.call(server, :url_elicitation_store)
+  catch
+    _kind, _reason -> {:error, :store_unavailable}
+  end
+
   @doc "Consumes one bounded rate-limit token for a principal/category key."
   @spec allow_rate(pid() | atom(), term(), atom()) :: :ok | {:error, :rate_limited}
   def allow_rate(server, key, category), do: GenServer.call(server, {:allow_rate, key, category})
@@ -808,6 +821,9 @@ defmodule AttestoMCP.Server do
     {session_store_module, session_store, session_store_external, session_store_monitor,
      session_namespace, session_cluster_group} = setup_session_store(normalized_opts)
 
+    {url_elicitation_store_module, url_elicitation_store, url_elicitation_store_external,
+     url_elicitation_store_monitor} = setup_url_elicitation_store(normalized_opts)
+
     Process.send_after(self(), :cleanup_sessions, 60_000)
 
     {:ok,
@@ -830,6 +846,10 @@ defmodule AttestoMCP.Server do
        session_store_monitor: session_store_monitor,
        session_namespace: session_namespace,
        session_cluster_group: session_cluster_group,
+       url_elicitation_store_module: url_elicitation_store_module,
+       url_elicitation_store: url_elicitation_store,
+       url_elicitation_store_external: url_elicitation_store_external,
+       url_elicitation_store_monitor: url_elicitation_store_monitor,
        active: %{global: 0, principals: %{}, requests: %{}},
        rate_buckets: %{},
        legacy_streams: %{},
@@ -849,6 +869,16 @@ defmodule AttestoMCP.Server do
 
   def handle_call(:options, _from, state),
     do: {:reply, Keyword.drop(state.opts, @private_option_keys), state}
+
+  def handle_call(:url_elicitation_store, _from, state) do
+    {:reply,
+     %{
+       module: state.url_elicitation_store_module,
+       store: state.url_elicitation_store,
+       namespace: state.session_namespace,
+       max_json_bytes: state.opts[:max_json_bytes] || Schema.default_instance_bytes()
+     }, state}
+  end
 
   def handle_call({:allow_rate, key, category}, _from, state) do
     now = System.monotonic_time(:millisecond)
@@ -1654,6 +1684,9 @@ defmodule AttestoMCP.Server do
       monitor == state.session_store_monitor and pid == state.session_store ->
         {:stop, :session_store_unavailable, state}
 
+      monitor == state.url_elicitation_store_monitor and pid == state.url_elicitation_store ->
+        {:stop, :url_elicitation_store_unavailable, state}
+
       true ->
         handle_process_down(monitor, pid, reason, state)
     end
@@ -1699,6 +1732,31 @@ defmodule AttestoMCP.Server do
       Enum.reduce(expired, state, &close_legacy_streams_for_session(&2, &1, :session_expired))
 
     broadcast_session_close(state, :session_expired, expired)
+
+    state_telemetry(
+      state,
+      [:url_elicitation_store, :cleanup, :start],
+      %{system_time: System.system_time()},
+      %{}
+    )
+
+    url_cleanup_started = System.monotonic_time()
+
+    {url_expired, url_cleanup_outcome} =
+      case cleanup_url_elicitation_records(state) do
+        {:ok, expired_ids} -> {expired_ids, :success}
+        {:error, :url_elicitation_store_unavailable} -> {[], :unavailable}
+      end
+
+    state_telemetry(
+      state,
+      [:url_elicitation_store, :cleanup, :stop],
+      %{
+        duration: max(System.monotonic_time() - url_cleanup_started, 0),
+        count: length(url_expired)
+      },
+      %{outcome: url_cleanup_outcome}
+    )
 
     Process.send_after(self(), :cleanup_sessions, 60_000)
     {:noreply, state}
@@ -2044,6 +2102,56 @@ defmodule AttestoMCP.Server do
     end
   end
 
+  defp setup_url_elicitation_store(opts) do
+    case Keyword.get(opts, :url_elicitation_store) do
+      nil ->
+        {:ok, store} = AttestoMCP.Server.UrlElicitationStore.ETS.start_link([])
+        {AttestoMCP.Server.UrlElicitationStore.ETS, store, false, nil}
+
+      {module, store} when is_atom(module) ->
+        validate_url_elicitation_store_adapter!(module)
+        monitor = if is_pid(store), do: Process.monitor(store)
+        {module, store, true, monitor}
+    end
+  end
+
+  defp validate_url_elicitation_store_adapter!(module) do
+    callbacks = [
+      put: 2,
+      fetch: 3,
+      consume: 5,
+      cleanup_expired: 2
+    ]
+
+    unless Code.ensure_loaded?(module) and
+             Enum.all?(callbacks, fn {function, arity} ->
+               function_exported?(module, function, arity)
+             end) do
+      raise ArgumentError,
+            ":url_elicitation_store module must implement AttestoMCP.Server.UrlElicitationStore"
+    end
+  end
+
+  defp validate_url_elicitation_store_namespace!(opts) do
+    case Keyword.get(opts, :url_elicitation_store) do
+      {module, store}
+      when module in [
+             AttestoMCP.Server.UrlElicitationStore.Ecto,
+             :"Elixir.AttestoMCP.Server.UrlElicitationStore.Ecto"
+           ] ->
+        namespace = Keyword.get(opts, :session_namespace) || default_session_namespace(opts)
+
+        unless Code.ensure_loaded?(module) and function_exported?(module, :namespace_matches?, 2) and
+                 apply(module, :namespace_matches?, [store, namespace]) do
+          raise ArgumentError,
+                ":url_elicitation_store must be a valid Ecto handle whose namespace matches :session_namespace"
+        end
+
+      _other ->
+        :ok
+    end
+  end
+
   defp ensure_pg_started! do
     case :pg.start_link(@session_pg_scope) do
       {:ok, pid} -> Process.unlink(pid)
@@ -2345,6 +2453,14 @@ defmodule AttestoMCP.Server do
     end
 
     validate_session_store_namespace!(opts)
+
+    case Keyword.get(opts, :url_elicitation_store) do
+      nil -> :ok
+      {module, _store} when is_atom(module) -> validate_url_elicitation_store_adapter!(module)
+      _ -> raise ArgumentError, ":url_elicitation_store must be a {module, store} adapter tuple"
+    end
+
+    validate_url_elicitation_store_namespace!(opts)
 
     if opts[:session_clustered] == true and
          (is_nil(opts[:session_store]) or is_nil(opts[:session_namespace])) do
@@ -3567,6 +3683,77 @@ defmodule AttestoMCP.Server do
 
       {:error, :session_store_unavailable} ->
         {:error, :session_store_unavailable}
+    end
+  end
+
+  defp cleanup_url_elicitation_records(state) do
+    now_ms = System.system_time(:millisecond)
+
+    case safe_url_elicitation_store_call(state, :cleanup_expired, [now_ms]) do
+      {:ok, ids} when is_list(ids) and length(ids) <= 1_000 ->
+        valid_ids =
+          Enum.filter(ids, fn id ->
+            is_binary(id) and byte_size(id) in 1..256 and String.valid?(id) and
+              :binary.match(id, <<0>>) == :nomatch
+          end)
+
+        if length(valid_ids) == length(ids) do
+          {:ok, valid_ids}
+        else
+          state_telemetry(
+            state,
+            [:url_elicitation_store, :failure],
+            %{count: 1},
+            %{source: :cleanup_expired, outcome: :unavailable}
+          )
+
+          {:error, :url_elicitation_store_unavailable}
+        end
+
+      {:error, :url_elicitation_store_unavailable} ->
+        {:error, :url_elicitation_store_unavailable}
+
+      _other ->
+        state_telemetry(
+          state,
+          [:url_elicitation_store, :failure],
+          %{count: 1},
+          %{source: :cleanup_expired, outcome: :unavailable}
+        )
+
+        {:error, :url_elicitation_store_unavailable}
+    end
+  end
+
+  defp safe_url_elicitation_store_call(state, function, arguments) do
+    result =
+      try do
+        apply(state.url_elicitation_store_module, function, [
+          state.url_elicitation_store | arguments
+        ])
+      catch
+        _kind, _reason -> {:error, :url_elicitation_store_unavailable}
+      end
+
+    case result do
+      {:ok, _val} ->
+        result
+
+      :not_found ->
+        result
+
+      {:error, reason} when reason in [:expired, :consumed, :foreign] ->
+        result
+
+      _failure ->
+        state_telemetry(
+          state,
+          [:url_elicitation_store, :failure],
+          %{count: 1},
+          %{source: function, outcome: :unavailable}
+        )
+
+        {:error, :url_elicitation_store_unavailable}
     end
   end
 
