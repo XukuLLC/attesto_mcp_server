@@ -1,13 +1,13 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 2.1.0, not a
+This is reproducible test evidence for `attesto_mcp_server` 2.2.0, not a
 certification, endorsement, or claim of support for every optional MCP
 extension.
 
 ## Tested candidate
 
 - source fingerprint:
-  `f056d4e0531e24f9de6c2ebd36d9469fb65cba17fb21e35f687a032cd6afca71`
+  `b1f81588d4869f6d59bde5762050b1c0ef49b00178a76ca8dcb6008e8fd2b2c5`
 - official runner: `@modelcontextprotocol/conformance` `0.2.0-alpha.11`
 - runner commit: `74edef34d674f563537be8c6587cebaa58e830ca`
 - runner archive SHA-256:
@@ -74,8 +74,8 @@ token acquisition.
 
 ## Package gates
 
-- The default lane passed 672 checks: one doctest and 671 tests, with the 49
-  database-gated tests skipped. Coverage for this default lane was 78.94%.
+- The default lane passed 674 checks: one doctest and 673 tests, with the 49
+  database-gated tests skipped. Coverage for this default lane was 78.99%.
   A separate non-coverage PostgreSQL lane then passed all 49 durable Ecto
   tests: 39 for the session store and 10 for the URL elicitation store.
 - Dialyzer completed with zero errors and zero skips.

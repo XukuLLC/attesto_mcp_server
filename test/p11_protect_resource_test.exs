@@ -215,6 +215,93 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
     assert request.(invalid).status == 401
   end
 
+  test "trusted audiences accept a gateway token without changing canonical metadata", %{
+    server: server
+  } do
+    config = AttestoMCP.Test.Factory.config()
+    canonical = "https://mcp.example.com/mcp"
+    gateway = "https://gateway.example.net/proxy/mcp"
+
+    assert :ok =
+             Server.register_tool(server, "gateway-audience-check", %{
+               input_schema: %{"type" => "object"},
+               handler: fn _arguments, _context -> {:ok, "accepted"} end
+             })
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [
+          config: config,
+          resource: canonical,
+          trusted_audiences: [canonical, gateway]
+        ]
+      )
+
+    assert get_in(plug, [:auth_boundary, :authenticate, :trusted_audiences]) == [
+             canonical,
+             gateway
+           ]
+
+    refute get_in(plug, [:auth_boundary, :authenticate, :resource_audience])
+
+    metadata =
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(plug)
+
+    assert metadata.status == 200
+    assert Jason.decode!(metadata.resp_body)["resource"] == canonical
+
+    request = fn token ->
+      body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "tools/call",
+          "params" => %{
+            "_meta" => %{
+              "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+              "io.modelcontextprotocol/clientCapabilities" => %{}
+            },
+            "name" => "gateway-audience-check",
+            "arguments" => %{}
+          }
+        })
+
+      conn(:post, "/mcp", body)
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> put_req_header("mcp-protocol-version", "2026-07-28")
+      |> put_req_header("mcp-method", "tools/call")
+      |> put_req_header("mcp-name", "gateway-audience-check")
+      |> AttestoMCP.Server.Plug.call(plug)
+    end
+
+    gateway_token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()],
+        audience: gateway
+      )
+
+    canonical_token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()],
+        audience: canonical
+      )
+
+    unknown_token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_call()],
+        audience: "https://unknown.example.org/mcp"
+      )
+
+    assert request.(gateway_token).status == 200
+    assert request.(canonical_token).status == 200
+    assert request.(unknown_token).status == 401
+  end
+
   test "request-state fallback secret is stable under concurrent first use" do
     secret_key = {AttestoMCP.Server.RequestState, :secret}
     previous = :persistent_term.get(secret_key, nil)

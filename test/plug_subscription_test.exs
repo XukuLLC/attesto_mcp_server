@@ -194,6 +194,47 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     refute Process.alive?(pid)
   end
 
+  test "subscription delivery reuses the configured trusted audience policy" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    gateway = "https://gateway.example.net/proxy/mcp"
+    parent = self()
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_read()],
+        audience: gateway
+      )
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [
+          config: config,
+          resource: @resource,
+          trusted_audiences: [@resource, gateway]
+        ]
+      )
+
+    id = 114
+    pid = start_stream(parent, plug, token, id, %{"toolsListChanged" => true})
+
+    assert :ok = await_subscriptions(server, 1)
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    Server.close_subscription(server, id, pid)
+
+    assert_receive {:subscription_done, ^id, conn}, 2_000
+
+    assert Enum.map(stream_messages(conn), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             "notifications/tools/list_changed",
+             nil
+           ]
+
+    refute Process.alive?(pid)
+  end
+
   test "DPoP subscription delivery retains custom auth assigns without reloading an opaque principal" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()
