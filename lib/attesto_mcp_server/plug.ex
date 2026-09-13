@@ -19,6 +19,12 @@ defmodule AttestoMCP.Server.Plug do
   not replace the boundary's canonical assign keys, and failures fail the
   request closed.
 
+  A host may keep that canonical resource pinned for RFC 9728 metadata while
+  accepting tokens for an explicit set of alternate gateway identifiers by
+  supplying Attesto core's `:trusted_audiences` inside `:auth`. The list
+  replaces the single-resource audience policy, so it must include the
+  canonical resource when direct clients should remain accepted.
+
   `:principal_binding` may derive a bounded stable identity from the complete
   authenticated principal without replacing the value handlers receive.
   `:client_ip` may derive the canonical IPv4 or IPv6 tuple used by both
@@ -1127,6 +1133,7 @@ defmodule AttestoMCP.Server.Plug do
     audience =
       cond do
         absolute_resource?(explicit_audience) -> explicit_audience
+        Keyword.has_key?(auth_opts, :trusted_audiences) -> nil
         absolute_resource?(explicit_resource) -> explicit_resource
         absolute_origin?(auth_opts[:base_url] || auth_opts[:origin]) -> :resource
         auth_opts[:allow_dynamic_origin] == true -> :resource
@@ -1885,6 +1892,7 @@ defmodule AttestoMCP.Server.Plug do
     token = access_token(conn)
     config = auth_config(state.auth_opts)
     canonical = canonical_resource(conn, state.auth_opts)
+    trusted_audiences = trusted_audience_policy(state.auth_opts, canonical)
     initial_context = auth_context(conn)
 
     fn owner ->
@@ -1897,7 +1905,7 @@ defmodule AttestoMCP.Server.Plug do
         reauthorize_delivery?(
           token,
           config,
-          canonical,
+          trusted_audiences,
           initial_context,
           owner,
           required_scope_sets
@@ -3291,6 +3299,7 @@ defmodule AttestoMCP.Server.Plug do
     token = access_token(conn)
     config = auth_config(state.auth_opts)
     canonical = canonical_resource(conn, state.auth_opts)
+    trusted_audiences = trusted_audience_policy(state.auth_opts, canonical)
 
     Map.put(context, :subscription_authorize, fn owner ->
       with {:ok, event_scope_sets} <- owner_required_scope_sets(owner),
@@ -3298,7 +3307,7 @@ defmodule AttestoMCP.Server.Plug do
         reauthorize_delivery?(
           token,
           config,
-          canonical,
+          trusted_audiences,
           context,
           owner,
           required_scope_sets
@@ -3318,7 +3327,7 @@ defmodule AttestoMCP.Server.Plug do
   defp reauthorize_delivery?(
          token,
          config,
-         canonical,
+         trusted_audiences,
          initial_context,
          owner,
          required_scope_sets
@@ -3331,7 +3340,7 @@ defmodule AttestoMCP.Server.Plug do
     with %Attesto.Config{} <- config,
          sender_opts when is_list(sender_opts) <- sender_verification_opts(sender),
          verify_opts <-
-           [expected_typ: "access", trusted_audiences: [canonical]] ++ sender_opts,
+           [expected_typ: "access", trusted_audiences: trusted_audiences] ++ sender_opts,
          {:ok, current_claims} <- Attesto.Token.verify(config, token, verify_opts),
          true <- Map.get(current_claims, "cnf", %{}) == confirmation,
          initial_actor when not is_nil(initial_actor) <- token_actor(claims),
@@ -3350,6 +3359,13 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp reauthorize_delivery?(_, _, _, _, _, _), do: false
+
+  defp trusted_audience_policy(auth_opts, canonical) do
+    case Keyword.fetch(auth_opts, :trusted_audiences) do
+      {:ok, policy} -> policy
+      :error -> [canonical]
+    end
+  end
 
   defp owner_required_scope_sets(owner) when is_map(owner) do
     case owner[:required_scope_sets] || owner["required_scope_sets"] do

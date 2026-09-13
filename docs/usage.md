@@ -484,6 +484,27 @@ the explicit callback path can also provide a `:principal` callback for
 principal availability and access-token revocation policy. The metadata
 endpoint is public; protected POST/GET/DELETE traffic is not.
 
+When a trusted reverse gateway substitutes its own RFC 8707 resource identifier,
+keep `:resource` pinned to the canonical public endpoint and configure the exact
+accepted identifiers through Attesto core's `:trusted_audiences` policy:
+
+```elixir
+auth: [
+  config: &MyApp.MCP.attesto_config/0,
+  resource: "https://mcp.example.com/mcp",
+  trusted_audiences: [
+    "https://mcp.example.com/mcp",
+    "https://gateway.example.net/proxy/mcp"
+  ]
+]
+```
+
+The canonical resource continues to drive protected-resource metadata and
+authentication challenges. The explicit list replaces single-resource audience
+verification, including subscription reauthorization, so include the canonical
+identifier when direct clients should remain valid. Every unlisted audience is
+rejected.
+
 Static `:auth` options may select distinct, non-nil, non-boolean atom keys for
 `:claims_key`, `:context_key`, `:principal_key`, `:scopes_key`, and
 `:sender_key`, provided a custom key does not reuse a different package-owned

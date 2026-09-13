@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.2.0 - 2026-09-13
+
+- Allow a protected MCP endpoint to retain its canonical RFC 9728 resource in
+  metadata while using Attesto core's explicit `:trusted_audiences` policy for
+  access tokens issued to trusted reverse-gateway identifiers. Subscription
+  delivery now reuses the same audience policy.
+
 ## 2.1.0 - 2026-09-03
 
 - Add staged URL elicitation support for modern interactive requests in the
