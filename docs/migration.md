@@ -5,6 +5,34 @@ This guide maps an existing MCP catalog and deployment onto
 authorization, and rollout safety. The [usage guide](usage.md) contains the
 complete option reference.
 
+## JSON Schema evaluation and format policy
+
+The JSV evaluator accepts standard reference scope and unevaluated annotations
+that the previous bounded validator rejected or evaluated incorrectly. Remote
+references and custom network dialects remain unavailable. Data is never cast
+and schema defaults remain annotations during dispatch.
+
+Tool input and structured output retain format assertions in 2.x. A server can
+select `schema_formats: false` to treat formats as annotations; protocol
+elicitation URLs and form responses continue to assert formats in either mode.
+Direct callers of `Schema.validate/3` and `apply_property_defaults/3` also retain
+format assertions by default. Pass `formats: false` to use annotation semantics.
+
+JSV adds `abnf_parsec`, `nimble_parsec`, `texture`, `idna`, and Decimal to the
+base runtime dependency graph. The evaluator does more work than the previous
+validator: a review measured approximately 215 microseconds per warm validation
+versus 55 microseconds previously, and about 177 milliseconds to initialize the
+embedded meta-schemas on a node. These measurements depend on the schema and
+machine; benchmark representative schemas before planning throughput. Initialization
+uses a node-local lock and the meta-schemas are reused by subsequent calls.
+Existing public validation reasons are preserved where a corresponding legacy
+reason exists; newly supported constraints return `{:schema_validation, ...}`.
+
+The rate-limit error code changes from the undefined reserved `-32029` to the
+application code `-33029`; HTTP status remains 429. Clients matching the numeric
+code must update. Existing legacy `-32000` and `-32003` errors are retained for
+wire compatibility; they are not examples for new application errors.
+
 ## 2.0 deployment hardening
 
 Version 2.0 makes the Phoenix parser bypass match each configured decoded path
@@ -406,7 +434,7 @@ reference so only the intended completion handler can run.
 ## 4. Migrate schemas without implicit coercion
 
 Tool input schemas and optional output schemas use the package's bounded local
-JSON Schema 2020-12/draft-07 subset. Remote references are never fetched.
+JSON Schema 2020-12/draft-07 validation. Remote references are never fetched.
 Validate representative schemas during the migration rather than waiting for
 the first client request:
 

@@ -4,7 +4,10 @@
     "config/*.exs",
     "lib/**/*.{ex,exs}",
     "test/**/*.exs",
-    "fixtures/**/*.{ex,exs}",
+    "fixtures/*/*.{ex,exs}",
+    "fixtures/*/config/*.exs",
+    "fixtures/*/lib/**/*.{ex,exs}",
+    "fixtures/*/test/**/*.exs",
     "examples/*.{exs,livemd}",
     "examples/consumer/mix.exs",
     "examples/consumer/{lib,test}/**/*.{ex,exs}"

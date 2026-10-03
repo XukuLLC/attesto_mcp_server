@@ -205,6 +205,16 @@ output checks. Pairing `output_canonicalization: :jason` with
 whose existing handlers already use Jason-derived structs and atom-keyed tool
 arguments.
 
+Schema validation uses JSV with embedded 2020-12 and draft-07 dialects.
+Remote references are disabled, schema compilation and validation have bounded
+execution time, and validation never casts input data. Tool input and output
+formats remain assertions by default in 2.x; set `schema_formats: false` on
+the server to use annotation semantics. Protocol elicitation URLs and form
+responses always assert their declared formats. Direct Schema callers also
+retain format assertions; pass `formats: false` for annotation semantics.
+CI runs the pinned official JSON Schema corpus in annotation mode, with
+explicit exclusions for network references and custom network dialects.
+
 JSON Schema `default` values are annotations and are not inserted during normal
 dispatch. Applications that intentionally need bounded direct-property defaults
 can call `AttestoMCP.Server.Schema.apply_property_defaults/2`.

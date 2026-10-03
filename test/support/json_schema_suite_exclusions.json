@@ -1,0 +1,137 @@
+{
+  "upstream_commit": "5b0ee1613e45fcc2bddac00e07c19cd49b00d8a8",
+  "exclusions": [
+    {
+      "file": "dynamicRef.json",
+      "description": "strict-tree schema, guards against misspelled properties",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "dynamicRef.json",
+      "description": "tests for implementation dynamic anchor and reference link",
+      "reason": "remote_ref_disabled",
+      "tests": 3
+    },
+    {
+      "file": "dynamicRef.json",
+      "description": "$ref and $dynamicAnchor are independent of order - $defs first",
+      "reason": "remote_ref_disabled",
+      "tests": 3
+    },
+    {
+      "file": "dynamicRef.json",
+      "description": "$ref and $dynamicAnchor are independent of order - $ref first",
+      "reason": "remote_ref_disabled",
+      "tests": 3
+    },
+    {
+      "file": "dynamicRef.json",
+      "description": "$ref to $dynamicRef finds detached $dynamicAnchor",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "remote ref",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "fragment within remote ref",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "anchor within remote ref",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "ref within remote ref",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "base URI change",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "base URI change - change folder",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "base URI change - change folder in subschema",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "root ref in remote ref",
+      "reason": "remote_ref_disabled",
+      "tests": 3
+    },
+    {
+      "file": "refRemote.json",
+      "description": "remote ref with ref to defs",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "Location-independent identifier in remote ref",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "retrieved nested refs resolve relative to their URI not $id",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "remote HTTP ref with different $id",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "remote HTTP ref with different URN $id",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "remote HTTP ref with nested absolute ref",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "refRemote.json",
+      "description": "$ref to $ref finds detached $anchor",
+      "reason": "remote_ref_disabled",
+      "tests": 2
+    },
+    {
+      "file": "vocabulary.json",
+      "description": "schema that uses custom metaschema with with no validation vocabulary",
+      "reason": "unsupported_dialect",
+      "tests": 3
+    },
+    {
+      "file": "vocabulary.json",
+      "description": "ignore unrecognized optional vocabulary",
+      "reason": "unsupported_dialect",
+      "tests": 2
+    }
+  ]
+}

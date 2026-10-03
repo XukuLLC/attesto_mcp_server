@@ -112,7 +112,7 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
                  params:
                    Map.merge(retry, %{
                      "inputResponses" => %{
-                       "client_choice" => %{"action" => "accept", "content" => %{}},
+                       "client_choice" => %{"action" => "invalid", "content" => %{}},
                        "unexpected" => true
                      }
                    })
@@ -164,6 +164,323 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
                %{principal: "mrtr"},
                version: @version
              )
+  end
+
+  test "partial retries re-request only missing inputs, preserve validated answers, and remain bound and single-use" do
+    server = start_server()
+    owner = self()
+    form = form_input_request()
+    root = %{"method" => "roots/list", "params" => %{}}
+    requests = %{"first" => form, "second" => form, "third" => root}
+
+    :ok =
+      Server.register_tool(server, "repair", %{
+        input_schema: %{"type" => "object"},
+        handler: fn args, _ ->
+          send(owner, {:repair_handler, args})
+
+          if Enum.all?(Map.keys(requests), &Map.has_key?(args, &1)),
+            do: {:ok, args},
+            else: {:input_required, requests}
+        end
+      })
+
+    params = repair_params(%{"name" => "repair", "arguments" => %{}})
+    context = %{principal: "repair", tenant: "tenant-a"}
+    first = %{"action" => "accept", "content" => %{"value" => "first"}}
+    second = %{"action" => "accept", "content" => %{"value" => "second"}}
+    third = %{"roots" => [%{"uri" => "file:///workspace"}]}
+
+    assert {1, %{"error" => %{"data" => %{"reason" => "request_state_required"}}}} =
+             repair_dispatch(
+               server,
+               1,
+               "tools/call",
+               Map.put(params, "inputResponses", %{"first" => first}),
+               context
+             )
+
+    refute_received {:repair_handler, _}
+
+    assert {2, %{"result" => %{"requestState" => state}}} =
+             repair_dispatch(server, 2, "tools/call", params, context)
+
+    assert_receive {:repair_handler, %{}}
+
+    invalid =
+      Map.merge(params, %{
+        "requestState" => state,
+        "inputResponses" => %{
+          "first" => %{"action" => "accept", "content" => %{"value" => 123}}
+        }
+      })
+
+    assert {3, %{"error" => %{"data" => %{"reason" => "invalid_input_response"}}}} =
+             repair_dispatch(server, 3, "tools/call", invalid, context)
+
+    assert {4, %{"error" => %{"data" => %{"reason" => "invalid_input_response"}}}} =
+             repair_dispatch(
+               server,
+               4,
+               "tools/call",
+               Map.put(invalid, "inputResponses", []),
+               context
+             )
+
+    partial =
+      Map.merge(params, %{
+        "requestState" => state,
+        "inputResponses" => %{
+          "first" => first,
+          "unrecognized" => "ignored"
+        }
+      })
+
+    assert {5,
+            %{
+              "result" => %{
+                "resultType" => "input_required",
+                "requestState" => next,
+                "inputRequests" => missing
+              }
+            }} =
+             repair_dispatch(server, 5, "tools/call", partial, context)
+
+    assert Map.keys(missing) |> Enum.sort() == ["second", "third"]
+    assert next != state
+    assert state_payload(next)["e"] == state_payload(state)["e"]
+    assert state_payload(next)["a"] == %{"first" => first}
+    refute_received {:repair_handler, _}
+
+    assert {6, %{"error" => %{"data" => %{"reason" => "invalid_request_state"}}}} =
+             repair_dispatch(server, 6, "tools/call", partial, context)
+
+    tampered = String.slice(next, 0, byte_size(next) - 1) <> "!"
+
+    next_partial =
+      Map.merge(params, %{"requestState" => next, "inputResponses" => %{"second" => second}})
+
+    assert {7, %{"error" => %{"data" => %{"reason" => "invalid_request_state"}}}} =
+             repair_dispatch(
+               server,
+               7,
+               "tools/call",
+               Map.put(next_partial, "requestState", tampered),
+               context
+             )
+
+    assert {8, %{"error" => %{"data" => %{"reason" => "invalid_request_state"}}}} =
+             repair_dispatch(server, 8, "tools/call", next_partial, %{
+               context
+               | principal: "other"
+             })
+
+    assert {9, %{"error" => %{"data" => %{"reason" => "invalid_request_state"}}}} =
+             repair_dispatch(
+               server,
+               9,
+               "tools/call",
+               Map.put(next_partial, "name", "other"),
+               context
+             )
+
+    assert {10, %{"result" => %{"requestState" => final_state, "inputRequests" => final_missing}}} =
+             repair_dispatch(server, 10, "tools/call", next_partial, context)
+
+    assert Map.keys(final_missing) == ["third"]
+    assert state_payload(final_state)["e"] == state_payload(state)["e"]
+    assert state_payload(final_state)["a"] == %{"first" => first, "second" => second}
+
+    complete =
+      Map.merge(params, %{
+        "requestState" => final_state,
+        "inputResponses" => %{
+          "third" => third,
+          "first" => %{"action" => "accept", "content" => %{"value" => "overwrite-attempt"}},
+          "unknown" => false
+        }
+      })
+
+    assert {11, %{"result" => %{"resultType" => "complete", "structuredContent" => answers}}} =
+             repair_dispatch(server, 11, "tools/call", complete, context)
+
+    assert answers == %{"first" => first, "second" => second, "third" => third}
+    assert_receive {:repair_handler, ^answers}
+
+    assert {12, %{"error" => %{"data" => %{"reason" => "invalid_request_state"}}}} =
+             repair_dispatch(server, 12, "tools/call", complete, context)
+  end
+
+  for method <- ["resources/read", "prompts/get"] do
+    test "#{method} partial retry recovery preserves prior typed answers" do
+      server = start_server()
+      method = unquote(method)
+      requests = %{"first" => form_input_request(), "second" => form_input_request()}
+
+      params =
+        case method do
+          "resources/read" ->
+            :ok =
+              Server.register_resource(server, "urn:repair", %{
+                handler: fn args, _ ->
+                  if Map.has_key?(args, "first") and Map.has_key?(args, "second"),
+                    do:
+                      {:ok,
+                       [
+                         %{
+                           "uri" => "urn:repair",
+                           "text" =>
+                             args["first"]["content"]["value"] <>
+                               args["second"]["content"]["value"]
+                         }
+                       ]},
+                    else: {:input_required, requests}
+                end
+              })
+
+            %{"uri" => "urn:repair"}
+
+          "prompts/get" ->
+            :ok =
+              Server.register_prompt(server, "repair", %{
+                handler: fn %{arguments: args}, _ ->
+                  if Map.has_key?(args, "first") and Map.has_key?(args, "second"),
+                    do:
+                      {:ok,
+                       [
+                         %{
+                           "role" => "user",
+                           "content" => %{
+                             "type" => "text",
+                             "text" =>
+                               args["first"]["content"]["value"] <>
+                                 args["second"]["content"]["value"]
+                           }
+                         }
+                       ]},
+                    else: {:input_required, requests}
+                end
+              })
+
+            %{"name" => "repair", "arguments" => %{}}
+        end
+
+      params = repair_params(params)
+      context = %{principal: "repair"}
+
+      assert {1, %{"result" => %{"requestState" => state}}} =
+               repair_dispatch(server, 1, method, params, context)
+
+      partial =
+        Map.merge(params, %{
+          "requestState" => state,
+          "inputResponses" => %{
+            "first" => %{"action" => "accept", "content" => %{"value" => "first"}}
+          }
+        })
+
+      assert {2, %{"result" => %{"requestState" => next, "inputRequests" => missing}}} =
+               repair_dispatch(server, 2, method, partial, context)
+
+      assert Map.keys(missing) == ["second"]
+
+      complete =
+        Map.merge(params, %{
+          "requestState" => next,
+          "inputResponses" => %{
+            "second" => %{"action" => "accept", "content" => %{"value" => "second"}}
+          }
+        })
+
+      assert {3, %{"result" => %{"resultType" => "complete"} = result}} =
+               repair_dispatch(server, 3, method, complete, context)
+
+      assert if(method == "resources/read",
+               do: hd(result["contents"])["text"],
+               else: hd(result["messages"])["content"]["text"]
+             ) == "firstsecond"
+    end
+  end
+
+  test "oversized recovery state fails without consuming the usable parent" do
+    server = start_server()
+    requests = %{"first" => form_input_request(), "second" => form_input_request()}
+
+    :ok =
+      Server.register_tool(server, "bounded-repair", %{
+        input_schema: %{"type" => "object"},
+        handler: fn args, _ ->
+          if Map.has_key?(args, "first") and Map.has_key?(args, "second"),
+            do: {:ok, "complete"},
+            else: {:input_required, requests}
+        end
+      })
+
+    params = repair_params(%{"name" => "bounded-repair", "arguments" => %{}})
+    context = %{principal: "repair"}
+
+    assert {1, %{"result" => %{"requestState" => state}}} =
+             repair_dispatch(server, 1, "tools/call", params, context)
+
+    partial =
+      Map.merge(params, %{
+        "requestState" => state,
+        "inputResponses" => %{
+          "first" => %{
+            "action" => "accept",
+            "content" => %{"value" => String.duplicate("x", 3500)}
+          }
+        }
+      })
+
+    assert {2,
+            %{"error" => %{"code" => -32603, "data" => %{"reason" => "invalid_modern_result"}}}} =
+             repair_dispatch(server, 2, "tools/call", partial, context)
+
+    answer = %{"action" => "accept", "content" => %{"value" => "small"}}
+
+    complete =
+      Map.merge(params, %{
+        "requestState" => state,
+        "inputResponses" => %{"first" => answer, "second" => answer}
+      })
+
+    assert {3, %{"result" => %{"resultType" => "complete"}}} =
+             repair_dispatch(server, 3, "tools/call", complete, context)
+  end
+
+  defp form_input_request do
+    %{
+      "method" => "elicitation/create",
+      "params" => %{
+        "message" => "answer",
+        "requestedSchema" => %{
+          "type" => "object",
+          "properties" => %{"value" => %{"type" => "string"}},
+          "required" => ["value"]
+        }
+      }
+    }
+  end
+
+  defp repair_params(params) do
+    modern(
+      Map.put(params, "_meta", %{
+        "io.modelcontextprotocol/protocolVersion" => @version,
+        "io.modelcontextprotocol/clientCapabilities" => %{"elicitation" => %{}, "roots" => %{}}
+      })
+    )
+  end
+
+  defp repair_dispatch(server, id, method, params, context) do
+    Server.dispatch(server, %{kind: :request, id: id, method: method, params: params}, context,
+      version: @version
+    )
+  end
+
+  defp state_payload(state) do
+    [encoded, _signature] = String.split(state, ".")
+    encoded |> Base.url_decode64!(padding: false) |> Jason.decode!()
   end
 
   test "list-form MRTR requests receive deterministic generated keys" do
@@ -484,6 +801,35 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
         input_keys: ["input_1"]
       )
 
+    strict_opts = [
+      request_id: 2,
+      operation_identity: %{"tool" => "one"},
+      responses: %{},
+      consume: false
+    ]
+
+    assert {:error, :invalid_request_state} =
+             AttestoMCP.Server.RequestState.verify_payload(
+               state,
+               "alice",
+               "tenant",
+               @version,
+               "tools/call",
+               %{"name" => "one"},
+               strict_opts
+             )
+
+    assert {:ok, _payload} =
+             AttestoMCP.Server.RequestState.verify_payload(
+               state,
+               "alice",
+               "tenant",
+               @version,
+               "tools/call",
+               %{"name" => "one"},
+               Keyword.put(strict_opts, :allow_missing_responses, true)
+             )
+
     assert {:error, :invalid_request_state} =
              AttestoMCP.Server.RequestState.verify_payload(
                state,
@@ -679,6 +1025,24 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
 
     [expiring_key] = Map.keys(expiring_requests)
     Process.sleep(5)
+
+    assert {42,
+            %{"error" => %{"code" => -32602, "data" => %{"reason" => "invalid_request_state"}}}} =
+             Server.dispatch(
+               expiring,
+               %{
+                 kind: :request,
+                 id: 42,
+                 method: "tools/call",
+                 params:
+                   Map.merge(
+                     expiring_params,
+                     %{"requestState" => expiring_state, "inputResponses" => %{}}
+                   )
+               },
+               %{principal: "alice"},
+               version: @version
+             )
 
     assert {41, %{"error" => %{"code" => -32602}}} =
              Server.dispatch(

@@ -10,7 +10,7 @@ defmodule AttestoMCP.Server.RequestState do
       "v" => version,
       "m" => method,
       "d" => digest(params),
-      "e" => now + (Keyword.get(opts, :ttl) || 60_000),
+      "e" => Keyword.get(opts, :expires_at) || now + (Keyword.get(opts, :ttl) || 60_000),
       "n" => Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
     }
 
@@ -20,6 +20,7 @@ defmodule AttestoMCP.Server.RequestState do
       |> maybe_claim("o", Keyword.get(opts, :operation_identity), &digest/1)
       |> maybe_claim("k", Keyword.get(opts, :input_keys), &normalize_keys/1)
       |> maybe_claim("q", Keyword.get(opts, :input_types), &normalize_types/1)
+      |> maybe_claim("a", Keyword.get(opts, :input_responses), & &1)
       |> maybe_claim("r", Keyword.get(opts, :round), & &1)
 
     encoded = payload |> Jason.encode!() |> Base.url_encode64(padding: false)
@@ -61,7 +62,9 @@ defmodule AttestoMCP.Server.RequestState do
          true <- payload["d"] == digest(params),
          true <- request_id_valid?(payload, opts),
          true <- operation_valid?(payload, opts),
-         true <- responses_valid?(payload, Keyword.get(opts, :responses)),
+         true <-
+           Keyword.get(opts, :allow_missing_responses, false) == true or
+             responses_valid?(payload, Keyword.get(opts, :responses)),
          true <- is_integer(payload["e"]) and payload["e"] >= System.system_time(:millisecond),
          true <- consume?(payload, opts) do
       {:ok, payload}

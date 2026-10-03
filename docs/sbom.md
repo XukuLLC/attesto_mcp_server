@@ -1,6 +1,6 @@
-# Production dependency inventory (2.0.1)
+# Production dependency inventory (2.3.0 candidate)
 
-This candidate evidence was observed locally on 2026-09-02 for 2.0.1 after
+This candidate evidence was observed locally on 2026-10-03 for 2.3.0 after
 resolving its published dependency packages from Hex with `mix deps.get` and
 checking the graph with `mix deps.tree --only prod`. This library does not
 maintain or ship a project lockfile, so consumers resolve the declared version
@@ -9,13 +9,24 @@ ranges.
 | Component | Resolved version | License policy | Production path |
 |---|---:|---|---|
 | attesto_mcp | 1.3.0 | MIT | direct |
-| attesto | 2.0.1 | MIT | attesto_mcp |
+| attesto | 2.1.0 | MIT | attesto_mcp |
 | jose | 1.11.12 | MIT | attesto_mcp; attesto |
 | plug | 1.20.3 | Apache-2.0 | direct; attesto_mcp; attesto |
 | jason | 1.4.5 | Apache-2.0 | direct |
 | telemetry | 1.4.2 | Apache-2.0 | direct; attesto; plug |
 | mime | 2.0.7 | Apache-2.0 | plug |
 | plug_crypto | 2.2.0 | Apache-2.0 | plug |
+| jsv | 0.25.0 | Apache-2.0 | direct |
+| decimal | 3.1.1 | Apache-2.0 | jsv |
+| abnf_parsec | 2.1.0 | MIT | jsv; texture |
+| nimble_parsec | 1.4.2 | Apache-2.0 | abnf_parsec |
+| texture | 2.0.0 | Apache-2.0 | jsv |
+| idna | 7.1.0 | MIT | jsv |
+
+The coordinated source tests additionally exercise unreleased Attesto 2.2.0,
+AttestoMCP 1.3.1, AttestoClient 2.6.0, and AttestoPhoenix 3.4.0. Those source
+candidates are separate from the public-Hex resolution above. The JSON Schema
+evaluator and its five additional components are part of the base runtime.
 
 All listed base-runtime components are MIT or Apache-2.0 compatible. Bandit,
 Phoenix, ExDoc, and Dialyzer are development/test-only. Package tests and the
@@ -27,7 +38,10 @@ authorization-server endpoint, or token-issuer endpoint. CI asserts the
 web-server invariant against the production dependency tree.
 
 Igniter is a declared optional, non-runtime MIT-licensed installer dependency
-(`~> 0.6`; 0.8.3 in the observed development resolution). The project-level
+(`>= 0.6.0 and < 0.8.1 or >= 0.8.4 and < 1.0.0`; 0.8.4 in the observed
+development resolution). Optional Mint requires `>= 1.10.2 and < 2.0.0`, with
+1.11.0 resolved, to exclude the disclosed vulnerable HTTP-client versions.
+The project-level
 production tree displays its optional tooling graph, including Req, Finch, and
 Mint; those are not part of the base consumer runtime and no Igniter or HTTP
 client module is used by the server or protected-resource boundary. A consumer
@@ -57,9 +71,9 @@ package uses `ecto_sql` and Postgrex only in tests. The dependency-neutral
 consumer lane verifies that neither Ecto nor the Ecto session adapter is
 loaded when the host does not declare Ecto.
 
-The declared package floor is Elixir 1.18 with OTP 27. `elixir --version`
-reported Elixir 1.18.3/OTP 27.3 for the local floor gate and Elixir 1.20.3/OTP
-29.0.5 for the local current gate. CI independently declares strict lanes for
+The declared package floor is Elixir 1.18 with OTP 27. The prior release's
+local floor gate used Elixir 1.18.3/OTP 27.3. Current candidate checks use
+Elixir 1.20.4/OTP 29.1.1. CI independently declares strict lanes for
 Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.0.5. License and version claims
 above are tied to this resolution date and must be regenerated when dependency
 constraints change.

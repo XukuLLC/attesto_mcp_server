@@ -70,13 +70,17 @@ defmodule AttestoMCP.Server.SchemaTest do
 
   test "rejects malformed URI references and hostnames while accepting valid edges" do
     assert {:error, :format} =
-             Schema.validate("[%", %{"type" => "string", "format" => "uri-reference"})
+             Schema.validate("[%", %{"type" => "string", "format" => "uri-reference"},
+               formats: true
+             )
 
     assert {:error, :format} =
-             Schema.validate("http://[", %{"type" => "string", "format" => "uri"})
+             Schema.validate("http://[", %{"type" => "string", "format" => "uri"}, formats: true)
 
     assert {:error, :format} =
-             Schema.validate("foo%ZZbar", %{"type" => "string", "format" => "uri-reference"})
+             Schema.validate("foo%ZZbar", %{"type" => "string", "format" => "uri-reference"},
+               formats: true
+             )
 
     for value <- [
           "../relative",
@@ -85,27 +89,37 @@ defmodule AttestoMCP.Server.SchemaTest do
           "//user@[::1]:443/resource",
           "foo%20bar"
         ] do
-      assert :ok = Schema.validate(value, %{"type" => "string", "format" => "uri-reference"})
+      assert :ok =
+               Schema.validate(value, %{"type" => "string", "format" => "uri-reference"},
+                 formats: true
+               )
     end
 
-    assert :ok = Schema.validate("http://[::1]/resource", %{"format" => "uri"})
-    assert {:error, :format} = Schema.validate("path?[::1]", %{"format" => "uri-reference"})
-    assert {:error, :format} = Schema.validate("http://[not-ip]/", %{"format" => "uri"})
-    assert :ok = Schema.validate("example.com", %{"format" => "hostname"})
-    assert :ok = Schema.validate("example.com.", %{"format" => "hostname"})
-    assert {:error, :format} = Schema.validate(".bad", %{"format" => "hostname"})
-    assert {:error, :format} = Schema.validate("bad..host", %{"format" => "hostname"})
+    assert :ok = Schema.validate("http://[::1]/resource", %{"format" => "uri"}, formats: true)
+
+    assert {:error, :format} =
+             Schema.validate("path?[::1]", %{"format" => "uri-reference"}, formats: true)
+
+    assert {:error, :format} =
+             Schema.validate("http://[not-ip]/", %{"format" => "uri"}, formats: true)
+
+    assert :ok = Schema.validate("example.com", %{"format" => "hostname"}, formats: true)
+    assert :ok = Schema.validate("example.com.", %{"format" => "hostname"}, formats: true)
+    assert {:error, :format} = Schema.validate(".bad", %{"format" => "hostname"}, formats: true)
+
+    assert {:error, :format} =
+             Schema.validate("bad..host", %{"format" => "hostname"}, formats: true)
   end
 
   test "requires a duration component" do
     schema = %{"type" => "string", "format" => "duration"}
 
-    for value <- ["P", "PT", "P1DT"] do
-      assert {:error, :format} = Schema.validate(value, schema)
+    for value <- ["P", "PT", "P1DT", "PT0.5S"] do
+      assert {:error, :format} = Schema.validate(value, schema, formats: true)
     end
 
-    for value <- ["P0D", "PT0S", "P1Y", "P1DT2H", "PT0.5S"] do
-      assert :ok = Schema.validate(value, schema)
+    for value <- ["P0D", "PT0S", "P1Y", "P1DT2H"] do
+      assert :ok = Schema.validate(value, schema, formats: true)
     end
   end
 
@@ -119,6 +133,195 @@ defmodule AttestoMCP.Server.SchemaTest do
 
     assert {:error, :unresolved_ref} =
              Schema.validate(["first", "second"], %{"$ref" => "#/x/01", "x" => schema["x"]})
+  end
+
+  test "URN resources resolve absolute references and fragments on supported runtimes" do
+    urn = "urn:uuid:deadbeef-1234-ffff-ffff-4321feebdaed"
+    schema = %{"$id" => urn, "minimum" => 30, "properties" => %{"foo" => %{"$ref" => urn}}}
+
+    assert :ok = Schema.validate_schema(schema)
+    assert :ok = Schema.validate(%{"foo" => 37}, schema)
+    assert {:error, :minimum} = Schema.validate(%{"foo" => 12}, schema)
+
+    pointer = %{
+      "$id" => urn,
+      "$defs" => %{"choices" => %{"anyOf" => [false, true]}},
+      "$ref" => "#/$defs/choices/anyOf/1"
+    }
+
+    assert :ok = Schema.validate(1, pointer)
+
+    assert {:error, :unresolved_ref} =
+             Schema.validate_schema(%{pointer | "$ref" => "#/$defs/choices/anyOf/01"})
+
+    nested_urn = "urn:uuid:deadbeef-1234-ffff-ffff-4321feebdaee"
+
+    anchored = %{
+      "$id" => urn,
+      "$ref" => nested_urn <> "#value",
+      "$defs" => %{
+        "nested" => %{
+          "$id" => nested_urn,
+          "$defs" => %{"value" => %{"$anchor" => "value", "type" => "integer"}}
+        }
+      }
+    }
+
+    assert :ok = Schema.validate(1, anchored)
+    assert {:error, {:type, "integer"}} = Schema.validate("one", anchored)
+
+    assert {:error, :unresolved_ref} =
+             Schema.validate_schema(%{anchored | "$ref" => nested_urn <> "#missing"})
+  end
+
+  test "nested pointers use the enclosing resource and reject leading-zero array indexes" do
+    schema = %{
+      "$defs" => %{"choice" => %{"anyOf" => [false, true]}},
+      "properties" => %{"x" => %{"$ref" => "#/$defs/choice/anyOf/01"}}
+    }
+
+    assert {:error, :unresolved_ref} = Schema.validate(%{"x" => 1}, schema)
+
+    # The numeric-looking token is a map key in the resource, even though an
+    # annotation with the same name is an array beside the nested reference.
+    assert :ok =
+             Schema.validate(%{"a" => 1}, %{
+               "x" => %{"01" => true},
+               "properties" => %{"a" => %{"x" => [false, true], "$ref" => "#/x/01"}}
+             })
+
+    for index <- ["1", "01"] do
+      embedded = %{
+        "$id" => "https://example.invalid/embedded",
+        "allOf" => [%{"$ref" => "#/choices/" <> index}],
+        "choices" => [false, true]
+      }
+
+      root = %{"$defs" => %{"embedded" => embedded}, "$ref" => "#/$defs/embedded"}
+
+      if index == "1",
+        do: assert(:ok = Schema.validate(1, root)),
+        else: assert({:error, :unresolved_ref} = Schema.validate(1, root))
+    end
+
+    for reference <- [
+          "nested#/$defs/choice/anyOf/01",
+          "https://example.invalid/nested#/$defs/choice/anyOf/01"
+        ] do
+      assert {:error, :unresolved_ref} =
+               Schema.validate(1, %{
+                 "$id" => "https://example.invalid/root",
+                 "$ref" => reference,
+                 "$defs" => %{
+                   "nested" => %{
+                     "$id" => "nested",
+                     "$defs" => %{"choice" => %{"anyOf" => [false, true]}}
+                   }
+                 }
+               })
+    end
+  end
+
+  test "draft-07 does not activate later keywords or anchor annotations" do
+    dialect = %{"$schema" => "http://json-schema.org/draft-07/schema#"}
+    assert :ok = Schema.validate([1], Map.put(dialect, "prefixItems", [false]))
+
+    assert :ok =
+             Schema.validate(%{"a" => 1}, Map.put(dialect, "dependentRequired", %{"a" => ["b"]}))
+
+    assert :ok =
+             Schema.validate(%{"a" => 1}, Map.put(dialect, "dependentSchemas", %{"a" => false}))
+
+    assert :ok =
+             Schema.validate([1], Map.merge(dialect, %{"contains" => true, "minContains" => 2}))
+
+    assert {:error, :contains} =
+             Schema.validate([], Map.merge(dialect, %{"contains" => true, "minContains" => 0}))
+
+    assert :ok =
+             Schema.validate_schema(
+               Map.put(dialect, "$defs", %{
+                 "one" => %{"$anchor" => "same"},
+                 "two" => %{"$anchor" => "same"}
+               })
+             )
+
+    assert {:error, :unresolved_ref} =
+             Schema.validate(
+               1,
+               Map.merge(dialect, %{
+                 "$ref" => "#ignored",
+                 "annotation" => %{"$anchor" => "ignored", "type" => "integer"}
+               })
+             )
+
+    assert :ok =
+             Schema.validate(
+               1,
+               Map.merge(dialect, %{
+                 "$ref" => "#value",
+                 "definitions" => %{"value" => %{"$id" => "#value", "type" => "integer"}}
+               })
+             )
+  end
+
+  test "bounded defaults retain the caller's format-assertion policy" do
+    schema = %{"properties" => %{"date" => %{"format" => "date", "default" => "bad"}}}
+    assert {:ok, %{"date" => "bad"}} = Schema.apply_property_defaults(%{}, schema, formats: false)
+    assert {:error, :format} = Schema.apply_property_defaults(%{}, schema)
+    assert {:error, :format} = Schema.apply_property_defaults(%{}, schema, formats: true)
+  end
+
+  test "default annotation data is preserved without introducing schema identifiers" do
+    default = %{"$id" => 4, "$anchor" => 4, "$dynamicAnchor" => false, "value" => 1}
+    schema = %{"properties" => %{"payload" => %{"default" => default, "const" => default}}}
+    assert :ok = Schema.validate_schema(schema)
+    assert {:ok, %{"payload" => ^default}} = Schema.apply_property_defaults(%{}, schema)
+
+    # A default can also be explicitly referenced as a schema. Its original
+    # location must stay addressable in the private compilation copy.
+    assert :ok = Schema.validate(1, %{"default" => %{"type" => "integer"}, "$ref" => "#/default"})
+
+    assert {:error, {:type, "integer"}} =
+             Schema.validate("1", %{"default" => %{"type" => "integer"}, "$ref" => "#/default"})
+
+    assert {:error, {:invalid_keyword, "title"}} = Schema.validate_schema(%{"title" => 4})
+  end
+
+  test "existing public validation failure reasons remain stable" do
+    for {value, schema, reason} <- [
+          {2, %{"enum" => [1]}, :not_in_enum},
+          {2, %{"maximum" => 1}, :maximum},
+          {0, %{"minimum" => 1}, :minimum},
+          {1, %{"exclusiveMinimum" => 1}, :exclusive_minimum},
+          {1, %{"exclusiveMaximum" => 1}, :exclusive_maximum},
+          {3, %{"multipleOf" => 2}, :multiple_of},
+          {"a", %{"minLength" => 2}, :min_length},
+          {"abc", %{"maxLength" => 2}, :max_length},
+          {"1", %{"pattern" => "^[a-z]+$"}, :pattern_mismatch},
+          {[], %{"minItems" => 1}, :min_items},
+          {[1, 2], %{"maxItems" => 1}, :max_items},
+          {%{}, %{"minProperties" => 1}, :min_properties},
+          {%{"a" => 1}, %{"maxProperties" => 0}, :max_properties},
+          {1, %{"anyOf" => [false, false]}, {:any, :mismatch}},
+          {1, %{"oneOf" => [true, true]}, {:one, :mismatch}},
+          {1, %{"not" => true}, :not_allowed},
+          {[1], %{"contains" => false}, :contains},
+          {[1], %{"items" => false}, :schema_false},
+          {[1, 2],
+           %{
+             "$schema" => "http://json-schema.org/draft-07/schema#",
+             "items" => [true],
+             "additionalItems" => false
+           }, :additional_items},
+          {%{"extra" => true}, %{"anyOf" => [%{"additionalProperties" => false}]},
+           {:any, :mismatch}},
+          {%{"b" => 2, "c" => 3}, %{"additionalProperties" => false},
+           {:additional_properties, ["b", "c"]}},
+          {%{"b" => 2}, %{"unevaluatedProperties" => false}, {:unevaluated_properties, ["b"]}}
+        ] do
+      assert {:error, ^reason} = Schema.validate(value, schema)
+    end
   end
 
   test "applies dialect rules and evaluated annotations only from successful applicators" do

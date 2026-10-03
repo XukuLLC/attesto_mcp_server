@@ -176,10 +176,10 @@ defmodule AttestoMCP.Server.P5RegressionTest do
   test "schema const null and IP formats distinguish exact values" do
     assert Schema.validate(nil, %{"const" => nil}) == :ok
     assert {:error, :const_mismatch} = Schema.validate("not-null", %{"const" => nil})
-    assert Schema.validate("127.0.0.1", %{"format" => "ipv4"}) == :ok
-    assert {:error, :format} = Schema.validate("::1", %{"format" => "ipv4"})
-    assert Schema.validate("::1", %{"format" => "ipv6"}) == :ok
-    assert {:error, :format} = Schema.validate("127.0.0.1", %{"format" => "ipv6"})
+    assert Schema.validate("127.0.0.1", %{"format" => "ipv4"}, formats: true) == :ok
+    assert {:error, :format} = Schema.validate("::1", %{"format" => "ipv4"}, formats: true)
+    assert Schema.validate("::1", %{"format" => "ipv6"}, formats: true) == :ok
+    assert {:error, :format} = Schema.validate("127.0.0.1", %{"format" => "ipv6"}, formats: true)
     assert Schema.validate(-3, %{"minimum" => -4, "maximum" => -1}) == :ok
   end
 

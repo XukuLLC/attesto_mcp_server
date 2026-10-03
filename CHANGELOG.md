@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Use JSV for bounded JSON Schema 2020-12 and draft-07 evaluation, including
+  reference scope, numeric equality, and unevaluated annotations. Network
+  resolution and casting remain disabled. Tool format assertions retain their
+  2.x default, with `schema_formats: false` selecting annotation semantics.
+- Gate the official required draft2020-12 corpus in CI with a frozen revision
+  and explicit external-reference/custom-dialect exclusions.
+- Move the rate-limit application error from the reserved MCP code `-32029`
+  to `-33029`, retaining HTTP 429. Update clients that match the numeric code.
+- Refresh the pinned official MCP source runner to the alpha.12 source plus
+  PR #396; distinguish this commit from the published npm alpha.12 artifact.
+- Add a coordinated-source OAuth-to-MCP integration fixture and exclude
+  vulnerable Igniter/Mint dependency versions.
+- Recover valid multi-round retries with missing answers by requesting only
+  the remaining inputs. Preserve validated answers and the original expiry
+  in fresh signed state, while rejecting unbound input and replay.
+
 ## 2.2.0 - 2026-09-13
 
 - Allow a protected MCP endpoint to retain its canonical RFC 9728 resource in

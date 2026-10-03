@@ -672,7 +672,7 @@ defmodule AttestoMCP.Server.P2AMatrixTest do
                "unevaluatedItems" => false
              })
 
-    assert {:error, :unsupported_format} = Schema.validate_schema(%{"format" => "not-a-format"})
+    assert :ok = Schema.validate_schema(%{"format" => "not-a-format"}, formats: false)
 
     assert :ok =
              Schema.validate_schema(%{"$schema" => "http://json-schema.org/draft-07/schema#"})

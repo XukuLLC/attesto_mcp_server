@@ -38,9 +38,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: validate lowercase immutable coordinated refs
         env:
-          ATTESTO_REF: 8440ee06cea523ffee5d4514a3a1db221c6187c5
-          ATTESTO_PHOENIX_REF: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
-          ATTESTO_MCP_REF: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
+          ATTESTO_REF: 55d6379a031d9c278a4394cecd9aac52d5cd540a
+          ATTESTO_PHOENIX_REF: 0101a62aa13c5ad57f2f271e00b88c2dcc9040d5
+          ATTESTO_MCP_REF: 04d41212ec068b61b4907279fddd217df334414d
         run: |
           for ref in "$ATTESTO_REF" "$ATTESTO_PHOENIX_REF" "$ATTESTO_MCP_REF"; do
             if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -51,26 +51,26 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           repository: XukuLLC/attesto
-          ref: 8440ee06cea523ffee5d4514a3a1db221c6187c5
+          ref: 55d6379a031d9c278a4394cecd9aac52d5cd540a
           path: coordinated/attesto
           persist-credentials: false
       - uses: actions/checkout@v7.0.1
         with:
           repository: XukuLLC/attesto_phoenix
-          ref: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
+          ref: 0101a62aa13c5ad57f2f271e00b88c2dcc9040d5
           path: coordinated/attesto_phoenix
           persist-credentials: false
       - uses: actions/checkout@v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
+          ref: 04d41212ec068b61b4907279fddd217df334414d
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated checkout commits
         env:
-          ATTESTO_REF: 8440ee06cea523ffee5d4514a3a1db221c6187c5
-          ATTESTO_PHOENIX_REF: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
-          ATTESTO_MCP_REF: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
+          ATTESTO_REF: 55d6379a031d9c278a4394cecd9aac52d5cd540a
+          ATTESTO_PHOENIX_REF: 0101a62aa13c5ad57f2f271e00b88c2dcc9040d5
+          ATTESTO_MCP_REF: 04d41212ec068b61b4907279fddd217df334414d
         run: |
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "$ATTESTO_REF"
           test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "$ATTESTO_PHOENIX_REF"
@@ -86,9 +86,9 @@ jobs:
           ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_mcp
           ATTESTO_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto
           ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
-          ATTESTO_REF: 8440ee06cea523ffee5d4514a3a1db221c6187c5
-          ATTESTO_PHOENIX_REF: b7b3dd7d4ae8bc9ec5d02ca23a4c31287be21cea
-          ATTESTO_MCP_REF: 2de76dbaca5ef100cbca098e103fe3bcd8b65324
+          ATTESTO_REF: 55d6379a031d9c278a4394cecd9aac52d5cd540a
+          ATTESTO_PHOENIX_REF: 0101a62aa13c5ad57f2f271e00b88c2dcc9040d5
+          ATTESTO_MCP_REF: 04d41212ec068b61b4907279fddd217df334414d
         run: scripts/check_installer_coordinated.sh
 
   verify:
@@ -208,8 +208,8 @@ jobs:
   official-interop:
     runs-on: ubuntu-latest
     env:
-      CONFORMANCE_COMMIT: 74edef34d674f563537be8c6587cebaa58e830ca
-      CONFORMANCE_SHA256: 28d22ae3a4541a9a68c208e6a5653486bfacd97df45cf63cd8f0f7f9d5938293
+      CONFORMANCE_COMMIT: c37eec888e1c6ff140af79987a40008548b7cc5f
+      CONFORMANCE_SHA256: a890632d5d8c2576652cfd1fdccb11b2595a2e635e3a335c14e1a224b175548b
     steps:
       - uses: actions/checkout@v7.0.1
       - name: configure temporary paths
@@ -244,7 +244,7 @@ jobs:
                 do: raise("expected #{app} #{requirement}, resolved #{actual}")
             end)
           '
-      - name: frozen official conformance runner
+      - name: frozen official runner source (alpha.12 plus PR 396)
         run: |
           curl -fsSL \
             "https://github.com/modelcontextprotocol/conformance/archive/${CONFORMANCE_COMMIT}.tar.gz" \
@@ -252,7 +252,7 @@ jobs:
           printf '%s  %s\n' "$CONFORMANCE_SHA256" "$CONFORMANCE_ARCHIVE" | sha256sum -c -
           mkdir -p "$CONFORMANCE_DIR"
           tar -xzf "$CONFORMANCE_ARCHIVE" -C "$CONFORMANCE_DIR" --strip-components=1
-          test "$(node -p "require('$CONFORMANCE_DIR/package.json').version")" = "0.2.0-alpha.11"
+          test "$(node -p "require('$CONFORMANCE_DIR/package.json').version")" = "0.2.0-alpha.12"
           (
             cd "$CONFORMANCE_DIR"
             npx --yes npm@12.0.2 ci
@@ -273,3 +273,95 @@ jobs:
           export PYTHONPATH="$PY_CLIENT_DIR"
           scripts/run_client_smoke_fixture.sh 2026-07-28 python3 scripts/client_smoke_python.py
           scripts/run_client_smoke_fixture.sh 2025-11-25 python3 scripts/client_smoke_python.py
+
+  full-oauth-source:
+    runs-on: ubuntu-latest
+    env:
+      ATTESTO_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto
+      ATTESTO_CLIENT_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_client
+      ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
+      ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_mcp
+      CONFORMANCE_COMMIT: c37eec888e1c6ff140af79987a40008548b7cc5f
+      CONFORMANCE_SHA256: a890632d5d8c2576652cfd1fdccb11b2595a2e635e3a335c14e1a224b175548b
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: configure temporary OAuth runner paths
+        run: |
+          {
+            echo "CONFORMANCE_DIR=$RUNNER_TEMP/mcp-oauth-conformance"
+            echo "CONFORMANCE_ARCHIVE=$RUNNER_TEMP/mcp-oauth-conformance.tar.gz"
+          } >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: XukuLLC/attesto
+          ref: 55d6379a031d9c278a4394cecd9aac52d5cd540a
+          path: coordinated/attesto
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: XukuLLC/attesto_client
+          ref: d5767746841c12de01199d3d6e7ceae98ed949a0
+          path: coordinated/attesto_client
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: XukuLLC/attesto_phoenix
+          ref: 0101a62aa13c5ad57f2f271e00b88c2dcc9040d5
+          path: coordinated/attesto_phoenix
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: XukuLLC/attesto_mcp
+          ref: 04d41212ec068b61b4907279fddd217df334414d
+          path: coordinated/attesto_mcp
+          persist-credentials: false
+      - name: verify coordinated OAuth source commits
+        run: |
+          test "$(git -C coordinated/attesto rev-parse HEAD)" = "55d6379a031d9c278a4394cecd9aac52d5cd540a"
+          test "$(git -C coordinated/attesto_client rev-parse HEAD)" = "d5767746841c12de01199d3d6e7ceae98ed949a0"
+          test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "0101a62aa13c5ad57f2f271e00b88c2dcc9040d5"
+          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "04d41212ec068b61b4907279fddd217df334414d"
+      - uses: erlef/setup-beam@v1.24.1
+        with:
+          elixir-version: "1.20.4"
+          otp-version: "29.0.5"
+          version-type: strict
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24.20.0"
+      - name: full OAuth client acquisition and authenticated MCP
+        run: scripts/run_oauth_fixture.sh
+      - name: frozen official authorization-server DPoP source
+        run: |
+          curl -fsSL \
+            "https://github.com/modelcontextprotocol/conformance/archive/${CONFORMANCE_COMMIT}.tar.gz" \
+            -o "$CONFORMANCE_ARCHIVE"
+          printf '%s  %s\n' "$CONFORMANCE_SHA256" "$CONFORMANCE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$CONFORMANCE_DIR"
+          tar -xzf "$CONFORMANCE_ARCHIVE" -C "$CONFORMANCE_DIR" --strip-components=1
+          test "$(node -p "require('$CONFORMANCE_DIR/package.json').version")" = "0.2.0-alpha.12"
+          (
+            cd "$CONFORMANCE_DIR"
+            npx --yes npm@12.0.2 ci
+            npx --yes npm@12.0.2 run build
+          )
+          scripts/run_authorization_conformance_fixture.sh \
+            "$CONFORMANCE_DIR/dist/index.js" "$RUNNER_TEMP/authorization-dpop"
+
+  json-schema-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: json-schema-org/JSON-Schema-Test-Suite
+          ref: 5b0ee1613e45fcc2bddac00e07c19cd49b00d8a8
+          path: json-schema-corpus
+          persist-credentials: false
+      - uses: erlef/setup-beam@v1.24.1
+        with:
+          elixir-version: "1.18.3"
+          otp-version: "27.3"
+          version-type: strict
+      - run: mix deps.get
+      - run: mix run scripts/run_json_schema_suite.exs json-schema-corpus

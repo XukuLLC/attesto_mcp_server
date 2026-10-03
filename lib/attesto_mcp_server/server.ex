@@ -87,6 +87,7 @@ defmodule AttestoMCP.Server do
     :session_idle_timeout,
     :session_absolute_timeout,
     :max_json_bytes,
+    :schema_formats,
     :output_canonicalization,
     :tool_argument_keys,
     :max_body_bytes,
@@ -2175,6 +2176,7 @@ defmodule AttestoMCP.Server do
       |> Keyword.put_new(:max_request_timeout, 120_000)
       |> Keyword.put_new(:request_state_ttl, 120_000)
       |> Keyword.put_new(:max_json_bytes, Schema.default_instance_bytes())
+      |> Keyword.put_new(:schema_formats, true)
       |> Keyword.put_new(:output_canonicalization, :strict)
       |> Keyword.put_new(:tool_argument_keys, :strings)
       |> Keyword.put_new(:stream_keepalive_ms, 15_000)
@@ -2344,6 +2346,9 @@ defmodule AttestoMCP.Server do
 
     unless opts[:tool_argument_keys] in [:strings, :atoms],
       do: raise(ArgumentError, ":tool_argument_keys must be :strings or :atoms")
+
+    unless is_boolean(opts[:schema_formats]),
+      do: raise(ArgumentError, ":schema_formats must be boolean")
 
     Enum.each([:max_body_bytes, :max_message_bytes], fn key ->
       case Keyword.get(opts, key) do
@@ -5759,8 +5764,24 @@ defmodule AttestoMCP.Server do
         selected_definition
       )
     else
-      false -> {:error, Error.invalid_params(%{"reason" => "tool_arguments_invalid"})}
-      {:error, %Error{} = error} -> {:error, error}
+      false ->
+        {:error, Error.invalid_params(%{"reason" => "tool_arguments_invalid"})}
+
+      {:missing_inputs, payload, requests} ->
+        recover_missing_inputs(
+          payload,
+          requests,
+          params,
+          context,
+          runtime,
+          era,
+          "tools/call",
+          salient,
+          operation
+        )
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
@@ -5898,6 +5919,7 @@ defmodule AttestoMCP.Server do
            request_id: context[:request_id],
            operation_identity: operation,
            responses: input_responses(params),
+           allow_missing_responses: true,
            consume: false
          ) do
       {:ok, payload} -> {:ok, payload}
@@ -5924,7 +5946,10 @@ defmodule AttestoMCP.Server do
   defp input_responses(%{"inputResponses" => _}, nil), do: %{}
   defp input_responses(_params, nil), do: %{}
 
-  defp input_responses(params, %{"k" => keys}), do: Map.take(input_responses(params), keys)
+  defp input_responses(params, %{"k" => keys} = payload) do
+    Map.merge(Map.get(payload, "a", %{}), Map.take(input_responses(params), keys))
+  end
+
   defp input_responses(params, _), do: input_responses(params)
 
   defp consume_retry_state(nil, _opts), do: :ok
@@ -5941,28 +5966,106 @@ defmodule AttestoMCP.Server do
       else: :ok
   end
 
-  defp validate_input_responses(%{"q" => input_types}, params, opts)
+  defp validate_input_responses(%{"q" => input_types} = payload, params, opts)
        when is_map(input_types) do
     responses = input_responses(params)
 
-    Enum.reduce_while(input_types, :ok, fn {key, method}, :ok ->
-      case Map.fetch(responses, key) do
-        {:ok, response} ->
-          if valid_input_response?(method, response, opts),
-            do: {:cont, :ok},
-            else: {:halt, :invalid}
-
-        :error ->
-          {:halt, :invalid}
+    if Map.has_key?(params, "inputResponses") and not is_map(params["inputResponses"]) do
+      {:error, Error.invalid_params(%{"reason" => "invalid_input_response"})}
+    else
+      case validate_present_input_responses(input_types, responses, opts) do
+        {:missing_keys, requests} -> {:missing_inputs, payload, requests}
+        result -> result
       end
-    end)
-    |> case do
-      :ok -> :ok
-      :invalid -> {:error, Error.invalid_params(%{"reason" => "invalid_input_response"})}
     end
   end
 
   defp validate_input_responses(_payload, _params, _opts), do: :ok
+
+  defp validate_present_input_responses(input_types, responses, opts) do
+    Enum.reduce_while(input_types, [], fn {key, method}, missing ->
+      case Map.fetch(responses, key) do
+        {:ok, response} ->
+          if valid_input_response?(method, response, opts),
+            do: {:cont, missing},
+            else: {:halt, :invalid}
+
+        :error ->
+          {:cont, [key | missing]}
+      end
+    end)
+    |> case do
+      [] -> :ok
+      :invalid -> {:error, Error.invalid_params(%{"reason" => "invalid_input_response"})}
+      missing -> {:missing_keys, Map.take(input_types, missing)}
+    end
+  end
+
+  defp recover_missing_inputs(
+         payload,
+         requests,
+         params,
+         context,
+         runtime,
+         era,
+         method,
+         salient,
+         operation
+       ) do
+    # A partial retry is still single-use. Carry only responses already checked
+    # against the signed request descriptors, and retain the original deadline.
+    # Unknown response keys never enter the signed continuation or the handler.
+    accepted = input_responses(params, payload)
+    opts = runtime.opts
+
+    with true <- payload["e"] >= System.system_time(:millisecond),
+         :ok <- recovery_operation_visible(runtime, method, operation, context),
+         {:ok, requests} <- require_input_capabilities(params, requests) do
+      state =
+        RequestState.issue(principal(context), tenant(context), era, method, salient,
+          secret: opts[:request_state_secret],
+          instance: opts[:request_state_instance],
+          expires_at: payload["e"],
+          request_id: context[:request_id],
+          operation_identity: operation,
+          input_keys: Map.keys(requests),
+          input_types: input_request_types(requests),
+          input_responses: accepted
+        )
+
+      # Validate the complete response budget before consuming the parent. A
+      # response that cannot fit must not strand an otherwise usable retry.
+      with {:ok, result} <-
+             modern_result(
+               %{
+                 "resultType" => "input_required",
+                 "inputRequests" => requests,
+                 "requestState" => state
+               },
+               opts
+             ),
+           :ok <- consume_retry_state(payload, opts) do
+        Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: method})
+        {:ok, result}
+      end
+    else
+      false -> {:error, Error.invalid_params(%{"reason" => "invalid_request_state"})}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  # Tool/resource visibility is checked before retry validation. Prompt lookup
+  # normally happens afterward, so recovery must apply that same gate here.
+  defp recovery_operation_visible(runtime, "prompts/get", %{"prompt" => name}, context) do
+    if Enum.any?(
+         Registry.list(runtime.registry, :prompt),
+         &(&1.name == name and visible?(&1, context))
+       ),
+       do: :ok,
+       else: {:error, Error.invalid_params(%{"name" => name})}
+  end
+
+  defp recovery_operation_visible(_runtime, _method, _operation, _context), do: :ok
 
   defp valid_input_response?("elicitation/create:url", response, _opts) when is_map(response) do
     response["action"] in ["accept", "decline", "cancel"] and
@@ -5994,7 +6097,7 @@ defmodule AttestoMCP.Server do
             Schema.validate(
               response["content"],
               params["requestedSchema"],
-              json_budget_opts(opts)
+              Keyword.put(json_budget_opts(opts), :formats, true)
             ) == :ok
 
         {"form", _} ->
@@ -6101,7 +6204,7 @@ defmodule AttestoMCP.Server do
             Schema.validate(
               params["url"],
               %{"type" => "string", "format" => "uri"},
-              json_budget_opts(opts)
+              Keyword.put(json_budget_opts(opts), :formats, true)
             ) == :ok))
   end
 
@@ -6222,9 +6325,7 @@ defmodule AttestoMCP.Server do
         handler_context = handler_identity_context(context, :tool, tool)
 
         with :ok <-
-               Schema.validate(arguments, tool.input_schema,
-                 max_bytes: runtime.opts[:max_json_bytes]
-               ),
+               Schema.validate(arguments, tool.input_schema, schema_validation_opts(runtime.opts)),
              handler_arguments <-
                handler_tool_arguments(
                  arguments,
@@ -6349,6 +6450,22 @@ defmodule AttestoMCP.Server do
         state_payload,
         selected_definition
       )
+    else
+      {:missing_inputs, payload, requests} ->
+        recover_missing_inputs(
+          payload,
+          requests,
+          params,
+          context,
+          runtime,
+          era,
+          "resources/read",
+          salient,
+          operation
+        )
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
@@ -7429,7 +7546,13 @@ defmodule AttestoMCP.Server do
         [prompt | _] ->
           prompt_arguments = Map.merge(arguments, input_responses(params, state_payload))
 
-          input_keys = if is_map(state_payload), do: Map.get(state_payload, "k", []), else: []
+          input_keys =
+            if is_map(state_payload),
+              do:
+                Enum.uniq(
+                  Map.get(state_payload, "k", []) ++ Map.keys(Map.get(state_payload, "a", %{}))
+                ),
+              else: []
 
           case invoke_prompt(
                  prompt,
@@ -7508,8 +7631,24 @@ defmodule AttestoMCP.Server do
           end
       end
     else
-      false -> {:error, Error.invalid_params(%{"reason" => "prompt_arguments_invalid"})}
-      {:error, %Error{} = error} -> {:error, error}
+      false ->
+        {:error, Error.invalid_params(%{"reason" => "prompt_arguments_invalid"})}
+
+      {:missing_inputs, payload, requests} ->
+        recover_missing_inputs(
+          payload,
+          requests,
+          params,
+          context,
+          runtime,
+          era,
+          "prompts/get",
+          salient,
+          operation
+        )
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
@@ -8134,7 +8273,7 @@ defmodule AttestoMCP.Server do
   defp validate_output(output, schema, opts) do
     with {:ok, structured_content} when is_map(structured_content) <-
            Map.fetch(output, "structuredContent"),
-         :ok <- Schema.validate(structured_content, schema, json_budget_opts(opts)) do
+         :ok <- Schema.validate(structured_content, schema, schema_validation_opts(opts)) do
       output
     else
       _ ->
@@ -8275,6 +8414,10 @@ defmodule AttestoMCP.Server do
   end
 
   defp json_budget_opts(_opts), do: [max_bytes: Schema.default_instance_bytes()]
+
+  defp schema_validation_opts(opts) do
+    Keyword.put(json_budget_opts(opts), :formats, Keyword.get(opts, :schema_formats, true))
+  end
 
   defp output_canonicalization_opts(opts) do
     Keyword.put(

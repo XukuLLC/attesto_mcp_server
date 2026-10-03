@@ -51,7 +51,7 @@ defmodule AttestoMCP.Server.Error do
     do: new(-32003, "insufficient_scope", %{"required_scopes" => scopes}, 403)
 
   def rate_limited,
-    do: new(-32029, "Rate limit exceeded", %{"reason" => "rate_limited"}, 429)
+    do: new(-33029, "Rate limit exceeded", %{"reason" => "rate_limited"}, 429)
 
   def session_not_found,
     do: new(-32600, "Session not found", %{"reason" => "session_not_found"}, 404)

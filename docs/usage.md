@@ -582,7 +582,7 @@ Register tools, resources, URI templates, prompts, and completions before
 serving traffic. Identity collisions return `{:error, {:duplicate, type,
 identity}}`. Registration rejects unsafe names/URIs/templates, malformed
 handlers, unsupported JSON Schema dialects/remote references, and schemas
-outside the bounded local 2020-12/draft-07 subset. Anchors, local dynamic
+outside the bounded local 2020-12/draft-07 validator. Anchors, local dynamic
 references, tuple items, unevaluated items, and content annotations are
 validated without network fetches. Registry output is stable
 by identity and pagination cursors are opaque, signed, expiring, and bound to
@@ -666,6 +666,12 @@ The conversion follows nested literal `properties`, array `items`, and
 conditional branches remain strings so ambiguous schema paths never broaden
 the conversion. The default `tool_argument_keys: :strings` preserves the wire
 map exactly.
+
+Tool input and structured output enforce recognized JSON Schema formats by
+default. Set `schema_formats: false` in the server options to treat `format`
+as an annotation for these schemas. Elicitation URLs and form responses always
+enforce their formats. Direct `Schema.validate/3` callers can select annotation
+semantics with `formats: false`; its default remains assertion semantics.
 
 Tool output content, prompt messages, and resource contents are checked before
 they reach the wire. Supported content includes text, Base64 image/audio,
@@ -1024,7 +1030,7 @@ the session idle deadline.
 600/60s, 300/60s, 100/60s, and 120/60s respectively. A category can be set to
 `false` only when the host explicitly accepts unlimited traffic for that
 category; malformed settings fail closed. Rejections use HTTP 429 and
-JSON-RPC `-32029`, and are isolated by principal plus client address. If
+JSON-RPC `-33029` (outside the reserved protocol range), and are isolated by principal plus client address. If
 `client_ip` is omitted, the Plug uses `conn.remote_ip` verbatim, including a
 non-IP local-peer term. An explicit `client_ip` callback, configured as a
 one-argument function or MFA, must return a trusted canonical IPv4 or IPv6
@@ -1390,6 +1396,12 @@ retry with a new JSON-RPC ID and matching typed `inputResponses`: elicitation
 responses use `action` (and accepted `content`), sampling responses use
 `role`, `content`, `model`, and `stopReason`, and roots responses use a
 `roots` array.
+
+A valid retry with missing answers receives another `input_required` result
+containing only the remaining requests. The fresh signed state preserves
+validated earlier answers and the original deadline; echo the new state on
+the next retry. Unknown response keys are ignored. Tampered, expired, reused,
+or unbound state and malformed supplied answers are rejected.
 
 #### URL elicitations
 

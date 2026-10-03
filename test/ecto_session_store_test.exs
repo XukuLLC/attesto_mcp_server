@@ -102,6 +102,7 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
       username: System.get_env("POSTGRES_USER", "postgres"),
       password: System.get_env("POSTGRES_PASSWORD", "postgres"),
       hostname: System.get_env("POSTGRES_HOST", "localhost"),
+      port: String.to_integer(System.get_env("POSTGRES_PORT", "5432")),
       database: System.get_env("POSTGRES_DB", "attesto_mcp_server_test"),
       pool: Sandbox,
       pool_size: 10
@@ -111,6 +112,7 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
       username: System.get_env("POSTGRES_USER", "postgres"),
       password: System.get_env("POSTGRES_PASSWORD", "postgres"),
       hostname: System.get_env("POSTGRES_HOST", "localhost"),
+      port: String.to_integer(System.get_env("POSTGRES_PORT", "5432")),
       database: System.get_env("POSTGRES_DB", "attesto_mcp_server_test"),
       pool_size: 10
     )
