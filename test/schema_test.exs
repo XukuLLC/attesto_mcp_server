@@ -36,6 +36,41 @@ defmodule AttestoMCP.Server.SchemaTest do
              Schema.validate(%{"id" => 1}, %{"$ref" => "https://example.invalid/schema.json"})
   end
 
+  test "referenced pattern and patternProperties validators retain the source byte bound" do
+    oversized = String.duplicate("a", 257)
+
+    for target <- [
+          %{"pattern" => oversized},
+          %{"patternProperties" => %{oversized => true}}
+        ],
+        location <- ["annotation", "default"] do
+      schema = %{location => target, "$ref" => "#/" <> location}
+      assert {:error, :invalid_pattern} = Schema.validate_schema(schema)
+      assert {:error, :invalid_pattern} = Schema.validate(%{}, schema)
+    end
+
+    boundary = String.duplicate("a", 256)
+    schema = %{"annotation" => %{"pattern" => boundary}, "$ref" => "#/annotation"}
+    assert :ok = Schema.validate(boundary, schema)
+    assert {:error, :pattern_mismatch} = Schema.validate("different", schema)
+  end
+
+  test "oversized regex-looking annotation and literal values remain ordinary data" do
+    oversized = String.duplicate("a", 257)
+    literal = %{"pattern" => oversized, "patternProperties" => %{oversized => true}}
+
+    schema = %{
+      "annotation" => literal,
+      "default" => literal,
+      "const" => literal,
+      "enum" => [literal]
+    }
+
+    assert :ok = Schema.validate_schema(schema)
+    assert :ok = Schema.validate(literal, schema)
+    assert {:error, _} = Schema.validate(%{}, schema)
+  end
+
   test "supports combinators without fetching references" do
     schema = %{
       "oneOf" => [%{"type" => "string"}, %{"type" => "integer"}],

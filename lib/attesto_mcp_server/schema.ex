@@ -167,13 +167,32 @@ defmodule AttestoMCP.Server.Schema do
     max_bytes = configured_max_bytes(opts)
 
     with :ok <- bounded(schema),
-         :ok <- json_value(schema, max_bytes: max_bytes),
-         :ok <- validate_anchor_names(schema),
+         :ok <- json_value(schema, max_bytes: max_bytes) do
+      key = {schema, Keyword.get(opts, :formats, true) == true, max_bytes}
+
+      case AttestoMCP.Server.Schema.Cache.get(key) do
+        {:ok, root} ->
+          {:ok, root}
+
+        :miss ->
+          with {:ok, root} <- compile_schema(schema, opts) do
+            AttestoMCP.Server.Schema.Cache.put(key, root)
+            {:ok, root}
+          end
+      end
+    end
+  end
+
+  defp compile_schema(schema, opts) do
+    with :ok <- validate_anchor_names(schema),
          {:ok, prepared} <- prepare_schema(schema) do
       dialect = Map.get(prepared, "$schema", @default_dialect)
-      meta = meta_root(dialect)
 
       run_bounded(fn ->
+        # Fetch the shared immutable meta-root inside the worker. Capturing it
+        # in the closure copies the entire compiled meta-schema into every task.
+        meta = meta_root(dialect)
+
         case JSV.validate(normalize_numbers(schema), meta, cast: false, cast_formats: false) do
           {:ok, _} ->
             case JSV.build(normalize_numbers(compilation_schema(prepared)),
@@ -184,7 +203,7 @@ defmodule AttestoMCP.Server.Schema do
                    warnings: :silence
                  ) do
               {:ok, root} ->
-                {:ok, root}
+                with :ok <- compiled_pattern_budget(root), do: {:ok, root}
 
               {:error, %JSV.BuildError{reason: {:resolver_error, _}}} ->
                 {:error, :remote_ref_disabled}
@@ -206,8 +225,9 @@ defmodule AttestoMCP.Server.Schema do
       else: nil
   end
 
-  # Only fixed, embedded meta-schemas are cached; user schemas never enter a
-  # global cache. No network resolver is installed, including for $schema.
+  # Only fixed, embedded meta-schemas enter persistent_term. User-schema roots
+  # have separate application-owned entry/byte bounds and owner lifetime.
+  # No network resolver is installed, including for $schema.
   defp meta_root(dialect) do
     key = {__MODULE__, :meta, dialect}
 
@@ -624,6 +644,38 @@ defmodule AttestoMCP.Server.Schema do
       do: {:error, :invalid_pattern},
       else: :ok
   end
+
+  # A local pointer can activate a schema stored in an otherwise unknown
+  # annotation. Check the actual validators as well as recognized schema nodes,
+  # without treating unused annotation or const/default data as regex sources.
+  defp compiled_pattern_budget(%Regex{source: source}) do
+    if byte_size(source) <= 256, do: :ok, else: {:error, :invalid_pattern}
+  end
+
+  defp compiled_pattern_budget(value) when is_map(value) do
+    Enum.reduce_while(:maps.to_list(value), :ok, fn {key, nested}, :ok ->
+      with :ok <- compiled_pattern_budget(key),
+           :ok <- compiled_pattern_budget(nested) do
+        {:cont, :ok}
+      else
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp compiled_pattern_budget(value) when is_list(value) do
+    Enum.reduce_while(value, :ok, fn nested, :ok ->
+      case compiled_pattern_budget(nested) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp compiled_pattern_budget(value) when is_tuple(value),
+    do: compiled_pattern_budget(Tuple.to_list(value))
+
+  defp compiled_pattern_budget(_value), do: :ok
 
   # JSON numbers compare by mathematical value, including nested enum/const
   # values and uniqueItems. The original input is never changed or returned.

@@ -19,12 +19,28 @@ Direct callers of `Schema.validate/3` and `apply_property_defaults/3` also retai
 format assertions by default. Pass `formats: false` to use annotation semantics.
 
 JSV adds `abnf_parsec`, `nimble_parsec`, `texture`, `idna`, and Decimal to the
-base runtime dependency graph. The evaluator does more work than the previous
-validator: a review measured approximately 215 microseconds per warm validation
-versus 55 microseconds previously, and about 177 milliseconds to initialize the
-embedded meta-schemas on a node. These measurements depend on the schema and
-machine; benchmark representative schemas before planning throughput. Initialization
-uses a node-local lock and the meta-schemas are reused by subsequent calls.
+base runtime dependency graph. Successfully compiled schemas are reused across
+request workers by an application-owned cache, capped at 64 entries and 8 MiB
+of estimated BEAM term and binary storage, with a 256 KiB per-entry limit.
+Native compiled-regex allocations on OTP 28 and later are outside that byte
+estimate; existing schema-node and pattern limits also apply. The cache
+distinguishes schemas, format policies, and byte budgets. Instances and validation results
+are never cached; all size checks and validation timeouts still apply. Cache
+unavailability falls back to compilation. Binary slices are detached from
+larger source buffers before entering the cache.
+
+On the development machine, warm validation of small schemas took 26–49
+microseconds after caching, compared with 189–447 microseconds before caching.
+A comparison using alternating engines in one BEAM measured real tool dispatch
+at 121 microseconds for a small schema and 622 microseconds for a 20-item input;
+the previous limited validator took 128 and 491 microseconds respectively.
+Large input/output dispatch remained 12–27% slower than that older validator,
+and an output-heavy mixed workload had 7–18% lower throughput. New schemas
+still pay compilation costs of roughly 0.24–1 millisecond in these workloads,
+and embedded meta-schema initialization took about 43 milliseconds.
+These measurements depend on the workload and machine;
+benchmark representative schemas before planning throughput. Initialization
+uses a node-local lock, and embedded meta-schemas are reused on the node.
 Existing public validation reasons are preserved where a corresponding legacy
 reason exists; newly supported constraints return `{:schema_validation, ...}`.
 

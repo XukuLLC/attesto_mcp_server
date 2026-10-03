@@ -6,6 +6,11 @@
   reference scope, numeric equality, and unevaluated annotations. Network
   resolution and casting remain disabled. Tool format assertions retain their
   2.x default, with `schema_formats: false` selecting annotation semantics.
+- Reuse successfully compiled schemas across request processes through a
+  bounded application cache. Schema and instance limits, format policy and
+  validation timeouts still apply; cache restarts fall back to compilation.
+- Enforce regex limits on compiled reference targets while preserving unused
+  annotations and literal data.
 - Gate the official required draft2020-12 corpus in CI with a frozen revision
   and explicit external-reference/custom-dialect exclusions.
 - Move the rate-limit application error from the reserved MCP code `-32029`

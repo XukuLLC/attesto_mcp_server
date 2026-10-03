@@ -6,7 +6,7 @@ establish certification, endorsement, or support for every optional MCP extensio
 ## Tested candidate
 
 - source fingerprint:
-  `f187f0e0cbbdcc6726ec90efdb33c795c21d8eba97b7e217480377a662a0ae97`
+  `9bd9c198d16bad171a60985251bb1edf9b6eafceead69edf735974a03f7b01b8`
 - official runner source: package version `0.2.0-alpha.12`, including PR #396
 - runner commit: `c37eec888e1c6ff140af79987a40008548b7cc5f`
 - runner archive SHA-256:
@@ -141,14 +141,14 @@ Internal elicitation URLs and form responses always assert their formats.
 
 ## Package gates
 
-- All 736 checks passed, including the PostgreSQL-backed session and URL
+- All 751 checks passed, including the PostgreSQL-backed session and URL
   elicitation store tests.
 - Dialyzer completed with zero errors and zero skips.
 - Package construction, source/package hygiene, formatting, documentation,
   and the Hex advisory audit passed.
 - The coordinated OAuth fixture passed all five tests.
 - The complete PostgreSQL lane also passed on the declared Elixir 1.18.3/OTP
-  27.3 floor, with 736 checks and zero failures.
+  27.3 floor, with 751 checks and zero failures.
 
 The frozen runner does not score `2025-06-18`. Package-owned HTTP, stdio,
 lifecycle, revision-filtering, and configuration regressions cover that

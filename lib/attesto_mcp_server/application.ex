@@ -10,6 +10,7 @@ defmodule AttestoMCP.Server.Application do
         start: {:pg, :start_link, [AttestoMCP.Server.SessionCluster]},
         type: :worker
       },
+      AttestoMCP.Server.Schema.Cache,
       {DynamicSupervisor, strategy: :one_for_one, name: AttestoMCP.Server.DynamicSupervisor}
     ]
 

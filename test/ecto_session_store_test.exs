@@ -1515,6 +1515,9 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
       GenServer.stop(server)
     catch
       :exit, {:noproc, _call} -> :ok
+      # The linked server can finish shutdown while on_exit is stopping it.
+      :exit, {:shutdown, {GenServer, :stop, _args}} -> :ok
+      :exit, {{:shutdown, {:sys, :terminate, _args}}, {GenServer, :stop, _stop_args}} -> :ok
     end
   end
 
