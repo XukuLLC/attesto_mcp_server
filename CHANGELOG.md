@@ -1,14 +1,18 @@
 # Changelog
 
-## Unreleased
+## 2.3.0 - 2026-10-03
 
 - Use JSV for bounded JSON Schema 2020-12 and draft-07 evaluation, including
   reference scope, numeric equality, and unevaluated annotations. Network
-  resolution and casting remain disabled. Tool format assertions retain their
-  2.x default, with `schema_formats: false` selecting annotation semantics.
+  resolution and casting remain disabled. Tool input and structured output
+  retain format assertions by default, with `schema_formats: false` selecting
+  annotation semantics.
 - Reuse successfully compiled schemas across request processes through a
   bounded application cache. Schema and instance limits, format policy and
   validation timeouts still apply; cache restarts fall back to compilation.
+  Large or output-heavy workloads can remain slower than the previous limited
+  validator; see the [migration runbook](docs/migration.md#json-schema-evaluation-and-format-policy)
+  for measured costs and cache storage limits.
 - Enforce regex limits on compiled reference targets while preserving unused
   annotations and literal data.
 - Gate the official required draft2020-12 corpus in CI with a frozen revision

@@ -1,8 +1,8 @@
-# Production dependency inventory (2.3.0 candidate)
+# Production dependency inventory (2.3.0)
 
-This candidate evidence was observed locally on 2026-10-03 for 2.3.0 after
-resolving its published dependency packages from Hex with `mix deps.get` and
-checking the graph with `mix deps.tree --only prod`. This library does not
+This inventory records the public-Hex resolution observed locally on 2026-10-03,
+before the coordinated releases, using `mix deps.get` and
+`mix deps.tree --only prod`. This library does not
 maintain or ship a project lockfile, so consumers resolve the declared version
 ranges.
 
@@ -23,10 +23,10 @@ ranges.
 | texture | 2.0.0 | Apache-2.0 | jsv |
 | idna | 7.1.0 | MIT | jsv |
 
-The coordinated source tests additionally exercise unreleased Attesto 2.2.0,
+The coordinated source tests additionally exercise Attesto 2.2.0,
 AttestoMCP 1.3.1, AttestoClient 2.6.0, and AttestoPhoenix 3.4.0. Those source
-candidates are separate from the public-Hex resolution above. The JSON Schema
-evaluator and its five additional components are part of the base runtime.
+versions are separate from the earlier public-Hex resolution above. The JSON
+Schema evaluator and its five additional components are part of the base runtime.
 
 All listed base-runtime components are MIT or Apache-2.0 compatible. Bandit,
 Phoenix, ExDoc, and Dialyzer are development/test-only. Package tests and the
@@ -71,9 +71,9 @@ package uses `ecto_sql` and Postgrex only in tests. The dependency-neutral
 consumer lane verifies that neither Ecto nor the Ecto session adapter is
 loaded when the host does not declare Ecto.
 
-The declared package floor is Elixir 1.18 with OTP 27. The prior release's
-local floor gate used Elixir 1.18.3/OTP 27.3. Current candidate checks use
-Elixir 1.20.4/OTP 29.1.1. CI independently declares strict lanes for
-Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.0.5. License and version claims
+The declared package floor is Elixir 1.18 with OTP 27. The 2.3.0 local gates
+passed on Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.1.1. CI independently
+declares strict lanes for Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.0.5.
+License and version claims
 above are tied to this resolution date and must be regenerated when dependency
 constraints change.

@@ -373,7 +373,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 2.0"}]
+  [{:attesto_mcp_server, "~> 2.3"}]
 end
 ```
 
