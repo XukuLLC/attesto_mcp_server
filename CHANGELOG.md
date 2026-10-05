@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.1 - 2026-10-04
+
+- Support JSV 0.24.x as well as 0.25.x. Both retain the existing bounded
+  validation and format policy. The 0.24.0 floor passes the server suite and
+  pinned JSON Schema corpus with the same explicit exclusions.
+
 ## 2.3.0 - 2026-10-03
 
 - Use JSV for bounded JSON Schema 2020-12 and draft-07 evaluation, including
