@@ -1,12 +1,12 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 2.3.0. It does not
+This is reproducible test evidence for `attesto_mcp_server` 2.3.1. It does not
 establish certification, endorsement, or support for every optional MCP extension.
 
 ## Tested candidate
 
 - source fingerprint:
-  `9bd9c198d16bad171a60985251bb1edf9b6eafceead69edf735974a03f7b01b8`
+  `5ff199298ef2481599259801b5d1993a3ff320e1c8cd03d2d545d255dfce876b`
 - official runner source: package version `0.2.0-alpha.12`, including PR #396
 - runner commit: `c37eec888e1c6ff140af79987a40008548b7cc5f`
 - runner archive SHA-256:
@@ -138,6 +138,9 @@ mix run scripts/run_json_schema_suite.exs /path/to/JSON-Schema-Test-Suite
 The corpus selects `formats: false` annotation semantics. Direct validation
 and server tool input/output retain format assertions by default in 2.x.
 Internal elicitation URLs and form responses always assert their formats.
+
+The JSV 0.24.0 dependency floor also passes all 751 server checks and the same
+pinned corpus, with 1,252 passes and the same 49 explicit exclusions.
 
 ## Package gates
 
