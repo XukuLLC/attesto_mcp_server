@@ -101,10 +101,8 @@ defmodule AttestoMCP.Server.ServerIconsTest do
     oversized = "data:image/png;base64," <> String.duplicate("AAAA", 40_000)
 
     invalid = [
-      [],
       "https://example.com/icon.png",
       [%{"src" => "javascript:alert(1)"}],
-      [%{"src" => "http://example.com/icon.png"}],
       [%{"src" => "/icons/server.png"}],
       [%{"src" => "https://user:pass@example.com/icon.png"}],
       [%{"src" => "https://example.com/icon one.png"}],
@@ -113,7 +111,6 @@ defmodule AttestoMCP.Server.ServerIconsTest do
       [%{"src" => "https://example.com/icon.png", "mimeType" => "text/html"}],
       [%{"src" => "https://example.com/icon.png", "mimeType" => ""}],
       [%{"src" => "https://example.com/icon.png", "sizes" => ["48"]}],
-      [%{"src" => "https://example.com/icon.png", "sizes" => []}],
       [%{"src" => "https://example.com/icon.png", "theme" => "blue"}],
       [%{src: "https://example.com/icon.png", mimeType: "image/png", mime_type: "image/png"}],
       [%{"src" => "data:image/png;base64,not base64!"}],
@@ -168,7 +165,6 @@ defmodule AttestoMCP.Server.ServerIconsTest do
       %{"name" => "x", "version" => "1", "icons" => [%{"src" => "javascript:alert(1)"}]},
       %{"name" => "x", "version" => "1", "icons" => "https://example.com/icon.png"},
       %{"name" => "x", "version" => "1", "websiteUrl" => "ftp://example.com"},
-      %{"name" => "x", "version" => "1", "title" => ""},
       %{"name" => "x", "version" => "1", "build" => "123"},
       %{"name" => "", "version" => "1"},
       "not-a-map"

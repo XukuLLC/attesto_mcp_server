@@ -43,8 +43,8 @@ defmodule AttestoMCP.Server.Implementation do
   def valid?(%{"name" => name, "version" => version} = info) do
     Enum.all?(Map.keys(info), &(&1 in @fields)) and
       text?(name, @max_text_bytes) and text?(version, @max_text_bytes) and
-      optional?(info, "title", &text?(&1, @max_text_bytes)) and
-      optional?(info, "description", &text?(&1, @max_description_bytes)) and
+      optional?(info, "title", &optional_text?(&1, @max_text_bytes)) and
+      optional?(info, "description", &optional_text?(&1, @max_description_bytes)) and
       optional?(info, "websiteUrl", &website_url?/1) and
       optional?(info, "icons", &Icons.valid_wire_list?/1)
   end
@@ -62,6 +62,11 @@ defmodule AttestoMCP.Server.Implementation do
     do: byte_size(value) in 1..max_bytes and String.valid?(value)
 
   defp text?(_value, _max_bytes), do: false
+
+  defp optional_text?(value, max_bytes) when is_binary(value),
+    do: byte_size(value) <= max_bytes and String.valid?(value)
+
+  defp optional_text?(_value, _max_bytes), do: false
 
   defp website_url?(value) when is_binary(value) and byte_size(value) in 1..@max_url_bytes do
     case URI.new(value) do

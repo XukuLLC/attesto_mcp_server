@@ -6,7 +6,7 @@ establish certification, endorsement, or support for every optional MCP extensio
 ## Tested candidate
 
 - source fingerprint:
-  `17cfbc3ccdcfe89f90ce78d47d6a6efd7045102b3e894339eb4f0477581d5f44`
+  `b1391d61552c8fae1ed5e94bd67d349c8e11f73f4eabb0ddee1fa9da12acefbc`
 - official runner source: package version `0.2.0-alpha.12`, including PR #396
 - runner commit: `c37eec888e1c6ff140af79987a40008548b7cc5f`
 - runner archive SHA-256:
@@ -141,24 +141,38 @@ The corpus selects `formats: false` annotation semantics. Direct validation
 and server tool input/output retain format assertions by default in 2.x.
 Internal elicitation URLs and form responses always assert their formats.
 
-The JSV 0.24.0 dependency floor also passes all 886 server checks and the same
-pinned corpus, with 1,252 passes and the same 49 explicit exclusions.
+The corpus also passed on Elixir 1.18.3/OTP 27.3 with JSV 0.24.0:
+1,252 passes, the same 49 explicit exclusions, and zero mismatches or exceptions.
 
 ## Package gates
 
-- All 886 checks passed, including the PostgreSQL-backed session and URL
-  elicitation store tests. Two schema validation tests exceeded their
-  one-second evaluation budget in a full run while Dialyzer shared the
-  machine; both passed when rerun, and the schema code is unchanged.
+- All 915 checks (two doctests and 913 tests) passed in a complete run on
+  Elixir 1.20.4/OTP 29.0.5, including the PostgreSQL-backed session and URL
+  elicitation store tests. Coverage was 84.15%.
+- All 915 checks also passed in a complete PostgreSQL run on the declared
+  Elixir 1.18.3/OTP 27.3 floor. The primary applications in both runs used
+  JSV 0.25.0 with Attesto 2.1.0 and AttestoMCP 1.3.0, exercising the existing
+  dependency versions.
+- A separate complete PostgreSQL run passed all 915 checks on Elixir
+  1.18.3/OTP 27.3 with the primary application using JSV 0.24.0, Attesto
+  2.2.2, and AttestoMCP 1.3.2. Standalone `Mix.install` stdio examples resolve
+  their own permitted dependency versions; they are not pinned to JSV 0.24.0.
+- The fixed embedded meta-schemas initialize at application startup under
+  one ten-second total deadline. User-supplied schema compilation and
+  evaluation retain their one-second deadlines. Cold-start and held-lock
+  regressions passed; earlier attempts and their failures were retained
+  separately from these complete runs.
 - Dialyzer completed with zero errors and zero skips.
 - Package construction, source/package hygiene, formatting, documentation,
-  the production dependency tree check, the dependency-neutral consumer with
-  Ecto activation and removal, and the Hex advisory audit passed.
+  the production dependency tree check, and the Hex advisory audit passed.
+- The generic integration example passed ten checks covering the public API,
+  a production dependency tree without SQL, and optional Ecto activation and
+  removal. Its final dependency lock matched the initial lock byte for byte.
 - The coordinated OAuth fixture passed all five tests.
-- The complete PostgreSQL lane also ran on the declared Elixir 1.18.3/OTP
-  27.3 floor: 884 of 886 checks passed in the full run, and the two schema
-  tests that exceeded the one-second budget during cold start passed when
-  rerun on that runtime.
+- Default strict Credo is not a passing gate. The repository does not
+  configure Credo; a temporary default configuration reported style and
+  complexity findings in both the baseline and candidate. This record does
+  not claim lint cleanliness.
 
 The frozen runner does not score `2025-06-18`. Package-owned HTTP, stdio,
 lifecycle, revision-filtering, and configuration regressions cover that

@@ -2,6 +2,8 @@ defmodule AttestoMCP.Server.Application do
   @moduledoc false
   use Application
 
+  alias AttestoMCP.Server.Schema
+
   @impl true
   def start(_type, _args) do
     children = [
@@ -14,6 +16,8 @@ defmodule AttestoMCP.Server.Application do
       {DynamicSupervisor, strategy: :one_for_one, name: AttestoMCP.Server.DynamicSupervisor}
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: __MODULE__)
+    with :ok <- Schema.initialize_meta_schemas() do
+      Supervisor.start_link(children, strategy: :one_for_one, name: __MODULE__)
+    end
   end
 end

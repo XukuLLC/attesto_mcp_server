@@ -1658,7 +1658,8 @@ changes. Registered definitions are never modified.
 Modern complete results from `server/discover`, `tools/list`, `prompts/list`,
 `resources/list`, `resources/templates/list`, and `resources/read` carry
 `ttlMs` and `cacheScope`. The server does not cache responses. Without
-`cache_policy`, `cache_ttl_ms` (default `30_000`) and a private scope apply,
+`cache_policy` or a selected definition's `cache:` policy, `cache_ttl_ms`
+(default `30_000`) and a private scope apply,
 as in 2.3. `prompts/get` keeps emitting the same extra fields; it is not a
 standard cacheable operation.
 
@@ -1675,7 +1676,8 @@ cache_policy: [
 ```
 
 A resource or resource template may carry `cache: [ttl_ms: 1_000]` or
-`cache: [scope: :private]`. Precedence is the global default, then the method
+`cache: [scope: :private]`, even when no server-level `cache_policy` is set.
+Precedence is the global default, then the method
 policy, the definition policy, the optional resolver, and valid handler hints
 on `resources/read`. Handler hints can shorten `ttlMs` or select
 `"private"`; they cannot lengthen freshness or select `"public"`. The resolver
@@ -1685,19 +1687,27 @@ private scope for that response.
 
 These constraints apply with or without `cache_policy`:
 
-- Interim `input_required` results carry no hints, and complete results from a
-  multi-round retry use `ttlMs: 0` and `"private"`.
+- Interim `input_required` results carry no hints, and otherwise cacheable
+  complete results from a multi-round retry use `ttlMs: 0` and `"private"`.
+  Completed tool retries discard authored hint extras; tool calls are not
+  standard cacheable operations.
 - `"public"` requires `allow_public_cache: true`, an explicit public choice,
   and a caller-independent response. A list is caller-independent only when
   no definition of that type has scope clauses or an `authorize` callback, no
   HTTP definition policy applies, and no presentation callback is configured.
-  A resource read requires an unrestricted selected definition. A method-level
+  Paginated catalogs stay private on every page because their cursors bind the
+  caller. A resource read requires an unrestricted selected definition and no
+  potentially personalized result/content metadata. An authored implementation
+  identity equal to the configured constant does not count as personalized;
+  another identity or other handler metadata does. A method-level
   scope requirement does not make a result caller-dependent; a public hint
   lets shared caches serve it to callers without that scope, so choose public
   only for content you would publish.
 - Output that includes `instructions_provider` or `tool_presentation` results
   is private, with `ttlMs: 0` unless a method policy, definition policy, or
   resolver supplies a TTL.
+- Potentially personalized resource metadata is private and uses `ttlMs: 0`
+  unless a method policy, definition policy, or resolver supplies a TTL.
 - A list page with `nextCursor` is never fresher than the cursor lifetime,
   and a private hint is never fresher than the verified access token.
 - Every page of one list request has the same scope, and a continuation is
@@ -1721,15 +1731,18 @@ server_icons: [
 ]
 ```
 
-Each icon `src` must be an absolute `https:` URL or a Base64 `data:` URI with
+Each configured icon `src` must be an absolute HTTP/HTTPS URL or a Base64 `data:` URI with
 an `image/*` media type. `mimeType` must be an `image/*` type, `sizes` entries
 are `"WxH"` or `"any"`, and `theme` is `"light"` or `"dark"`. At most 16
-icons are accepted, with a 131,072-byte encoded budget. Icon URLs are never
+icons are accepted, with a 131,072-byte encoded budget. Empty icon and size
+arrays are accepted, and size entries are bounded to 128 bytes. Icon URLs are never
 fetched or resolved. `2025-06-18` initialization omits icons. A handler may
 author its own `serverInfo` in a modern result's `_meta`; it is kept only when
-every field is a valid MCP `Implementation` field (`name`, `version`, `title`,
-`description`, `websiteUrl`, and `icons` checked by the same rules), and is
-otherwise replaced by the configured value. Implementation identity is display
+every field satisfies the bounded MCP wire contract (`name`, `version`,
+`title`, `description`, `websiteUrl`, and `icons`), and is otherwise replaced
+by the configured value. Authored optional text and icon/size arrays may be
+empty; authored MIME types and sizes do not acquire the stricter configured
+image/size syntax rules. Implementation identity is display
 metadata only. Registered component icons keep their 2.3 checks.
 
 ### JSON Schema dialects

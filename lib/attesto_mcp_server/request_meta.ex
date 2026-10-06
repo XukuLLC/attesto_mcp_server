@@ -29,10 +29,12 @@ defmodule AttestoMCP.Server.RequestMeta do
   metadata. The existing trace-context extraction remains separate.
 
   A multi-round retry exposes its own metadata. The signed retry state binds
-  the operation parameters and the `io.modelcontextprotocol/protocolVersion`
-  and `io.modelcontextprotocol/clientCapabilities` keys; trace context,
-  progress tokens, client information, and application keys may differ from
-  the first round, and no identity or authority is recovered from it.
+  operation parameters and all metadata except `traceparent`, `tracestate`,
+  `baggage`, `progressToken`, and `io.modelcontextprotocol/clientInfo`.
+  Application keys and protocol settings remain bound to the first round;
+  tracing, progress, and display values may change. Operation targets and
+  confirmation-bound values belong in operation parameters, not those volatile
+  fields. No identity or authority is recovered from earlier metadata.
   """
 
   alias AttestoMCP.Server.Schema

@@ -663,6 +663,41 @@ defmodule AttestoMCP.Server.TestHelpersExtendedTest do
       assert_raise ArgumentError, fn -> ServerTest.request(server, "tools/list", opaque([1])) end
     end
 
+    test "request/4 rejects atom protocol fields before JSON key conversion", %{server: server} do
+      for key <- [:_meta, :requestState, :inputResponses] do
+        assert_raise ArgumentError, ~r/pass _meta/, fn ->
+          ServerTest.request(server, "tools/call", %{key => %{}, name: "alpha", arguments: %{}})
+        end
+      end
+
+      for {atom_key, string_key} <- [
+            {:_meta, "_meta"},
+            {:requestState, "requestState"},
+            {:inputResponses, "inputResponses"}
+          ] do
+        assert_raise ArgumentError, ~r/pass _meta/, fn ->
+          ServerTest.request(server, "tools/call", %{
+            "name" => "alpha",
+            "arguments" => %{},
+            atom_key => "atom value",
+            string_key => "string value"
+          })
+        end
+      end
+    end
+
+    test "discover rejects malformed options as setup errors", %{server: server} do
+      for opts <- [
+            opaque(%{}),
+            opaque("options"),
+            opaque([7]),
+            [unknown: true],
+            [protocol_version: @modern, protocol_version: @modern]
+          ] do
+        assert_raise ArgumentError, fn -> ServerTest.discover(server, opts) end
+      end
+    end
+
     test "discover is modern-only and values must be JSON", %{server: server} do
       assert_raise ArgumentError, fn ->
         ServerTest.discover(server, protocol_version: @legacy)

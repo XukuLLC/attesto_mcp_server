@@ -634,7 +634,7 @@ defmodule AttestoMCP.Server.RequestMetaTest do
       refute_received {:confirm_handler, _principal, _meta}
     end
 
-    test "a retry may carry new per-request metadata and exposes its own values" do
+    test "a retry may carry new volatile metadata while application metadata stays bound" do
       server = start_server()
       parent = self()
 
@@ -663,14 +663,14 @@ defmodule AttestoMCP.Server.RequestMetaTest do
       answer = %{"confirm" => %{"action" => "accept", "content" => %{}}}
 
       first_meta = %{
-        "com.example/round" => "first",
+        "com.example/round" => "fixed",
         "traceparent" => "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01",
         "progressToken" => "p-1",
         "io.modelcontextprotocol/clientInfo" => %{"name" => "example-client", "version" => "1"}
       }
 
       retry_meta = %{
-        "com.example/round" => "second",
+        "com.example/round" => "fixed",
         "traceparent" => "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
         "progressToken" => "p-2",
         "io.modelcontextprotocol/clientInfo" => %{"name" => "example-client", "version" => "2"}
@@ -682,7 +682,7 @@ defmodule AttestoMCP.Server.RequestMetaTest do
                  meta: first_meta
                )
 
-      assert_receive {:round, false, %{"com.example/round" => "first"}}
+      assert_receive {:round, false, %{"com.example/round" => "fixed"}}
 
       assert %{"result" => %{"resultType" => "complete"}} =
                ServerTest.call_tool(server, "confirm", %{},

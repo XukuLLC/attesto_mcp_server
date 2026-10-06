@@ -365,9 +365,8 @@ defmodule AttestoMCP.Server.PresentationTest do
         %{"_meta" => %{"_private" => true}},
         %{"_meta" => "not-a-map"},
         %{"icons" => [%{"src" => "javascript:alert(1)"}]},
-        %{"icons" => [%{"src" => "http://example.com/icon.png"}]},
+        %{"icons" => [%{"src" => "ftp://example.com/icon.png"}]},
         %{"icons" => [%{"src" => "https://example.com/icon", "mimeType" => "text/html"}]},
-        %{"icons" => []},
         %{:title => "Atom title", "title" => "String title"},
         %{"title" => ""},
         %{"description" => "   "}

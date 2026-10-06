@@ -364,7 +364,7 @@ defmodule AttestoMCP.Server.CachePolicyTest do
   end
 
   describe "pagination" do
-    test "every page keeps the resolver-selected scope" do
+    test "every page stays private even when the resolver selects public" do
       parent = self()
 
       server =
@@ -390,7 +390,7 @@ defmodule AttestoMCP.Server.CachePolicyTest do
       third = ServerTest.list_tools(server, cursor: second["result"]["nextCursor"])
 
       for page <- [first, second, third] do
-        assert hints(page)["cacheScope"] == "public"
+        assert hints(page)["cacheScope"] == "private"
       end
 
       assert Enum.map([first, second, third], &hd(&1["result"]["tools"])["name"]) == [
@@ -404,7 +404,7 @@ defmodule AttestoMCP.Server.CachePolicyTest do
     end
 
     for {from, to} <- [{:public, :private}, {:private, :public}] do
-      test "a continuation is rejected when the resolver changes scope from #{from} to #{to}" do
+      test "a paginated continuation stays private when the resolver changes from #{from} to #{to}" do
         {:ok, scope} = Agent.start_link(fn -> unquote(from) end)
 
         server =
@@ -423,14 +423,15 @@ defmodule AttestoMCP.Server.CachePolicyTest do
               )
 
         first = ServerTest.list_tools(server)
-        assert hints(first)["cacheScope"] == Atom.to_string(unquote(from))
+        assert hints(first)["cacheScope"] == "private"
         cursor = first["result"]["nextCursor"]
         assert is_binary(cursor)
 
         Agent.update(scope, fn _ -> unquote(to) end)
 
-        assert %{"error" => %{"code" => -32602, "data" => %{"reason" => "invalid_cursor"}}} =
-                 ServerTest.list_tools(server, cursor: cursor)
+        continuation = ServerTest.list_tools(server, cursor: cursor)
+        assert continuation["result"]["tools"] |> hd() |> Map.get("name") == "b"
+        assert hints(continuation)["cacheScope"] == "private"
       end
     end
 

@@ -266,6 +266,86 @@ defmodule AttestoMCP.Server.SchemaCacheTest do
     assert {:ok, %JSV.Root{}} = Cache.get({schema, true, Schema.default_instance_bytes()})
   end
 
+  test "first validations after cold application startup do not wait for initialization locks" do
+    dialects = [
+      "https://json-schema.org/draft/2020-12/schema",
+      "http://json-schema.org/draft-07/schema#"
+    ]
+
+    on_exit(fn -> Application.ensure_all_started(:attesto_mcp_server) end)
+    assert :ok = Application.stop(:attesto_mcp_server)
+    Enum.each(dialects, &:persistent_term.erase({Schema, :meta, &1}))
+    assert {:ok, _apps} = Application.ensure_all_started(:attesto_mcp_server)
+
+    parent = self()
+
+    holders =
+      Enum.map(dialects, fn dialect ->
+        Task.async(fn -> hold_initialization_lock(dialect, parent) end)
+      end)
+
+    try do
+      Enum.each(dialects, fn dialect -> assert_receive {:initialization_locked, ^dialect} end)
+
+      for dialect <- dialects do
+        schema = %{
+          "$schema" => dialect,
+          "type" => "object",
+          "properties" => %{"name" => %{"type" => "string", "default" => "Ada"}},
+          "required" => ["name"]
+        }
+
+        assert {:error, {:required, ["name"]}} = Schema.validate(%{}, schema)
+        assert {:ok, %{"name" => "Ada"}} = Schema.apply_property_defaults(%{}, schema)
+      end
+    after
+      Enum.each(holders, &send(&1.pid, :release))
+      Enum.each(holders, &Task.await(&1))
+    end
+  end
+
+  test "startup tolerates a held embedded-schema lock beyond the request deadline" do
+    dialect = "https://json-schema.org/draft/2020-12/schema"
+    parent = self()
+
+    on_exit(fn -> Application.ensure_all_started(:attesto_mcp_server) end)
+    assert :ok = Application.stop(:attesto_mcp_server)
+    :persistent_term.erase({Schema, :meta, dialect})
+    holder = Task.async(fn -> hold_initialization_lock(dialect, parent) end)
+    assert_receive {:initialization_locked, ^dialect}
+    startup = Task.async(fn -> Application.ensure_all_started(:attesto_mcp_server) end)
+
+    try do
+      assert nil == Task.yield(startup, 1_200)
+      send(holder.pid, :release)
+      assert :ok = Task.await(holder)
+      assert {:ok, _apps} = Task.await(startup, 10_500)
+
+      schema = %{"type" => "object", "required" => ["name"]}
+      assert {:error, {:required, ["name"]}} = Schema.validate(%{}, schema)
+    after
+      send(holder.pid, :release)
+      if Process.alive?(holder.pid), do: Task.shutdown(holder, :brutal_kill)
+      if Process.alive?(startup.pid), do: Task.shutdown(startup, :brutal_kill)
+    end
+  end
+
+  defp hold_initialization_lock(dialect, parent) do
+    :global.trans(
+      {{Schema, :meta, dialect}, self()},
+      fn ->
+        send(parent, {:initialization_locked, dialect})
+
+        receive do
+          :release -> :ok
+        after
+          5_000 -> :expired
+        end
+      end,
+      [node()]
+    )
+  end
+
   defp unique_title, do: "cache-test-#{System.unique_integer([:positive])}"
 
   defp wait_for_released_reservation do

@@ -80,9 +80,12 @@ defmodule AttestoMCP.Server do
   @traceparent_pattern ~r/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
   @primitive_types [:tool, :resource, :template, :prompt, :completion]
   @cache_hint_fields ["ttlMs", "cacheScope"]
-  @retry_bound_meta_keys [
-    "io.modelcontextprotocol/protocolVersion",
-    "io.modelcontextprotocol/clientCapabilities"
+  @retry_volatile_meta_keys [
+    "traceparent",
+    "tracestate",
+    "baggage",
+    "progressToken",
+    "io.modelcontextprotocol/clientInfo"
   ]
   @session_pg_scope AttestoMCP.Server.SessionCluster
   @allowed_startup_option_keys [
@@ -5772,7 +5775,9 @@ defmodule AttestoMCP.Server do
       hints =
         if era == @modern do
           cache_hints(list_method(type), opts, context,
-            invariant?: Enum.all?(registered, &unrestricted_definition?(&1, opts)),
+            invariant?:
+              length(values) <= page_size(opts) and
+                Enum.all?(registered, &unrestricted_definition?(&1, opts)),
             personalized?: type == :tool and Presentation.dynamic_tools?(opts)
           )
         end
@@ -5948,8 +5953,6 @@ defmodule AttestoMCP.Server do
     operation = %{"tool" => name}
 
     with true <- is_binary(name) and is_map(arguments),
-         {:ok, selected_definition} <-
-           authorize_selected_tool(runtime.registry, name, context, opts),
          :ok <- require_task_capability(params, runtime.opts, era),
          {:ok, state_payload} <-
            verify_retry_state(
@@ -5961,6 +5964,8 @@ defmodule AttestoMCP.Server do
              operation,
              runtime.opts
            ),
+         {:ok, selected_definition} <-
+           authorize_selected_tool(runtime.registry, name, context, opts),
          :ok <- validate_input_responses(state_payload, params, runtime.opts),
          :ok <- consume_retry_state(state_payload, runtime.opts) do
       call_tool_validated(
@@ -5975,6 +5980,7 @@ defmodule AttestoMCP.Server do
         operation,
         selected_definition
       )
+      |> restrict_tool_retry_hints(state_payload, era)
     else
       false ->
         {:error, Error.invalid_params(%{"reason" => "tool_arguments_invalid"})}
@@ -5998,18 +6004,21 @@ defmodule AttestoMCP.Server do
   end
 
   defp authorize_selected_tool(registry, name, context, opts) do
-    if is_function(Keyword.get(opts, :definition_authorizer), 1) and is_binary(name) do
-      case Registry.list(registry, :tool) |> Enum.find(&(&1.name == name)) do
-        nil ->
-          {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
+    selected_policy? = is_function(Keyword.get(opts, :definition_authorizer), 1)
 
-        tool ->
-          if definition_visible?(tool, context, opts),
-            do: {:ok, tool},
-            else: {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
-      end
-    else
-      {:ok, :none}
+    candidate =
+      Enum.find(Registry.list(registry, :tool), fn tool ->
+        tool.name == name and (selected_policy? or visible?(tool, context))
+      end)
+
+    case candidate do
+      nil ->
+        {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
+
+      tool ->
+        if not selected_policy? or definition_visible?(tool, context, opts),
+          do: {:ok, tool},
+          else: {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
     end
   rescue
     _ -> {:error, Error.invalid_params(%{"reason" => "unknown_tool", "name" => name})}
@@ -6108,17 +6117,16 @@ defmodule AttestoMCP.Server do
   defp unknown_resource_error(uri, @modern), do: Error.invalid_params(%{"uri" => uri})
   defp unknown_resource_error(uri, _era), do: Error.legacy_resource_not_found(uri)
 
-  # The signed retry state binds the operation parameters and the request
-  # metadata that changes protocol handling. Per-request metadata such as
-  # trace context, progress tokens, client display information, and
-  # application keys may differ on a retry, which then exposes its own values
-  # through `context.request_meta`.
+  # Bind operation parameters and all metadata except known volatile tracing,
+  # progress, and display fields. Unknown/application metadata may select an
+  # operation or describe an approval, so it remains part of the signed state.
+  # A retry still exposes its current metadata through `context.request_meta`.
   defp retry_salient(params) do
     params = Map.drop(params, ["requestState", "inputResponses"])
 
     case Map.fetch(params, "_meta") do
       {:ok, meta} when is_map(meta) ->
-        Map.put(params, "_meta", Map.take(meta, @retry_bound_meta_keys))
+        Map.put(params, "_meta", Map.drop(meta, @retry_volatile_meta_keys))
 
       _other ->
         params
@@ -6283,7 +6291,7 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  # Tool/resource visibility is checked before retry validation. Prompt lookup
+  # Tool/resource visibility is checked before validating retry answers. Prompt lookup
   # normally happens afterward, so recovery must apply that same gate here.
   defp recovery_operation_visible(runtime, "prompts/get", %{"prompt" => name}, context) do
     if Enum.any?(
@@ -6832,9 +6840,41 @@ defmodule AttestoMCP.Server do
       definition_type: if(resource[:uri_template], do: :template, else: :resource),
       retry?: not is_nil(state_payload),
       invariant?: unrestricted_definition?(resource, opts),
+      personalized?: personalized_resource_metadata?(normalized, opts),
       handler_hints: Map.take(normalized, @cache_hint_fields)
     )
   end
+
+  # The final result stamp preserves valid authored identity. Treat a different
+  # authored identity or arbitrary handler metadata as potentially personalized
+  # before selecting hints, so private TTL/token constraints apply together.
+  defp personalized_resource_metadata?(result, opts) do
+    configured = server_info(opts)
+
+    metadata_personalized? =
+      case Map.get(result, "_meta", %{}) do
+        meta when is_map(meta) ->
+          {authored, extra} = Map.pop(meta, "io.modelcontextprotocol/serverInfo")
+
+          map_size(extra) > 0 or
+            Implementation.resolve_authored(authored, configured) != configured
+
+        _invalid ->
+          true
+      end
+
+    metadata_personalized? or
+      Enum.any?(Map.get(result, "contents", []), fn content ->
+        Map.get(content, "_meta", %{}) != %{}
+      end)
+  end
+
+  # Tool calls do not define standard cache hints. Retain permitted authored
+  # extras on ordinary calls, but never advertise caching for an answered retry.
+  defp restrict_tool_retry_hints({:ok, result}, state, @modern) when not is_nil(state),
+    do: {:ok, Map.drop(result, @cache_hint_fields)}
+
+  defp restrict_tool_retry_hints(outcome, _state, _era), do: outcome
 
   # URI-template matching is deliberately bounded and only accepts layouts that
   # the registration validator declares supported. For a supported path, a

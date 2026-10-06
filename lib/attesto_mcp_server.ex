@@ -63,7 +63,7 @@ defmodule AttestoMCP.Server.API do
   @type host_callback :: function() | {module(), atom()} | {module(), atom(), list()}
 
   @typedoc """
-  An MCP icon. `src` is an absolute `https:` URL or a Base64 `data:` URI with an
+  An MCP icon. `src` is an absolute HTTP/HTTPS URL or a Base64 `data:` URI with an
   `image/*` media type; `mimeType` (or `mime_type`), `sizes` (`"WxH"` or
   `"any"`), and `theme` (`"light"` or `"dark"`) are optional.
   """

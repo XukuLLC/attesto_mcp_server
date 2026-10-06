@@ -18,21 +18,37 @@ These corrections apply to every deployment:
 - A request whose `_meta` object encodes above 65,536 bytes now returns invalid
   params (`"request_meta_too_large"`). Raise `max_request_meta_bytes`, up to
   `max_json_bytes`, if clients legitimately send larger metadata.
-- A multi-round retry now has to repeat only the operation parameters and the
-  `io.modelcontextprotocol/protocolVersion` and `clientCapabilities` metadata.
-  Trace context, progress tokens, `clientInfo`, and application metadata may
-  differ, so clients that send a fresh `traceparent` per request no longer get
-  `invalid_request_state`. Request state issued by 2.3 does not verify under
-  2.4, so a retry in flight during the upgrade is rejected once and the client
-  starts the request again.
-- Complete results from a multi-round retry (`requestState` present) now carry
-  `ttlMs: 0` and `cacheScope: "private"`, as MCP requires. Earlier releases
-  emitted the configured TTL.
+- A multi-round retry must repeat operation parameters and metadata other than
+  `traceparent`, `tracestate`, `baggage`, `progressToken`, and
+  `io.modelcontextprotocol/clientInfo`. These tracing/progress/display fields
+  may differ, so a fresh trace context does not cause `invalid_request_state`.
+  Application metadata, unknown extension metadata, protocol version, and
+  client capabilities remain bound to the original request. Put operation
+  targets and confirmation-bound values in operation parameters, and never
+  derive them from tracing/progress/display fields. A retry exposes its current
+  metadata snapshot. In-flight state issued by 2.3 can be rejected once when
+  these fields are present; the client starts the request again.
+- Otherwise cacheable complete results from a multi-round retry now carry
+  `ttlMs: 0` and `cacheScope: "private"`. Completed `tools/call` retries discard
+  authored cache-hint extras; ordinary tool calls retain permitted extra fields
+  and do not become standard cacheable operations.
+- Direct tool dispatch checks definition visibility before consuming retry
+  state. A denied attempt does not prevent a later authorized retry.
 - `cacheScope: "public"` now also requires a caller-independent response. With
   `cache_scope: :public`, `allow_public_cache: true`, and a trusted
   `public_catalog` context, a list containing a definition with scope clauses
   or an `authorize` callback, a list served under an HTTP definition policy,
-  or a read of such a resource is now private.
+  or a read of such a resource is now private. Paginated lists are private on
+  every page, including the final page, because continuation cursors bind the
+  caller. Unpaginated invariant lists remain eligible for public scope.
+- Resource result metadata is considered potentially personalized when it
+  contains an authored identity different from the configured constant, other
+  result metadata, or metadata on resource contents. Such results are private
+  and use zero TTL unless an explicit policy supplies freshness. A valid
+  authored identity equal to the configured constant remains eligible for
+  public scope.
+- A definition's `cache:` policy applies even without a server-level
+  `cache_policy`; leaving both absent retains the previous option precedence.
 - A list page with `nextCursor` is capped at the cursor lifetime, and a private
   hint is capped at the remaining lifetime of the verified access token.
 - `cache_ttl_ms` must be at most 9,007,199,254,740,991 (the largest JSON-safe
@@ -40,10 +56,11 @@ These corrections apply to every deployment:
 - Session-bound `resources/read` and `prompts/get` results no longer pass
   through handler-supplied `ttlMs` or `cacheScope` fields, which those revisions
   do not define.
-- Handler-authored `io.modelcontextprotocol/serverInfo` metadata is kept only
-  when every field is a valid MCP `Implementation` field. Extra fields or
-  malformed optional fields now cause the configured server identity to be
-  stamped instead.
+- Handler-authored `io.modelcontextprotocol/serverInfo` metadata uses bounded
+  wire validation. Empty optional text and icon arrays and HTTP/HTTPS icon URLs
+  are preserved. Unsupported fields, malformed values, or exceeded budgets
+  cause the configured identity to be stamped instead. Configured/presentation
+  icons additionally enforce image MIME types and size syntax.
 - The `cache/choice` telemetry event adds bounded `method` and `source`
   metadata.
 
@@ -89,6 +106,10 @@ and embedded meta-schema initialization took about 43 milliseconds.
 These measurements depend on the workload and machine;
 benchmark representative schemas before planning throughput. Initialization
 uses a node-local lock, and embedded meta-schemas are reused on the node.
+In 2.4, the fixed embedded meta-schemas initialize at application startup,
+before request handling. The three fixed roots share a ten-second startup
+deadline, and startup fails if initialization fails. User-supplied schema
+compilation and evaluation retain their one-second deadlines.
 Existing public validation reasons are preserved where a corresponding legacy
 reason exists; newly supported constraints return `{:schema_validation, ...}`.
 

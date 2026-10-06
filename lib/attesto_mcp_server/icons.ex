@@ -2,13 +2,15 @@ defmodule AttestoMCP.Server.Icons do
   @moduledoc false
 
   # Component definitions keep the field checks they had in 2.3.x so existing
-  # registrations remain valid. Implementation identity and presentation
-  # output are new surfaces, so they use the complete validator below.
+  # registrations remain valid. Configuration and presentation use semantic
+  # checks; authored wire metadata keeps the protocol's optional string fields
+  # while sharing the source, count, and byte bounds.
 
   @max_icons 16
   @max_sizes 16
   @max_src_bytes 65_536
   @max_mime_bytes 255
+  @max_size_bytes 128
   @max_total_bytes 131_072
   @icon_keys ["src", "mimeType", "sizes", "theme"]
   @key_aliases %{
@@ -18,9 +20,10 @@ defmodule AttestoMCP.Server.Icons do
     "sizes" => "sizes",
     "theme" => "theme"
   }
-  @mime_pattern ~r/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/
-  @size_pattern ~r/^[1-9][0-9]{0,4}x[1-9][0-9]{0,4}$/
-  @data_pattern ~r/^data:(image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126});base64,([A-Za-z0-9+\/]+={0,2})$/
+  @mime_pattern ~r/\Aimage\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\z/
+  @wire_mime_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\z/
+  @size_pattern ~r/\A[1-9][0-9]*x[1-9][0-9]*\z/
+  @data_pattern ~r/\Adata:(image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126});base64,([A-Za-z0-9+\/]+={0,2})\z/
 
   @doc false
   def max_icons, do: @max_icons
@@ -47,14 +50,15 @@ defmodule AttestoMCP.Server.Icons do
   @doc """
   Validates and canonicalizes a complete icon list.
 
-  Each icon has a `src` that is an absolute `https:` URL or a Base64 `data:`
+  Each icon has a `src` that is an absolute HTTP/HTTPS URL or a Base64 `data:`
   URI with an `image/*` media type, plus optional `mimeType`, `sizes`, and
   `theme` fields defined by the MCP `Icon` type. Atom keys and `mime_type` are
   accepted in configuration and returned as wire keys. Icon URLs are never
-  fetched or resolved.
+  fetched or resolved. Empty icon and size lists are accepted. Dimension
+  strings are bounded to 128 bytes and are never parsed as integers.
   """
   @spec normalize(term()) :: {:ok, [map()]} | {:error, atom()}
-  def normalize(icons) when is_list(icons) and icons != [] do
+  def normalize(icons) when is_list(icons) do
     cond do
       not proper_list?(icons) ->
         {:error, :invalid_icons}
@@ -72,14 +76,56 @@ defmodule AttestoMCP.Server.Icons do
 
   def normalize(_icons), do: {:error, :invalid_icons}
 
-  @doc "Returns true when a wire icon list already satisfies `normalize/1`."
+  @doc """
+  Checks canonical authored wire icons without imposing configuration-only
+  image MIME or size-format choices. Optional size strings follow the MCP
+  wire type; source, UTF-8, count, and encoded byte bounds still apply.
+  """
   @spec valid_wire_list?(term()) :: boolean()
-  def valid_wire_list?(icons) do
-    case normalize(icons) do
-      {:ok, ^icons} -> true
-      _other -> false
+  def valid_wire_list?(icons) when is_list(icons) do
+    bounded_list?(icons, @max_icons) and Enum.all?(icons, &valid_wire_icon?/1) and
+      total_budget(icons) == :ok
+  end
+
+  def valid_wire_list?(_icons), do: false
+
+  defp valid_wire_icon?(%{"src" => src} = icon) do
+    Enum.all?(Map.keys(icon), &(&1 in @icon_keys)) and valid_src(src) == :ok and
+      optional_wire_field?(icon, "mimeType", &valid_wire_mime?/1) and
+      optional_wire_field?(icon, "sizes", &valid_wire_sizes?/1) and
+      optional_wire_field?(icon, "theme", &(valid_theme(&1) == :ok))
+  end
+
+  defp valid_wire_icon?(_icon), do: false
+
+  defp optional_wire_field?(icon, key, check) do
+    case Map.fetch(icon, key) do
+      :error -> true
+      {:ok, value} -> check.(value)
     end
   end
+
+  defp valid_wire_mime?(mime) when is_binary(mime) and byte_size(mime) <= @max_mime_bytes,
+    do: Regex.match?(@wire_mime_pattern, mime)
+
+  defp valid_wire_mime?(_mime), do: false
+
+  defp valid_wire_sizes?(sizes) when is_list(sizes),
+    do: bounded_list?(sizes, @max_sizes) and Enum.all?(sizes, &valid_wire_size?/1)
+
+  defp valid_wire_sizes?(_sizes), do: false
+
+  defp valid_wire_size?(size) when is_binary(size) and byte_size(size) <= @max_size_bytes,
+    do: String.valid?(size) and not String.match?(size, ~r/[\x00-\x1F\x7F]/u)
+
+  defp valid_wire_size?(_size), do: false
+
+  defp bounded_list?([], _remaining), do: true
+
+  defp bounded_list?([_head | tail], remaining) when remaining > 0,
+    do: bounded_list?(tail, remaining - 1)
+
+  defp bounded_list?(_list, _remaining), do: false
 
   defp proper_list?([]), do: true
   defp proper_list?([_head | tail]), do: proper_list?(tail)
@@ -140,16 +186,16 @@ defmodule AttestoMCP.Server.Icons do
         valid_data_uri(src)
 
       true ->
-        valid_https_uri(src)
+        valid_http_uri(src)
     end
   end
 
   defp valid_src(_src), do: {:error, :invalid_icon_src}
 
-  defp valid_https_uri(src) do
+  defp valid_http_uri(src) do
     case URI.new(src) do
-      {:ok, %URI{scheme: "https", host: host, userinfo: nil}}
-      when is_binary(host) and host != "" ->
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil}}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
         :ok
 
       _other ->
@@ -177,7 +223,7 @@ defmodule AttestoMCP.Server.Icons do
 
   defp valid_sizes(:absent), do: :ok
 
-  defp valid_sizes(sizes) when is_list(sizes) and sizes != [] do
+  defp valid_sizes(sizes) when is_list(sizes) do
     if proper_list?(sizes) and length(sizes) <= @max_sizes and
          Enum.all?(sizes, &valid_size?/1) and Enum.uniq(sizes) == sizes,
        do: :ok,
@@ -187,7 +233,10 @@ defmodule AttestoMCP.Server.Icons do
   defp valid_sizes(_sizes), do: {:error, :invalid_icon_sizes}
 
   defp valid_size?("any"), do: true
-  defp valid_size?(size) when is_binary(size), do: Regex.match?(@size_pattern, size)
+
+  defp valid_size?(size) when is_binary(size) and byte_size(size) <= @max_size_bytes,
+    do: Regex.match?(@size_pattern, size)
+
   defp valid_size?(_size), do: false
 
   defp valid_theme(:absent), do: :ok

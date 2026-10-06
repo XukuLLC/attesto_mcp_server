@@ -3,7 +3,8 @@ defmodule AttestoMCP.Server.CachePolicy do
   Cache-hint policy for cacheable MCP results.
 
   The server emits `ttlMs` and `cacheScope` hints on modern complete results.
-  It does not cache responses itself. Without a `:cache_policy` option the
+  It does not cache responses itself. Without a `:cache_policy` option or a
+  definition's `:cache` policy the
   2.3 behaviour is kept: `:cache_ttl_ms` (default `30_000`) and a private
   scope, with `"public"` only when `cache_scope: :public`,
   `allow_public_cache: true`, and the dispatch context's trusted
@@ -24,7 +25,8 @@ defmodule AttestoMCP.Server.CachePolicy do
   `:methods` accepts the standard cacheable operations: `server/discover`,
   `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`,
   and `resources/read`. A resource or resource-template definition may carry
-  its own `cache: [ttl_ms: ..., scope: ...]` policy for `resources/read`. Each
+  its own `cache: [ttl_ms: ..., scope: ...]` policy for `resources/read`, even
+  without a server-level `:cache_policy` option. Each
   policy may set `:ttl_ms` (a non-negative integer), `:scope` (`:private` or
   `:public`), or both; an unset field inherits the lower-precedence value.
 
@@ -53,8 +55,10 @@ defmodule AttestoMCP.Server.CachePolicy do
       caller-independent only when every registered definition of that type
       has no required scopes, alternative scope sets, or `authorize` callback,
       no HTTP definition policy applies, and no presentation callback is
-      configured. A resource read additionally requires the selected definition
-      to be unrestricted. Otherwise the scope is `"private"`. Method-level
+      configured. Paginated catalogs stay private because their cursors bind
+      the caller. A resource read additionally requires the selected definition
+      to be unrestricted and its metadata to use only the configured constant
+      implementation identity. Otherwise the scope is `"private"`. Method-level
       scope requirements do not make a result caller-dependent, so a public
       hint lets shared caches serve it to callers without those scopes.
     * Output from `:instructions_provider` or `:tool_presentation` is
@@ -147,7 +151,7 @@ defmodule AttestoMCP.Server.CachePolicy do
   @spec resolve(map()) :: {map(), atom()}
   def resolve(input) do
     opts = input.opts
-    config = opts[:cache_policy]
+    config = opts[:cache_policy] || definition_config(input[:definition])
 
     {ttl, scope, explicit_ttl?, source} =
       if config, do: granular(input, config), else: legacy(input)
@@ -202,6 +206,11 @@ defmodule AttestoMCP.Server.CachePolicy do
 
   defp definition_policy(%{cache: policy}) when is_map(policy), do: policy
   defp definition_policy(_definition), do: nil
+
+  defp definition_config(definition) do
+    if definition_policy(definition),
+      do: %{methods: %{}, resolver: nil, max_ttl_ms: @max_safe_integer}
+  end
 
   defp run_resolver(nil, _input, _candidate), do: :default
 

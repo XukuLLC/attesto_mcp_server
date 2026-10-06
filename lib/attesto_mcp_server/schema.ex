@@ -18,6 +18,7 @@ defmodule AttestoMCP.Server.Schema do
   @max_json_bytes 64_000_000
   @max_default_applications 500
   @operation_timeout_ms 1_000
+  @initialization_timeout_ms 10_000
   @default_dialect "https://json-schema.org/draft/2020-12/schema"
   @supported_dialects [
     @default_dialect,
@@ -34,6 +35,33 @@ defmodule AttestoMCP.Server.Schema do
   def max_allowed_instance_bytes, do: @max_json_bytes
   def min_allowed_instance_bytes, do: @min_json_bytes
   def default_instance_bytes, do: @default_json_bytes
+
+  @doc false
+  @spec initialize_meta_schemas() :: :ok | {:error, term()}
+  def initialize_meta_schemas do
+    # Fixed embedded schemas are application initialization, not work supplied
+    # by a request. Prepare them before callers can compete for their locks;
+    # All fixed initialization shares one startup deadline. Request compilation
+    # and evaluation keep their separate, shorter operation deadlines.
+    embedded_dialects = [
+      @default_dialect,
+      "http://json-schema.org/draft-07/schema#",
+      "http://json-schema.org/draft-07/schema"
+    ]
+
+    run_bounded(
+      fn -> Enum.reduce_while(embedded_dialects, :ok, &initialize_meta_schema/2) end,
+      @initialization_timeout_ms
+    )
+  end
+
+  defp initialize_meta_schema(dialect, :ok) do
+    case meta_root(dialect) do
+      %JSV.Root{} -> {:cont, :ok}
+      {:error, _reason} = error -> {:halt, error}
+      _other -> {:halt, {:error, :invalid_schema}}
+    end
+  end
 
   @doc "Validates the original JSON instance without casting or inserting defaults."
   @spec validate(term(), term(), keyword()) :: :ok | {:error, term()}
@@ -750,7 +778,7 @@ defmodule AttestoMCP.Server.Schema do
   # Bound compilation and validation as well as bytes/depth. A reference cycle
   # or expensive composition cannot retain the caller indefinitely. Exceptions
   # are converted inside the task so its link cannot terminate the caller.
-  defp run_bounded(operation) do
+  defp run_bounded(operation, timeout_ms \\ @operation_timeout_ms) do
     task =
       Task.async(fn ->
         try do
@@ -762,7 +790,7 @@ defmodule AttestoMCP.Server.Schema do
         end
       end)
 
-    case Task.yield(task, @operation_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       _ -> {:error, :schema_validation_timeout}
     end

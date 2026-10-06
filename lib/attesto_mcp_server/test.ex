@@ -90,6 +90,14 @@ defmodule AttestoMCP.Server.Test do
     :timeout
   ]
   @retry_options [:request_state, :input_responses]
+  @protocol_param_keys [
+    "_meta",
+    "requestState",
+    "inputResponses",
+    :_meta,
+    :requestState,
+    :inputResponses
+  ]
 
   @type option ::
           {:principal, term()}
@@ -182,6 +190,8 @@ defmodule AttestoMCP.Server.Test do
   @doc "Sends modern `server/discover`."
   @spec discover(AttestoMCP.Server.API.server(), [option()]) :: map()
   def discover(server, opts \\ []) do
+    opts = options!(opts, @common_options)
+
     if Keyword.get(opts, :protocol_version, @modern) != @modern,
       do: raise(ArgumentError, "server/discover is defined only for #{@modern}")
 
@@ -217,7 +227,7 @@ defmodule AttestoMCP.Server.Test do
     unless is_binary(method) and method != "" and is_map(params),
       do: raise(ArgumentError, "method must be a non-empty string and params must be a map")
 
-    if Enum.any?(["_meta", "requestState", "inputResponses"], &Map.has_key?(params, &1)) do
+    if Enum.any?(@protocol_param_keys, &Map.has_key?(params, &1)) do
       raise ArgumentError,
             "pass _meta, requestState, and inputResponses through :meta, :request_state, and :input_responses"
     end
