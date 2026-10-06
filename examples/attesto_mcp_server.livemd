@@ -1,36 +1,156 @@
-# Run an authenticated MCP server locally
+# Build and call an authenticated MCP server
 
-This notebook exercises the complete local request path: it creates an
-ephemeral Attesto signing key, starts an authenticated MCP endpoint on a free
-loopback port, registers a tool, mints a short-lived access token, and calls the
-tool over HTTP.
+Start with one tool and a focused test. Then add an ephemeral local issuer,
+start a loopback HTTP endpoint, and check discovery, listing, calling, and
+refusals. Optional cells introduce the 2.4 request metadata and presentation
+APIs.
 
-> This is a local demonstration. The signing key and access token exist only in
-> this Livebook runtime. In a production Phoenix application, use the
-> `attesto_mcp_server` installer to reuse the issuer, keys, revocation, principal
-> loading, DPoP, and mTLS policy already owned by `attesto_phoenix`.
+Run the cells in order in a dedicated Livebook runtime with Elixir 1.18 or
+newer. The first cell needs network access to Hex and compiles dependencies;
+later cells use an available loopback port and need no external service,
+database, Phoenix application, or existing signing key. The package starts
+its bounded schema cache and embedded dialects automatically.
 
-## Install the dependencies
+The signing key and short-lived tokens stay in this runtime and are not printed.
+Run the cleanup cell before rerunning the setup. It stops only the processes
+created here and restores the previous static-keystore configuration. Closing
+the dedicated runtime also ends these processes.
+
+## Install the released packages
+
+The `~> 2.4` requirement admits 2.4.0 and later compatible 2.x releases. To
+repeat this walkthrough against exactly 2.4.0, replace it with `"2.4.0"`.
 
 ```elixir
-Mix.install([
-  {:attesto_mcp_server, "~> 2.0"},
-  {:bandit, "~> 1.6"},
-  {:jason, "~> 1.4"},
-  {:jose, "~> 1.11"}
-], verbose: false)
+Mix.install(
+  [
+    {:attesto_mcp_server, "~> 2.4"},
+    {:bandit, "~> 1.6"},
+    {:jason, "~> 1.4"},
+    {:jose, "~> 1.11"}
+  ],
+  verbose: false
+)
 ```
 
-## Create a local Attesto issuer and access token
+## Start a server and register one tool
 
-The endpoint uses a free loopback port. The EC signing key is generated in
-memory and removed from application configuration by the cleanup cell at the
-end.
+A tool receives decoded arguments and an authenticated context. This greeting
+tool uses string keys, validates both its input and structured output, and
+requires the `mcp:tools:call` scope. `tool_from_context/3` inherits the server's
+JSON budget and output settings. In an application, supervise the server under
+your application supervisor rather than starting it from a notebook cell.
+
+```elixir
+alias AttestoMCP.Server.{API, Content, RequestMeta, Result}
+alias AttestoMCP.Server.Test, as: MCPTest
+
+greet = %{
+  description: "Return a greeting for the supplied name",
+  required_scopes: [AttestoMCP.Scopes.tools_call()],
+  input_schema: %{
+    "type" => "object",
+    "properties" => %{"name" => %{"type" => "string", "minLength" => 1, "maxLength" => 64}},
+    "required" => ["name"],
+    "additionalProperties" => false
+  },
+  output_schema: %{
+    "type" => "object",
+    "properties" => %{"message" => %{"type" => "string"}},
+    "required" => ["message"],
+    "additionalProperties" => false
+  },
+  handler: fn %{"name" => name}, context ->
+    message = "Hello, #{name}!"
+
+    {:ok,
+     Result.tool_from_context(Content.text(message), context,
+       structured_content: %{"message" => message}
+     )}
+  end
+}
+
+{:ok, server} = API.start_link()
+:ok = API.register_tool(server, "greet", greet)
+
+%{registered_tool: "greet", server_started: Process.alive?(server)}
+```
+
+## Test the tool before adding HTTP
+
+These helpers use the real dispatcher, schema checks, definition scopes,
+handler, and result validation. Their identity and scopes stand in for an
+already authenticated request; they do not verify a token, DPoP proof, mTLS
+certificate, or HTTP headers. The HTTP cells below exercise that separate
+boundary.
+
+```elixir
+test_context = [principal: "usr_notebook", scopes: [AttestoMCP.Scopes.tools_call()]]
+
+%{"result" => %{"structuredContent" => %{"message" => "Hello, reader!"}}} =
+  MCPTest.call_tool(server, "greet", %{"name" => "reader"}, test_context)
+
+%{"error" => %{"data" => %{"reason" => "tool_arguments_invalid"}}} =
+  MCPTest.call_tool(server, "greet", %{"name" => ""}, test_context)
+
+%{"error" => _denied} =
+  MCPTest.call_tool(server, "greet", %{"name" => "reader"}, principal: "usr_notebook")
+
+%{valid_input: :passed, invalid_input: :rejected, missing_definition_scope: :rejected}
+```
+
+## Add an ephemeral issuer and HTTP endpoint
+
+This notebook mints a token directly to demonstrate resource-server
+verification. `https://auth.example.test` is a synthetic issuer identifier;
+there are no OAuth authorization, login, discovery, consent, or token endpoints
+at that address. An OAuth-enabled MCP client needs a real authorization server.
+Use the Phoenix setup guide when moving to that flow.
+
+The local endpoint uses plain HTTP only on `127.0.0.1`. Production endpoints
+need HTTPS and the host's issuer, key, revocation, principal-loading, and sender
+constraint policy. The demonstration token is an ordinary bearer token; it does
+not demonstrate DPoP or mTLS.
 
 ```elixir
 {:ok, _bandit_apps} = Application.ensure_all_started(:bandit)
 {:ok, _inets_apps} = Application.ensure_all_started(:inets)
 
+restore_keystore =
+  case Application.fetch_env(:attesto, Attesto.Keystore.Static) do
+    {:ok, previous} -> fn -> Application.put_env(:attesto, Attesto.Keystore.Static, previous) end
+    :error -> fn -> Application.delete_env(:attesto, Attesto.Keystore.Static) end
+  end
+
+stop_owned = fn pid, stop ->
+  if is_pid(pid) and Process.alive?(pid) do
+    try do
+      stop.(pid)
+    catch
+      :exit, {:noproc, _call} -> :ok
+    end
+  end
+
+  :ok
+end
+
+cleanup = fn server_pid, bandit_pid ->
+  :ok = stop_owned.(bandit_pid, &ThousandIsland.stop/1)
+  :ok = stop_owned.(server_pid, &GenServer.stop/1)
+  :ok = restore_keystore.()
+end
+
+signing_pem = {:ec, "P-256"} |> JOSE.JWK.generate_key() |> JOSE.JWK.to_pem() |> elem(1)
+Application.put_env(:attesto, Attesto.Keystore.Static, signing_pem: signing_pem)
+
+%{local_signing_key: :ready, previous_configuration: :saved_for_cleanup}
+```
+
+The authentication boundary needs the actual resource URL before Bandit starts.
+Reserve a loopback port long enough to read its number, then start the endpoint.
+If startup fails, call `cleanup.(server, nil)` before rerunning the setup.
+
+```elixir
 {:ok, reservation} =
   :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}, reuseaddr: true])
 
@@ -38,14 +158,6 @@ end.
 :ok = :gen_tcp.close(reservation)
 
 mcp_url = "http://127.0.0.1:#{port}/mcp"
-
-signing_pem =
-  {:ec, "P-256"}
-  |> JOSE.JWK.generate_key()
-  |> JOSE.JWK.to_pem()
-  |> elem(1)
-
-Application.put_env(:attesto, Attesto.Keystore.Static, signing_pem: signing_pem)
 
 auth_config =
   Attesto.Config.new(
@@ -59,85 +171,64 @@ auth_config =
     ]
   )
 
-scopes = AttestoMCP.Scopes.all()
-
-{:ok, issued_token} =
-  Attesto.Token.mint(auth_config, %{
-    kind: "user",
-    sub: "usr_livebook",
-    scopes: scopes,
-    claims: %{"client_id" => "livebook-client"}
-  })
-
-access_token = issued_token.access_token
-
-%{issuer: auth_config.issuer, resource: mcp_url, granted_scopes: scopes}
-```
-
-## Register a tool and start Bandit
-
-The in-memory customer map stands in for application code. A real handler can
-use its authenticated context to apply tenant and business policy before
-reading application data.
-
-```elixir
-customers = %{
-  "cus_123" => %{"id" => "cus_123", "name" => "Ada Lovelace"},
-  "cus_456" => %{"id" => "cus_456", "name" => "Grace Hopper"}
-}
-
-alias AttestoMCP.Server.API
-
-{:ok, server} = API.start_link()
-
-:ok =
-  API.register_tool(server, "customer_lookup", %{
-    description: "Look up a customer by ID",
-    input_schema: %{
-      "type" => "object",
-      "properties" => %{
-        "id" => %{"type" => "string", "minLength" => 1}
+mint_token = fn granted_scopes ->
+  {:ok, issued} =
+    Attesto.Token.mint(
+      auth_config,
+      %{
+        kind: "user",
+        sub: "usr_notebook",
+        scopes: granted_scopes,
+        claims: %{"client_id" => "notebook-client"}
       },
-      "required" => ["id"],
-      "additionalProperties" => false
-    },
-    handler: fn %{"id" => id}, _context ->
-      {:ok, Map.get(customers, id, %{"id" => id, "found" => false})}
-    end
-  })
+      lifetime: 900
+    )
 
-plug =
-  {AttestoMCP.Server.Plug,
-   server: server,
-   path: "/mcp",
-   auth: [config: auth_config, resource: mcp_url]}
+  issued.access_token
+end
+
+scopes = [AttestoMCP.Scopes.tools_read(), AttestoMCP.Scopes.tools_call()]
+access_token = mint_token.(scopes)
+read_only_token = mint_token.([AttestoMCP.Scopes.tools_read()])
 
 {:ok, bandit} =
   Bandit.start_link(
-    plug: plug,
+    plug:
+      {AttestoMCP.Server.Plug,
+       server: server, path: "/mcp", auth: [config: auth_config, resource: mcp_url]},
     scheme: :http,
     ip: {127, 0, 0, 1},
     port: port,
     startup_log: false
   )
 
-%{endpoint: mcp_url, server: server, bandit: bandit}
+%{endpoint: mcp_url, granted_scopes: scopes, token_lifetime_seconds: 900}
 ```
 
-## Make authenticated MCP requests
+The temporary socket closes before Bandit binds it. A competing local process
+could take that port; if the bind fails, clean up and rerun. If the tokens expire
+while reading, copy only `access_token = mint_token.(scopes)` and
+`read_only_token = mint_token.([AttestoMCP.Scopes.tools_read()])` into a new cell.
+Reevaluate that new cell, then retry the HTTP requests. Do not reevaluate the
+whole endpoint cell: it also starts Bandit.
 
-MCP `2026-07-28` requests carry their protocol version and client capabilities
-in `_meta`. The transport also receives routing headers so it can authorize the
-request before decoding its body.
+## Discover, list, and call over authenticated HTTP
+
+The modern `2026-07-28` transport is session-free. Each request includes the
+protocol version and client capabilities in `_meta`, plus matching protocol,
+method, and selected-tool headers. This small JSON request helper is only for
+the request/response calls in this notebook; SSE subscriptions and earlier
+session-bound revisions need their own transport flow.
 
 ```elixir
 protocol_version = "2026-07-28"
 
-post_mcp = fn id, method, params, name ->
-  meta = %{
-    "io.modelcontextprotocol/protocolVersion" => protocol_version,
-    "io.modelcontextprotocol/clientCapabilities" => %{}
-  }
+post_mcp = fn id, method, params, token ->
+  meta =
+    Map.merge(Map.get(params, "_meta", %{}), %{
+      "io.modelcontextprotocol/protocolVersion" => protocol_version,
+      "io.modelcontextprotocol/clientCapabilities" => %{}
+    })
 
   body =
     Jason.encode!(%{
@@ -148,20 +239,22 @@ post_mcp = fn id, method, params, name ->
     })
 
   headers = [
-    {~c"authorization", String.to_charlist("Bearer " <> access_token)},
     {~c"accept", ~c"application/json, text/event-stream"},
     {~c"mcp-protocol-version", String.to_charlist(protocol_version)},
     {~c"mcp-method", String.to_charlist(method)}
   ]
 
   headers =
-    if is_binary(name) do
-      [{~c"mcp-name", String.to_charlist(name)} | headers]
-    else
-      headers
-    end
+    if is_binary(token),
+      do: [{~c"authorization", String.to_charlist("Bearer " <> token)} | headers],
+      else: headers
 
-  {:ok, {{_http_version, status, _reason}, _response_headers, response_body}} =
+  headers =
+    if method == "tools/call",
+      do: [{~c"mcp-name", String.to_charlist(params["name"])} | headers],
+      else: headers
+
+  {:ok, {{_version, status, _reason}, response_headers, response_body}} =
     :httpc.request(
       :post,
       {String.to_charlist(mcp_url), headers, ~c"application/json", body},
@@ -169,56 +262,204 @@ post_mcp = fn id, method, params, name ->
       body_format: :binary
     )
 
-  {status, Jason.decode!(response_body)}
+  decoded =
+    case Jason.decode(response_body) do
+      {:ok, value} -> value
+      {:error, _} -> nil
+    end
+
+  {status, decoded, response_headers}
+end
+
+{200, discover, _} = post_mcp.(1, "server/discover", %{}, access_token)
+%{"result" => %{"supportedVersions" => supported}} = discover
+true = protocol_version in supported
+
+{200, listed, _} = post_mcp.(2, "tools/list", %{}, access_token)
+%{"result" => %{"tools" => [%{"name" => "greet"}]}} = listed
+
+arguments = %{"name" => "greet", "arguments" => %{"name" => "reader"}}
+{200, called, _} = post_mcp.(3, "tools/call", arguments, access_token)
+
+%{
+  "result" => %{
+    "resultType" => "complete",
+    "structuredContent" => %{"message" => "Hello, reader!"}
+  }
+} = called
+
+%{discovery: :passed, tool_listing: :passed, tool_call: called["result"]}
+```
+
+## Check the authentication and validation refusals
+
+Missing credentials receive HTTP 401 and an OAuth resource-metadata challenge.
+A valid token without the tool-call scope receives HTTP 403. Invalid arguments
+return a JSON-RPC invalid-params error after authentication; a successful HTTP
+exchange alone does not mean the tool succeeded.
+
+```elixir
+{401, _missing_token, challenge_headers} = post_mcp.(4, "tools/list", %{}, nil)
+
+true =
+  Enum.any?(challenge_headers, fn {name, value} ->
+    String.downcase(to_string(name)) == "www-authenticate" and
+      String.contains?(to_string(value), "resource_metadata=")
+  end)
+
+{403, _missing_scope, _} = post_mcp.(5, "tools/call", arguments, read_only_token)
+
+{200, rejected, _} =
+  post_mcp.(6, "tools/call", %{"name" => "greet", "arguments" => %{"name" => ""}}, access_token)
+
+%{"error" => %{"code" => -32602, "data" => %{"reason" => "tool_arguments_invalid"}}} = rejected
+
+%{missing_token: 401, missing_scope: 403, invalid_arguments: -32602}
+```
+
+## Optional: read application metadata in 2.4
+
+`context.request_meta` is a bounded snapshot of the current request's untrusted
+metadata. `RequestMeta.application/1` excludes protocol-reserved keys. Here it
+controls only an explicitly returned diagnostic label; never use metadata to
+replace the verified principal, tenant, scopes, issuer, or sender binding.
+
+```elixir
+:ok =
+  API.register_tool(server, "request_label", %{
+    description: "Return an example application metadata label",
+    required_scopes: [AttestoMCP.Scopes.tools_call()],
+    input_schema: %{"type" => "object", "additionalProperties" => false},
+    handler: fn _arguments, context ->
+      label = RequestMeta.application(context.request_meta)["com.example/request-label"]
+
+      {:ok,
+       Result.tool_from_context(Content.text("Application metadata example"), context,
+         structured_content: %{"label" => label}
+       )}
+    end
+  })
+
+%{"result" => %{"structuredContent" => %{"label" => "tutorial"}}} =
+  MCPTest.call_tool(
+    server,
+    "request_label",
+    %{},
+    test_context ++ [meta: %{"com.example/request-label" => "tutorial"}]
+  )
+
+{200, label_response, _} =
+  post_mcp.(
+    7,
+    "tools/call",
+    %{
+      "name" => "request_label",
+      "arguments" => %{},
+      "_meta" => %{"com.example/request-label" => "tutorial"}
+    },
+    access_token
+  )
+
+%{"result" => %{"structuredContent" => %{"label" => "tutorial"}}} = label_response
+
+%{metadata_via_test_helper: :passed, metadata_via_http: :passed}
+```
+
+## Optional: guidance, presentation, icons, cache hints, and dialect export
+
+These settings are independent of authentication. Guidance and display
+callbacks do not grant access to a hidden tool. Cache hints describe client-side
+reuse; the server does not cache responses, and protected HTTP stays
+`private, no-store`. This example keeps hints private and uses an inline icon,
+so no image service is needed.
+
+A second server exercises these startup options without changing the first
+server or HTTP endpoint. The `after` block stops it even if an assertion fails.
+
+```elixir
+icon =
+  "data:image/svg+xml;base64," <>
+    Base.encode64(
+      ~s|<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6" fill="blue"/></svg>|
+    )
+
+{:ok, feature_server} =
+  API.start_link(
+    server_name: "notebook-catalog",
+    server_icons: [%{src: icon, mime_type: "image/svg+xml", sizes: ["16x16"]}],
+    export_schema_dialect: true,
+    instructions_provider: fn _context -> {:ok, "Use greet for a short greeting."} end,
+    tool_presentation: fn _tool, _context -> {:ok, %{"title" => "Greeting"}} end,
+    cache_policy: [methods: %{"server/discover" => [ttl_ms: 1_000, scope: :private]}]
+  )
+
+try do
+  :ok = API.register_tool(feature_server, "greet", greet)
+
+  %{
+    "result" => %{
+      "instructions" => "Use greet for a short greeting.",
+      "cacheScope" => "private",
+      "ttlMs" => 1_000,
+      "_meta" => %{
+        "io.modelcontextprotocol/serverInfo" => %{
+          "name" => "notebook-catalog",
+          "icons" => [_icon]
+        }
+      }
+    }
+  } = MCPTest.discover(feature_server, test_context)
+
+  %{
+    "result" => %{
+      "tools" => [
+        %{
+          "title" => "Greeting",
+          "inputSchema" => %{"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+        }
+      ]
+    }
+  } = MCPTest.list_tools(feature_server, test_context)
+
+  %{
+    guidance: :passed,
+    presentation: :passed,
+    icon: :passed,
+    private_cache_hint: :passed,
+    schema_dialect: :passed
+  }
+after
+  :ok = stop_owned.(feature_server, &GenServer.stop/1)
 end
 ```
 
-List the catalog visible to this token:
+The same test-helper family includes resource reads, prompt retrieval,
+completion, and catalog pagination. Interactive retries must echo the returned
+`requestState` and answer keys, preserving operation parameters and application
+metadata. Only tracing, progress, and client display metadata may change. See
+the [usage guide](https://hexdocs.pm/attesto_mcp_server/usage.html) for those
+contracts and the remaining optional features.
+
+## Clean up and move to an application
+
+This cleanup is safe to run twice. It restores the previous static-keystore
+configuration instead of discarding it. Keep this notebook in a dedicated
+runtime so other applications do not depend on its temporary key.
 
 ```elixir
-{200, list_response} = post_mcp.(1, "tools/list", %{}, nil)
+:ok = cleanup.(server, bandit)
+:ok = cleanup.(server, bandit)
+false = Process.alive?(server)
+false = Process.alive?(bandit)
 
-tool_names = Enum.map(list_response["result"]["tools"], & &1["name"])
-true = "customer_lookup" in tool_names
-tool_names
+%{server_stopped: true, http_stopped: true}
 ```
 
-Call the registered tool:
-
-```elixir
-{200, call_response} =
-  post_mcp.(
-    2,
-    "tools/call",
-    %{"name" => "customer_lookup", "arguments" => %{"id" => "cus_123"}},
-    "customer_lookup"
-  )
-
-result = call_response["result"]
-%{"resultType" => "complete", "structuredContent" => %{"id" => "cus_123"}} = result
-result
-```
-
-## Move this into a SaaS application
-
-In a Phoenix application that already uses `attesto_phoenix`, install the
-server with:
-
-```text
-mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
-```
-
-The generated application-owned server, routes, supervision, authorization
-integration, starter tool, and test replace the notebook setup. Put real tools
-behind application services and enforce tenant-specific policy using the
-authenticated handler context.
-
-## Stop the local server
-
-Run this cell before closing or rerunning the notebook.
-
-```elixir
-:ok = ThousandIsland.stop(bandit)
-:ok = GenServer.stop(server)
-:ok = Application.delete_env(:attesto, Attesto.Keystore.Static)
-```
+For a supervised application and real OAuth clients, continue with
+[setup](https://hexdocs.pm/attesto_mcp_server/setup.html). A Phoenix host already
+using `attesto_phoenix` can reuse its validated authorization configuration with
+`mix igniter.install attesto_mcp_server --base-url https://mcp.example.com`.
+Review the generated notices, storage migrations, granted scopes, and starter
+test. The [usage guide](https://hexdocs.pm/attesto_mcp_server/usage.html) covers
+resources, prompts, business policy, DPoP and mTLS integration, sessions,
+subscriptions, and deployment limits.

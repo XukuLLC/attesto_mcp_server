@@ -122,6 +122,7 @@ defmodule AttestoMCP.Server.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
+        "docs/setup.md",
         "examples/attesto_mcp_server.livemd",
         "CHANGELOG.md",
         "CONTRIBUTING.md",

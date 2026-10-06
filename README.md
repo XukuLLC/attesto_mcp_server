@@ -1,9 +1,21 @@
 # attesto_mcp_server
 
-Add an authenticated MCP endpoint to an Elixir or Phoenix SaaS application.
+Add an MCP server to an Elixir or Phoenix application.
 `attesto_mcp_server` combines the MCP server, Streamable HTTP transport, tool
 catalog, request validation, and [Attesto](https://hex.pm/packages/attesto)
 authorization in one Apache-2.0 package.
+
+Start with the [setup guide](docs/setup.md) for a working tool, then add a
+transport, authentication, application policy, and deployment settings as
+needed. The [usage reference](docs/usage.md) contains the detailed contracts
+and configuration examples.
+
+| Starting point | First step | What you get |
+| --- | --- | --- |
+| Try it before changing an application | [Run the Livebook](examples/attesto_mcp_server.livemd) | A tool, focused checks, and authenticated loopback HTTP requests using a temporary local key. |
+| Existing Phoenix application with AttestoPhoenix | [Install below](#install-in-a-phoenix-application) | A supervised server, protected `/mcp`, public resource metadata, and a starter tool. |
+| Local process launched by an MCP client | [Use stdio](docs/setup.md#use-stdio-for-a-local-client) | MCP over stdin/stdout with identity supplied by the trusted launcher. |
+| Another Plug host or an existing Attesto configuration | [Wire HTTP explicitly](docs/setup.md#use-another-plug-host) | The same server and authentication boundary with host-owned supervision and routing. |
 
 For a Phoenix application already using
 [`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix), the
@@ -13,8 +25,12 @@ mTLS policy; it does not create a second authentication system.
 
 Want to exercise the full request path before changing an application? The
 [runnable Livebook walkthrough](https://github.com/XukuLLC/attesto_mcp_server/blob/main/examples/attesto_mcp_server.livemd)
-creates an ephemeral local issuer, starts Bandit, registers a tool, and makes
-authenticated MCP requests against it.
+starts with a tool and a focused check, then starts Bandit and makes
+authenticated MCP requests using an ephemeral local signing key. It finishes
+with optional 2.4 features and deployment next steps. The demo mints its own
+short-lived token; it does not set up an OAuth login or consent service.
+Download the `.livemd` file, open it in Livebook, and run its cells in order
+using a dedicated Elixir 1.18+ runtime.
 
 ## Install in a Phoenix application
 
@@ -117,6 +133,12 @@ Metadata Documents (CIMD) when the client identifies itself with an HTTPS
 metadata URL. See AttestoPhoenix's
 [CIMD guidance](https://hexdocs.pm/attesto_phoenix/readme.html#url-client-metadata-for-native-clients).
 Then point the client at the `/mcp` URL.
+
+Tokens must be issued for the canonical MCP resource URL, not just the
+application's existing API audience. Configure the authorization server's
+resource issuance policy and have the client request that resource; the
+[setup guide](docs/setup.md#connect-an-http-client) explains this alongside
+client registration and scope grants.
 
 The generated endpoint uses secure generic MCP scope defaults:
 `mcp:tools:read`, `mcp:tools:call`,
@@ -373,13 +395,13 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 2.3"}]
+  [{:attesto_mcp_server, "~> 2.4"}]
 end
 ```
 
 Supervise `AttestoMCP.Server`, register definitions through
 `AttestoMCP.Server.API`, and mount `AttestoMCP.Server.Plug` directly. The
-[`examples/bandit.exs`](examples/bandit.exs) program demonstrates direct server
+[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.4.0/examples/bandit.exs) program demonstrates direct server
 startup, registration, and the protected Plug; the [usage guide](docs/usage.md)
 documents the transport and authentication options. Router and supervision
 wiring remain specific to the host. It also includes a
@@ -389,7 +411,29 @@ for applications with multiple MCP mounts.
 The production library depends on Plug rather than a particular HTTP server.
 Bandit is the documented development/test adapter. The loopback example returns
 401 until given a valid credential. The stdio adapter is available through
-`AttestoMCP.Server.Stdio.run/2` and [`examples/stdio.exs`](examples/stdio.exs).
+`AttestoMCP.Server.Stdio.run/2` and
+[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.4.0/examples/stdio.exs).
+
+## Add features as needed
+
+The minimal server needs registered definitions and a transport. These options
+can be added independently when the application needs them:
+
+| Need | Feature | Guide |
+| --- | --- | --- |
+| Read application data or offer reusable prompt templates | Resources, URI templates, prompts, and completions | [Registration](docs/usage.md#registration) |
+| Tailor guidance to the caller | `instructions_provider` | [Server guidance](docs/usage.md#server-guidance) |
+| Tailor visible tool descriptions without changing eligibility | `tool_presentation` | [Tool presentation](docs/usage.md#tool-presentation) |
+| Receive application metadata alongside validated identity | `context.request_meta` | [Request metadata](docs/usage.md#request-metadata) |
+| Publish server identity and schema dialects | `server_icons`, `export_schema_dialect` | [Identity](docs/usage.md#server-identity-and-icons), [dialects](docs/usage.md#json-schema-dialects) |
+| Set bounded freshness hints for modern clients | `cache_policy` and resource `cache:` | [Cache hints](docs/usage.md#cache-hints) |
+| Ask for user input or approvals, or stream updates | Multi-round requests, URL elicitation, subscriptions | [Interactive requests](docs/usage.md#modern-subscriptions-and-interactive-requests) |
+| Operate across restarts or several nodes | Durable stores, routing, and shared signing secrets | [Sessions and startup](docs/usage.md#atomic-startup-telemetry-and-durable-sessions) |
+
+Guidance and presentation do not grant access. Request metadata is untrusted
+client input, and cache hints do not enable HTTP caching. The setup guide's
+[deployment stage](docs/setup.md#prepare-for-deployment) connects these options
+to the application's security and storage responsibilities.
 
 ## Operations and limits
 
@@ -431,7 +475,9 @@ configuration.
 
 ## More documentation
 
-- [Usage and deployment](docs/usage.md)
+- [Setup: a working tool through deployment](docs/setup.md)
+- [Runnable Livebook](examples/attesto_mcp_server.livemd)
+- [Usage and deployment reference](docs/usage.md)
 - [Migration runbook](docs/migration.md)
 - [Security policy](SECURITY.md)
 - [Conformance evidence](CONFORMANCE.md)

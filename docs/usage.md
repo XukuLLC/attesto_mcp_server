@@ -1,9 +1,40 @@
 # Usage and deployment
 
-For a checklist that maps an existing catalog and deployment onto this
-package, start with the [migration runbook](migration.md).
+This is the detailed configuration and behavior reference. For a first working
+endpoint, start with the [setup guide](setup.md): it covers prerequisites,
+transport choice, authentication, and the first client request. The
+[README](../README.md) gives the shorter installation path, and the
+[local Livebook](https://github.com/XukuLLC/attesto_mcp_server/blob/main/examples/attesto_mcp_server.livemd) runs a complete
+authenticated HTTP demonstration with an ephemeral issuer. For an existing
+catalog or deployment, use the [migration runbook](migration.md).
+
+Use these sections after the basic endpoint works:
+
+| Task | Reference |
+| --- | --- |
+| Integrate a Phoenix host or a manual HTTP adapter | [Phoenix installation](#phoenix-installation), [Bandit](#bandit-development-server), [resource metadata](#attesto-and-resource-metadata) |
+| Register tools, prompts, and resources; test handlers | [Registration](#registration), [focused tests](#focused-tool-tests) |
+| Apply business authorization and scope policy | [Mount authorization](#mount-authorization), [per-definition authorization](#per-definition-authorization), [scope policy](#limits-and-scope-policy) |
+| Add progress, subscriptions, or interactive input | [Notifications and logging](#handler-notifications-and-logging), [subscriptions and interactive requests](#modern-subscriptions-and-interactive-requests) |
+| Configure storage, clustering, and request limits | [Startup and durable sessions](#atomic-startup-telemetry-and-durable-sessions), [limits](#limits-and-scope-policy) |
+| Implement a wire client or select a protocol revision | [HTTP mirror headers](#modern-http-mirror-headers), [stdio](#stdio-interop), [version compatibility](#protocol-version-compatibility) |
+| Monitor a deployed endpoint | [Telemetry](#telemetry), [trace context](#w3c-trace-context) |
+
+The additive 2.4 options are grouped under
+[request metadata, guidance, and cache hints](#request-metadata-guidance-and-cache-hints):
+read client input through [`context.request_meta`](#request-metadata), provide
+caller-specific [`instructions_provider`](#server-guidance) or
+[`tool_presentation`](#tool-presentation), configure
+[`cache_policy`](#cache-hints), add [`server_icons`](#server-identity-and-icons),
+or enable [`export_schema_dialect`](#json-schema-dialects).
 
 ## Phoenix installation
+
+This section assumes a Phoenix application with Igniter available and an
+already configured `attesto_phoenix` issuer that can issue access tokens and
+load allowed principals. Run installer commands inside the Phoenix application
+child, rather than an umbrella root. If these prerequisites are not ready,
+follow the [setup guide](setup.md) first.
 
 `attesto_mcp_server` owns the protected-resource protocol boundary. In a host
 that also uses `attesto_phoenix`, the latter remains the authorization server:
@@ -433,22 +464,38 @@ server registration must agree for that mount.
 
 ## Bandit development server
 
-The HTTP boundary is a normal Plug. A documented local launcher is:
+The HTTP boundary is a normal Plug; Phoenix is optional. For a complete local
+example that creates an issuer, registers a tool, obtains a token, and makes
+authenticated requests, run the
+[Livebook](https://github.com/XukuLLC/attesto_mcp_server/blob/main/examples/attesto_mcp_server.livemd). The
+[setup guide](setup.md) also covers manual HTTP hosting.
+
+Inside an existing Mix application, declare the HTTP server as a host
+dependency:
 
 ```elixir
-Mix.install(
-  [{:attesto_mcp_server, path: "."}, {:bandit, "~> 1.6"}],
-  force: true,
-  verbose: false
-)
-{:ok, server} = AttestoMCP.Server.start_link(name: :bandit_example)
-plug = {AttestoMCP.Server.Plug, server: server, path: "/mcp", auth: [config: my_attesto_config, base_url: "http://127.0.0.1:4000"]}
-Bandit.start_link(plug: plug, scheme: :http, ip: {127, 0, 0, 1}, port: 4000)
+defp deps do
+  [
+    {:attesto_mcp_server, "~> 2.4"},
+    {:bandit, "~> 1.6"}
+  ]
+end
 ```
 
-For an executable credential-free launcher, use `elixir examples/bandit.exs`.
-It starts Bandit with an empty static keystore and therefore answers 401 until
-the host supplies a token; it contains no hidden application module or secret.
+Start the supervised MCP server before its Bandit adapter, register the
+application's catalog, and pass the host's configured `Attesto.Config` to the
+Plug's `auth` options. The token issuer and verifier must agree on the signing
+keys, issuer, canonical MCP resource audience, principal kinds, and scopes.
+Bandit does not provide an OAuth authorization server. See
+[resource metadata](#attesto-and-resource-metadata) for the verifier contract
+and the [first-request example](#modern-http-mirror-headers) for the HTTP
+envelope after obtaining a suitable token.
+
+From a repository checkout, `elixir examples/bandit.exs` is an executable
+credential-free listener. It registers an echo tool but starts with an empty
+static keystore, so protected requests return 401 until the host supplies a
+matching issuer configuration and token. It is a transport demonstration,
+rather than the authenticated onboarding example.
 
 ### Frozen conformance fixture
 
@@ -878,14 +925,32 @@ assert %{"result" => %{"contents" => [_]}} =
 page = MCPTest.list_tools(MyApp.MCP, scopes: ["items.read"])
 next = MCPTest.list_tools(MyApp.MCP, scopes: ["items.read"], cursor: page["result"]["nextCursor"])
 
-assert %{"result" => %{"resultType" => "input_required", "requestState" => state}} =
-         MCPTest.call_tool(MyApp.MCP, "confirm", %{}, client_capabilities: %{"elicitation" => %{}})
-
-MCPTest.call_tool(MyApp.MCP, "confirm", %{},
+retry_options = [
   client_capabilities: %{"elicitation" => %{}},
-  request_state: state,
-  input_responses: %{"confirm" => %{"action" => "accept", "content" => %{"ok" => true}}},
   meta: %{"com.example/request-purpose" => "test"}
+]
+
+assert %{
+         "result" => %{
+           "resultType" => "input_required",
+           "requestState" => state,
+           "inputRequests" => requests
+         }
+       } = MCPTest.call_tool(MyApp.MCP, "confirm", %{}, retry_options)
+
+# This example's tool asks for one form containing a boolean "ok" property.
+[input_key] = Map.keys(requests)
+
+MCPTest.call_tool(
+  MyApp.MCP,
+  "confirm",
+  %{},
+  retry_options ++
+    [
+      request_id: 2,
+      request_state: state,
+      input_responses: %{input_key => %{"action" => "accept", "content" => %{"ok" => true}}}
+    ]
 )
 ```
 
@@ -895,6 +960,12 @@ version and client-capability keys and raises if `:meta` sets them.
 continues a list, and `:completion_context` sets the completion request's
 `context`. Every helper returns the complete JSON-RPC response, including
 protocol errors. Malformed setup raises `ArgumentError`.
+
+Keep the method, selected definition, original arguments, application metadata,
+and authenticated identity unchanged across retry rounds. Use a new JSON-RPC
+ID and echo the returned request state. Trace, progress, and client display
+metadata may change between rounds. Copy answer keys from `inputRequests`,
+rather than assuming they equal a tool name.
 
 These helpers test the dispatcher: scopes, definition authorization, schemas,
 handlers, cache hints, and wire validation. They do not establish HTTP
@@ -1425,13 +1496,16 @@ resource updates also require `resources_read` and any matched definition
 scopes.
 
 Modern tool, resource, and prompt handlers may return `{:input_required,
-requests}` where `requests` is a map of unique server keys to real
-`elicitation/create`, `sampling/createMessage`, or `roots/list` request
-objects. The server emits a map of server-assigned `input_N` keys and an integrity-protected requestState;
-retry with a new JSON-RPC ID and matching typed `inputResponses`: elicitation
-responses use `action` (and accepted `content`), sampling responses use
-`role`, `content`, `model`, and `stopReason`, and roots responses use a
-`roots` array.
+requests}` containing real `elicitation/create`, `sampling/createMessage`, or
+`roots/list` request objects. A keyed request map preserves its unique authored
+keys; the singleton and list forms receive server-assigned `input_N` keys.
+The response includes `inputRequests` and an integrity-protected `requestState`.
+Retry with a new JSON-RPC ID, echo the returned state, and use the actual
+`inputRequests` keys for typed `inputResponses`. Keep the original method,
+selected definition, arguments, application metadata, and authenticated
+identity unchanged. Elicitation responses use `action` (and accepted
+`content`), sampling responses use `role`, `content`, `model`, and `stopReason`,
+and roots responses use a `roots` array.
 
 A valid retry with missing answers receives another `input_required` result
 containing only the remaining requests. The fresh signed state preserves

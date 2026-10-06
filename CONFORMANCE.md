@@ -3,9 +3,29 @@
 This is reproducible test evidence for `attesto_mcp_server` 2.4.0. It does not
 establish certification, endorsement, or support for every optional MCP extension.
 
-## Tested candidate
+## Documentation snapshot (2026-10-06)
 
 - source fingerprint:
+  `fbbd56c86b2d24eb49dd73d265d5b1aa03001c8b755fbc243d27986651252f2e`
+
+This checkout adds progressive setup documentation and updates the Livebook
+and ExDoc extras. Product code, configuration, tests, scripts, and existing
+executable fixtures are unchanged from the released `v2.4.0` commit below.
+The official conformance results remain evidence for that tested release;
+the runners were not repeated for this documentation update.
+
+All ten updated Livebook code cells passed headlessly against public Hex
+`attesto_mcp_server` 2.4.0, AttestoMCP 1.3.2, Attesto 2.2.2, Bandit 1.12.5,
+and JSV 0.25.0 on Elixir 1.20.4/OTP 29.0.5. Two complete repeats also verified
+cleanup, closed loopback ports, and restoration of prior static-keystore
+configuration. These walkthrough checks are separate from the official MCP
+results below. The setup guide's focused tool checks and stdio command passed,
+and the documentation built with warnings treated as errors.
+
+## Tested candidate
+
+- release commit: `bef18c29cd51cd59936cc02a52aee5bc0e660b17`
+- tested source fingerprint:
   `b1391d61552c8fae1ed5e94bd67d349c8e11f73f4eabb0ddee1fa9da12acefbc`
 - official runner source: package version `0.2.0-alpha.12`, including PR #396
 - runner commit: `c37eec888e1c6ff140af79987a40008548b7cc5f`
