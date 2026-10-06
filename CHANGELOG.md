@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.4.0 - 2026-10-05
+## 2.4.0 - 2026-10-06
 
 - Expose an immutable, bounded snapshot of each request's `_meta` object to
   handlers and per-request callbacks as `context.request_meta`, for HTTP,
