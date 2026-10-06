@@ -10,12 +10,17 @@ defmodule AttestoMCP.Server do
   use GenServer
 
   alias AttestoMCP.Server.{
+    CachePolicy,
     Cursor,
     Error,
     HostCallback,
+    Icons,
+    Implementation,
     JSONRPC,
     Output,
+    Presentation,
     Registry,
+    RequestMeta,
     RequestState,
     Result,
     Schema,
@@ -74,6 +79,11 @@ defmodule AttestoMCP.Server do
   @log_levels ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
   @traceparent_pattern ~r/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
   @primitive_types [:tool, :resource, :template, :prompt, :completion]
+  @cache_hint_fields ["ttlMs", "cacheScope"]
+  @retry_bound_meta_keys [
+    "io.modelcontextprotocol/protocolVersion",
+    "io.modelcontextprotocol/clientCapabilities"
+  ]
   @session_pg_scope AttestoMCP.Server.SessionCluster
   @allowed_startup_option_keys [
     :name,
@@ -126,8 +136,17 @@ defmodule AttestoMCP.Server do
     :page_size,
     :cache_ttl_ms,
     :cache_scope,
-    :allow_public_cache
+    :allow_public_cache,
+    :cache_policy,
+    :max_request_meta_bytes,
+    :instructions_provider,
+    :tool_presentation,
+    :server_icons,
+    :export_schema_dialect
   ]
+  # Derived at startup from validated options; never accepted as input and
+  # not returned by `options/1`.
+  @derived_option_keys [:server_implementation]
 
   defstruct [
     :registry,
@@ -869,7 +888,7 @@ defmodule AttestoMCP.Server do
   def handle_call(:subscriptions, _from, state), do: {:reply, state.subscriptions, state}
 
   def handle_call(:options, _from, state),
-    do: {:reply, Keyword.drop(state.opts, @private_option_keys), state}
+    do: {:reply, Keyword.drop(state.opts, @private_option_keys ++ @derived_option_keys), state}
 
   def handle_call(:url_elicitation_store, _from, state) do
     {:reply,
@@ -2203,12 +2222,53 @@ defmodule AttestoMCP.Server do
     validate_startup_options!(normalized)
     validate_rate_limits!(normalized[:rate_limits])
     validate_replica_options!(normalized)
+    normalized = normalize_presentation_options!(normalized)
 
     if not (is_integer(normalized[:request_state_ttl]) and normalized[:request_state_ttl] > 0 and
               normalized[:request_state_ttl] <= 120_000),
        do: raise(ArgumentError, ":request_state_ttl must be between 1 and 120000 milliseconds")
 
     normalized
+  end
+
+  defp normalize_presentation_options!(opts) do
+    Presentation.validate_options!(opts)
+
+    icons =
+      case Keyword.get(opts, :server_icons) do
+        nil ->
+          nil
+
+        icons ->
+          case Icons.normalize(icons) do
+            {:ok, icons} -> icons
+            {:error, reason} -> raise ArgumentError, ":server_icons are invalid: #{reason}"
+          end
+      end
+
+    meta_bytes = Keyword.get(opts, :max_request_meta_bytes)
+
+    unless is_nil(meta_bytes) or
+             (is_integer(meta_bytes) and meta_bytes >= Schema.min_allowed_instance_bytes() and
+                meta_bytes <= opts[:max_json_bytes]) do
+      raise ArgumentError,
+            ":max_request_meta_bytes must be between #{Schema.min_allowed_instance_bytes()} and :max_json_bytes"
+    end
+
+    unless is_boolean(Keyword.get(opts, :export_schema_dialect, false)),
+      do: raise(ArgumentError, ":export_schema_dialect must be boolean")
+
+    opts =
+      opts
+      |> Keyword.put(:server_icons, icons)
+      |> Keyword.put_new(:export_schema_dialect, false)
+      |> put_default_if_nil(
+        :max_request_meta_bytes,
+        min(RequestMeta.default_max_bytes(), opts[:max_json_bytes])
+      )
+      |> Keyword.put(:cache_policy, CachePolicy.normalize_config!(opts[:cache_policy]))
+
+    Keyword.put(opts, :server_implementation, Implementation.build(opts))
   end
 
   defp put_default_if_nil(opts, key, default) do
@@ -2373,8 +2433,10 @@ defmodule AttestoMCP.Server do
 
     cache_ttl = Keyword.get(opts, :cache_ttl_ms)
 
-    if not is_nil(cache_ttl) and not (is_integer(cache_ttl) and cache_ttl >= 0),
-      do: raise(ArgumentError, ":cache_ttl_ms must be a non-negative integer")
+    if not is_nil(cache_ttl) and
+         not (is_integer(cache_ttl) and cache_ttl >= 0 and
+                cache_ttl <= CachePolicy.max_safe_integer()),
+       do: raise(ArgumentError, ":cache_ttl_ms must be a JSON-safe non-negative integer")
 
     cache_scope = Keyword.get(opts, :cache_scope)
 
@@ -4885,10 +4947,13 @@ defmodule AttestoMCP.Server do
   defp encode_outcome(id, {:error, _reason}, _era, _opts),
     do: JSONRPC.error_response(id, Error.internal(%{"reason" => "internal_error"}))
 
+  # Handler-authored implementation information is kept only when every field
+  # is a valid MCP `Implementation` field; anything else is replaced by the
+  # configured value rather than passed through unchecked.
   defp stamp_server_info(result, opts) do
     meta = Map.get(result, "_meta", %{})
     authored = if is_map(meta), do: Map.get(meta, "io.modelcontextprotocol/serverInfo"), else: nil
-    info = if valid_server_info?(authored), do: authored, else: server_info(opts)
+    info = Implementation.resolve_authored(authored, server_info(opts))
 
     meta =
       if is_map(meta),
@@ -4897,12 +4962,6 @@ defmodule AttestoMCP.Server do
 
     Map.put(result, "_meta", meta)
   end
-
-  defp valid_server_info?(%{"name" => name, "version" => version})
-       when is_binary(name) and is_binary(version),
-       do: name != "" and version != ""
-
-  defp valid_server_info?(_), do: false
 
   defp outcome_kind({:ok, _}), do: :ok
   defp outcome_kind({:error, %Error{code: code}}), do: code
@@ -5042,10 +5101,15 @@ defmodule AttestoMCP.Server do
     era = request_era(opts, request, params)
 
     with :ok <- validate_request_params_shape(params),
+         {:ok, request_meta} <- request_meta_snapshot(params, runtime.opts),
          :ok <- validate_legacy_initialize_request(method, era, params, runtime.opts),
          :ok <- validate_era(era, params, runtime.opts),
          :ok <- validate_trace_context(params),
          :ok <- authorization(method, context, runtime.opts, era) do
+      # The snapshot replaces any caller-supplied value. It is client input and
+      # stays separate from the verified identity and host context fields.
+      context = Map.put(context, :request_meta, request_meta)
+
       if context[:session_store_unavailable] == true do
         {:error, Error.session_store_unavailable()}
       else
@@ -5101,6 +5165,13 @@ defmodule AttestoMCP.Server do
 
   defp validate_request_params_shape(_),
     do: {:error, Error.invalid_params(%{"reason" => "params_must_be_object"})}
+
+  defp request_meta_snapshot(params, opts) do
+    case RequestMeta.snapshot(params, opts) do
+      {:ok, meta} -> {:ok, meta}
+      {:error, reason} -> {:error, Error.invalid_params(%{"reason" => Atom.to_string(reason)})}
+    end
+  end
 
   defp validate_era(@modern, params, runtime_opts) do
     meta = Map.get(params, "_meta", %{})
@@ -5266,56 +5337,48 @@ defmodule AttestoMCP.Server do
   defp trace_context(_params), do: %{}
 
   defp dispatch_method(@modern, "server/discover", _params, context, runtime, _opts) do
-    result = %{
-      "supportedVersions" => runtime.opts[:protocol_versions],
-      "capabilities" => capabilities(runtime.opts),
-      "resultType" => "complete",
-      "ttlMs" => cache_ttl(runtime.opts),
-      "cacheScope" => cache_scope(runtime.opts, context),
-      "_meta" => %{"io.modelcontextprotocol/serverInfo" => server_info(runtime.opts)}
-    }
+    with {:ok, instructions} <- Presentation.instructions(runtime.opts, context) do
+      hints =
+        cache_hints("server/discover", runtime.opts, context,
+          invariant?: true,
+          personalized?: Presentation.dynamic_instructions?(runtime.opts)
+        )
 
-    {:ok, maybe_put_instructions(result, runtime.opts[:instructions])}
+      result =
+        %{
+          "supportedVersions" => runtime.opts[:protocol_versions],
+          "capabilities" => capabilities(runtime.opts),
+          "resultType" => "complete",
+          "_meta" => %{"io.modelcontextprotocol/serverInfo" => server_info(runtime.opts)}
+        }
+        |> Map.merge(hints)
+        |> maybe_put_instructions(instructions)
+
+      {:ok, result}
+    end
   end
 
-  defp dispatch_method(era, "initialize", params, context, runtime, _opts) when era == @legacy do
+  defp dispatch_method(era, "initialize", params, context, runtime, opts) when era == @legacy do
     requested = List.wrap(params["protocolVersion"] || @legacy)
     supported = Enum.filter(@legacy_versions, &(&1 in runtime.opts[:protocol_versions]))
     selected = Enum.find(supported, &(&1 in requested))
 
     if is_binary(selected) and lifecycle_initialize_allowed?(runtime.opts, context, params) do
-      negotiated =
-        if is_binary(context[:session_id]) do
-          negotiate_session(
-            runtime.server,
-            context[:session_id],
-            principal(context),
-            tenant(context),
-            selected,
-            params["capabilities"]
-          )
-        else
-          :ok
-        end
-
-      case negotiated do
-        :ok ->
-          result = %{
-            "protocolVersion" => selected,
-            "capabilities" => legacy_capabilities(runtime.opts),
-            "serverInfo" => server_info(runtime.opts)
-          }
-
-          {:ok, maybe_put_instructions(result, runtime.opts[:instructions])}
-
-        {:error, :already_negotiated} ->
-          {:error, Error.invalid_request(%{"reason" => "initialize_session_rejected"})}
-
-        {:error, :session_store_unavailable} ->
-          {:error, Error.session_store_unavailable()}
-
-        {:error, _reason} ->
-          {:error, Error.internal(%{"reason" => "initialize_session_rejected"})}
+      # Build and size-check the complete reply before negotiating. A failed
+      # instructions provider or an oversized reply leaves the session
+      # unnegotiated, so a later valid initialize can still succeed.
+      with {:ok, instructions} <- Presentation.instructions(runtime.opts, context),
+           result =
+             maybe_put_instructions(
+               %{
+                 "protocolVersion" => selected,
+                 "capabilities" => legacy_capabilities(runtime.opts),
+                 "serverInfo" => Implementation.for_revision(server_info(runtime.opts), selected)
+               },
+               instructions
+             ),
+           :ok <- legacy_initialize_fits(result, context, runtime.opts, opts) do
+        initialize_negotiated(result, selected, params, context, runtime)
       end
     else
       if is_binary(selected),
@@ -5334,6 +5397,64 @@ defmodule AttestoMCP.Server do
 
   defp dispatch_method(@legacy, method, params, context, runtime, opts),
     do: dispatch_legacy(method, params, context, runtime, opts)
+
+  defp initialize_negotiated(result, selected, params, context, runtime) do
+    negotiated =
+      if is_binary(context[:session_id]) do
+        negotiate_session(
+          runtime.server,
+          context[:session_id],
+          principal(context),
+          tenant(context),
+          selected,
+          params["capabilities"]
+        )
+      else
+        :ok
+      end
+
+    case negotiated do
+      :ok ->
+        {:ok, result}
+
+      {:error, :already_negotiated} ->
+        {:error, Error.invalid_request(%{"reason" => "initialize_session_rejected"})}
+
+      {:error, :session_store_unavailable} ->
+        {:error, Error.session_store_unavailable()}
+
+      {:error, _reason} ->
+        {:error, Error.internal(%{"reason" => "initialize_session_rejected"})}
+    end
+  end
+
+  defp legacy_initialize_fits(result, context, runtime_opts, dispatch_opts) do
+    budget_opts = json_budget_opts(runtime_opts)
+
+    with {:ok, wire} <- canonical_wire_value(result, budget_opts),
+         :ok <- Schema.json_value(wire, budget_opts),
+         true <-
+           response_frame_fits?(
+             context[:request_id],
+             wire,
+             Keyword.get(dispatch_opts, :max_response_bytes)
+           ) do
+      :ok
+    else
+      _ -> {:error, Error.internal(%{"reason" => "invalid_result"})}
+    end
+  end
+
+  # Stdio frames have their own output ceiling, which can be smaller than the
+  # server's JSON budget. The newline delimiter is part of the frame.
+  defp response_frame_fits?(_id, _result, nil), do: true
+
+  defp response_frame_fits?(id, result, max_bytes) when is_integer(max_bytes) do
+    case Jason.encode(JSONRPC.response(id, result)) do
+      {:ok, encoded} -> byte_size(encoded) + 1 <= max_bytes
+      _ -> false
+    end
+  end
 
   defp maybe_put_instructions(result, instructions) when is_binary(instructions),
     do: Map.put(result, "instructions", instructions)
@@ -5638,23 +5759,117 @@ defmodule AttestoMCP.Server do
   defp metadata_value(params, key), do: Map.get(metadata(params), key)
 
   defp list_result(registry, type, params, context, era, key, opts) do
-    values = Registry.list(registry, type) |> Enum.filter(&definition_visible?(&1, context, opts))
-    page = page(values, params["cursor"], context, era, opts, type)
+    registered = Registry.list(registry, type)
+    values = Enum.filter(registered, &definition_visible?(&1, context, opts))
+    version = context[:protocol_version]
 
-    if page[:error] do
-      {:error, page.error}
-    else
-      definitions =
-        Enum.map(page.items, &public_definition(type, &1, context[:protocol_version]))
+    # Visibility is decided first; presentation only sees visible tools. When
+    # descriptors are customized or exported differently, the complete
+    # exported catalog is fingerprinted before paging.
+    with {:ok, exported} <- export_catalog(type, values, version, context, opts) do
+      # One scope applies to every page of a list request and is decided
+      # without looking at the cursor; continuations are bound to it.
+      hints =
+        if era == @modern do
+          cache_hints(list_method(type), opts, context,
+            invariant?: Enum.all?(registered, &unrestricted_definition?(&1, opts)),
+            personalized?: type == :tool and Presentation.dynamic_tools?(opts)
+          )
+        end
 
-      if Schema.json_value(definitions, json_budget_opts(opts)) == :ok do
-        result = %{key => definitions}
-        result = if era == @modern, do: Map.put(result, "resultType", "complete"), else: result
+      binding = [
+        presentation_digest: exported && Cursor.catalog_digest(exported),
+        cache_scope: if(hints && hints["cacheScope"] == "public", do: "public")
+      ]
 
-        {:ok, result |> maybe_put_cursor(page.cursor) |> maybe_cache(era, opts, context)}
+      page = page(values, params["cursor"], context, era, opts, type, binding)
+
+      if page[:error] do
+        {:error, page.error}
       else
-        {:error, Error.internal(%{"reason" => "invalid_catalog"})}
+        definitions =
+          case exported do
+            nil -> Enum.map(page.items, &public_definition(type, &1, version))
+            exported -> exported |> Enum.drop(page.start) |> Enum.take(length(page.items))
+          end
+
+        if Schema.json_value(definitions, json_budget_opts(opts)) == :ok do
+          result = %{key => definitions}
+
+          result =
+            if era == @modern,
+              do:
+                result
+                |> Map.put("resultType", "complete")
+                |> Map.merge(page_cache_hints(hints, page.cursor, opts)),
+              else: result
+
+          {:ok, maybe_put_cursor(result, page.cursor)}
+        else
+          {:error, Error.internal(%{"reason" => "invalid_catalog"})}
+        end
       end
+    end
+  end
+
+  defp list_method(:tool), do: "tools/list"
+  defp list_method(:resource), do: "resources/list"
+  defp list_method(:template), do: "resources/templates/list"
+  defp list_method(:prompt), do: "prompts/list"
+
+  # A page that carries a continuation cursor is never fresher than that
+  # cursor, which the server stops accepting once its lifetime ends.
+  defp page_cache_hints(hints, nil, _opts), do: hints
+
+  defp page_cache_hints(hints, _cursor, opts),
+    do: Map.update!(hints, "ttlMs", &min(&1, cursor_lifetime_ms(opts)))
+
+  defp cursor_lifetime_ms(opts) do
+    case opts[:cursor_ttl] do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _default -> 300_000
+    end
+  end
+
+  defp export_catalog(:tool, values, version, context, opts) do
+    if Presentation.dynamic_tools?(opts) or export_schema_dialect?(opts, version) do
+      with {:ok, descriptors} <-
+             values
+             |> Enum.map(&public_definition(:tool, &1))
+             |> Presentation.tools(opts, context) do
+        {:ok,
+         Enum.map(descriptors, fn descriptor ->
+           descriptor
+           |> maybe_export_schema_dialect(version, opts)
+           |> revision_descriptor(version)
+         end)}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp export_catalog(_type, _values, _version, _context, _opts), do: {:ok, nil}
+
+  # The 2025-06-18 Tool type has no `$schema` member, so the explicit dialect
+  # is exported only for revisions that define it.
+  defp export_schema_dialect?(opts, version),
+    do: opts[:export_schema_dialect] == true and version in [@modern, @legacy]
+
+  defp maybe_export_schema_dialect(descriptor, version, opts) do
+    if export_schema_dialect?(opts, version) do
+      descriptor
+      |> update_existing("inputSchema", &Schema.export_dialect/1)
+      |> update_existing("outputSchema", &Schema.export_dialect/1)
+    else
+      descriptor
+    end
+  end
+
+  defp update_existing(map, key, fun) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> Map.put(map, key, fun.(value))
+      :error -> map
     end
   end
 
@@ -5668,11 +5883,12 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp page(values, nil, context, era, opts, type) do
+  defp page(values, nil, context, era, opts, type, binding) do
     page_size = page_size(opts)
-    cursor_opts = cursor_options(values, context, era, opts, page_size, type)
+    cursor_opts = cursor_options(values, context, era, opts, page_size, type, binding)
 
     %{
+      start: 0,
       items: Enum.take(values, page_size),
       cursor:
         if(length(values) > page_size,
@@ -5681,13 +5897,14 @@ defmodule AttestoMCP.Server do
     }
   end
 
-  defp page(values, cursor, context, era, opts, type) do
+  defp page(values, cursor, context, era, opts, type, binding) do
     page_size = page_size(opts)
-    cursor_opts = cursor_options(values, context, era, opts, page_size, type)
+    cursor_opts = cursor_options(values, context, era, opts, page_size, type, binding)
 
     case Cursor.verify(cursor, principal(context), era, cursor_opts) do
       {:ok, position} when is_integer(position) ->
         %{
+          start: position,
           items: values |> Enum.drop(position) |> Enum.take(page_size),
           cursor:
             if(position + page_size < length(values),
@@ -5700,7 +5917,7 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp cursor_options(values, context, era, opts, page_size, type) do
+  defp cursor_options(values, context, era, opts, page_size, type, binding) do
     [
       secret: opts[:cursor_secret],
       ttl: opts[:cursor_ttl],
@@ -5711,7 +5928,7 @@ defmodule AttestoMCP.Server do
       catalog_digest: Cursor.catalog_digest(values),
       page_size: page_size,
       version: era
-    ]
+    ] ++ binding
   end
 
   defp page_size(opts),
@@ -5724,15 +5941,10 @@ defmodule AttestoMCP.Server do
   defp maybe_put_cursor(result, nil), do: result
   defp maybe_put_cursor(result, position), do: Map.put(result, "nextCursor", position)
 
-  defp maybe_cache(result, @modern, opts, context),
-    do: Map.merge(result, cache_fields(opts, context))
-
-  defp maybe_cache(result, _, _, _), do: result
-
   defp call_tool(params, context, runtime, opts, era) do
     name = params["name"]
     arguments = params["arguments"] || %{}
-    salient = Map.drop(params, ["requestState", "inputResponses"])
+    salient = retry_salient(params)
     operation = %{"tool" => name}
 
     with true <- is_binary(name) and is_map(arguments),
@@ -5895,6 +6107,23 @@ defmodule AttestoMCP.Server do
 
   defp unknown_resource_error(uri, @modern), do: Error.invalid_params(%{"uri" => uri})
   defp unknown_resource_error(uri, _era), do: Error.legacy_resource_not_found(uri)
+
+  # The signed retry state binds the operation parameters and the request
+  # metadata that changes protocol handling. Per-request metadata such as
+  # trace context, progress tokens, client display information, and
+  # application keys may differ on a retry, which then exposes its own values
+  # through `context.request_meta`.
+  defp retry_salient(params) do
+    params = Map.drop(params, ["requestState", "inputResponses"])
+
+    case Map.fetch(params, "_meta") do
+      {:ok, meta} when is_map(meta) ->
+        Map.put(params, "_meta", Map.take(meta, @retry_bound_meta_keys))
+
+      _other ->
+        params
+    end
+  end
 
   defp verify_retry_state(
          %{"requestState" => state} = params,
@@ -6422,7 +6651,7 @@ defmodule AttestoMCP.Server do
 
   defp read_resource(params, context, runtime, opts, era) do
     uri = params["uri"]
-    salient = Map.drop(params, ["requestState", "inputResponses"])
+    salient = retry_salient(params)
     operation = %{"resource" => uri}
 
     with {:ok, selected_definition} <-
@@ -6448,7 +6677,8 @@ defmodule AttestoMCP.Server do
         salient,
         operation,
         state_payload,
-        selected_definition
+        selected_definition,
+        list_options(runtime.opts, opts)
       )
     else
       {:missing_inputs, payload, requests} ->
@@ -6478,7 +6708,8 @@ defmodule AttestoMCP.Server do
          salient,
          operation,
          state_payload,
-         selected_definition
+         selected_definition,
+         policy_opts
        ) do
     if is_binary(uri) and safe_uri?(uri) do
       resolved_resource =
@@ -6553,7 +6784,9 @@ defmodule AttestoMCP.Server do
               normalized = normalize_resource_contents(content, runtime.opts)
 
               normalized =
-                if era == @legacy, do: Map.delete(normalized, "resultType"), else: normalized
+                if era == @legacy,
+                  do: Map.drop(normalized, ["resultType" | @cache_hint_fields]),
+                  else: normalized
 
               normalized =
                 filter_resource_result_revision(normalized, context[:protocol_version])
@@ -6566,7 +6799,13 @@ defmodule AttestoMCP.Server do
                      do:
                        Map.merge(
                          %{"resultType" => "complete"},
-                         cache_fields(runtime.opts, context)
+                         resource_cache_hints(
+                           resource,
+                           normalized,
+                           state_payload,
+                           context,
+                           policy_opts
+                         )
                        ),
                      else: %{}
                    )
@@ -6582,6 +6821,19 @@ defmodule AttestoMCP.Server do
     else
       {:error, Error.invalid_params(%{"reason" => "unsafe_resource_uri"})}
     end
+  end
+
+  # Granular policies let valid handler hints shorten freshness or select a
+  # private scope. Retried results and caller-dependent definitions are
+  # constrained by CachePolicy regardless of configuration.
+  defp resource_cache_hints(resource, normalized, state_payload, context, opts) do
+    cache_hints("resources/read", opts, context,
+      definition: resource,
+      definition_type: if(resource[:uri_template], do: :template, else: :resource),
+      retry?: not is_nil(state_payload),
+      invariant?: unrestricted_definition?(resource, opts),
+      handler_hints: Map.take(normalized, @cache_hint_fields)
+    )
   end
 
   # URI-template matching is deliberately bounded and only accepts layouts that
@@ -7519,10 +7771,10 @@ defmodule AttestoMCP.Server do
   defp unsafe_template_value?(value),
     do: String.contains?(value, ["..", "\\", "\u0000", "\r", "\n"])
 
-  defp get_prompt(params, context, runtime, _opts, era) do
+  defp get_prompt(params, context, runtime, opts, era) do
     name = params["name"]
     arguments = params["arguments"] || %{}
-    salient = Map.drop(params, ["requestState", "inputResponses"])
+    salient = retry_salient(params)
     operation = %{"prompt" => name}
 
     with true <- is_binary(name) and is_map(arguments),
@@ -7602,10 +7854,15 @@ defmodule AttestoMCP.Server do
               normalized = normalize_prompt_messages(content, runtime.opts)
 
               normalized =
-                if era == @legacy, do: Map.delete(normalized, "resultType"), else: normalized
+                if era == @legacy,
+                  do: Map.drop(normalized, ["resultType" | @cache_hint_fields]),
+                  else: normalized
 
               normalized = filter_prompt_result_revision(normalized, context[:protocol_version])
 
+              # prompts/get is not a standard cacheable operation. It keeps the
+              # 2.3 extra fields from the global setting, with the same retry
+              # and caller-independence constraints as the standard results.
               if valid_prompt_result?(normalized, runtime.opts) do
                 {:ok,
                  Map.merge(
@@ -7614,7 +7871,15 @@ defmodule AttestoMCP.Server do
                      do:
                        Map.merge(
                          %{"resultType" => "complete"},
-                         cache_fields(runtime.opts, context)
+                         cache_hints("prompts/get", runtime.opts, context,
+                           standard?: false,
+                           retry?: not is_nil(state_payload),
+                           invariant?:
+                             unrestricted_definition?(
+                               prompt,
+                               list_options(runtime.opts, opts)
+                             )
+                         )
                        ),
                      else: %{}
                    )
@@ -7963,10 +8228,11 @@ defmodule AttestoMCP.Server do
     |> maybe_map_put("_meta", item[:_meta] || item["_meta"])
   end
 
-  defp public_definition(type, item, @legacy_2025_06_18),
-    do: type |> public_definition(item) |> Map.delete("icons")
+  defp public_definition(type, item, version),
+    do: type |> public_definition(item) |> revision_descriptor(version)
 
-  defp public_definition(type, item, _version), do: public_definition(type, item)
+  defp revision_descriptor(descriptor, @legacy_2025_06_18), do: Map.delete(descriptor, "icons")
+  defp revision_descriptor(descriptor, _version), do: descriptor
 
   defp invoke(nil, _params, context, _opts),
     do: invoke_with_telemetry(fn -> {:error, :missing_handler} end, context)
@@ -8343,34 +8609,31 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp server_info(opts),
-    do: %{
-      "name" => opts[:server_name] || "attesto_mcp_server",
-      "version" => opts[:server_version] || application_version()
-    }
+  # The implementation value is resolved once at startup and reused for
+  # discovery, result stamps, and legacy initialization.
+  defp server_info(opts), do: opts[:server_implementation] || Implementation.build(opts)
 
-  defp application_version do
-    _ = Application.load(:attesto_mcp_server)
+  defp cache_hints(method, opts, context, fields) do
+    {hints, source} =
+      %{method: method, opts: opts, context: context}
+      |> Map.merge(Map.new(fields))
+      |> CachePolicy.resolve()
 
-    case Application.spec(:attesto_mcp_server, :vsn) do
-      nil -> "0.0.0"
-      version -> to_string(version)
-    end
+    Telemetry.execute([:cache, :choice], %{count: 1}, %{
+      method: Telemetry.protocol_method(method),
+      outcome: hints["cacheScope"],
+      source: source
+    })
+
+    hints
   end
 
-  defp cache_ttl(opts), do: max(opts[:cache_ttl_ms] || 30_000, 0)
-
-  defp cache_scope(opts, context) do
-    if opts[:cache_scope] == "public" and opts[:allow_public_cache] == true and
-         Map.get(context, :public_catalog, false) == true,
-       do: "public",
-       else: "private"
-  end
-
-  defp cache_fields(opts, context) do
-    scope = cache_scope(opts, context)
-    Telemetry.execute([:cache, :choice], %{count: 1}, %{outcome: scope})
-    %{"ttlMs" => cache_ttl(opts), "cacheScope" => scope}
+  # A definition is caller-independent only when nothing about the caller can
+  # hide it: no scope clause, no `authorize` callback, and no HTTP definition
+  # policy for this dispatch.
+  defp unrestricted_definition?(definition, opts) do
+    is_nil(Keyword.get(opts, :definition_authorizer)) and
+      Registry.scope_sets(definition) == [[]] and is_nil(definition[:authorize])
   end
 
   # Handlers and definition policy receive the complete loaded principal in

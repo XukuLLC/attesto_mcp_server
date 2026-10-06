@@ -10,7 +10,7 @@ defmodule AttestoMCP.Server.Registry do
   @type registration :: {primitive(), String.t(), map() | keyword()}
   use GenServer
 
-  alias AttestoMCP.Server.Schema
+  alias AttestoMCP.Server.{CachePolicy, Icons, Schema}
 
   @types [:tool, :resource, :template, :prompt, :completion]
   @max_identity_bytes 256
@@ -46,7 +46,8 @@ defmodule AttestoMCP.Server.Registry do
     "uri_template" => :uri_template,
     "uriTemplate" => :uri_template,
     "mime_type" => :mime_type,
-    "mimeType" => :mime_type
+    "mimeType" => :mime_type,
+    "cache" => :cache
   }
 
   @doc "Starts the registry; registration is serialized through this process."
@@ -344,15 +345,27 @@ defmodule AttestoMCP.Server.Registry do
 
   defp normalize_definition_values(definition) when is_map(definition) do
     Enum.reduce_while(definition, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-      if key in [:handler, :authorize] and valid_callback_term?(value) do
-        {:cont, {:ok, Map.put(acc, key, value)}}
-      else
-        case canonical_json_value(value) do
-          {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
-          {:error, _} -> {:halt, {:error, {:invalid_definition, key}}}
-        end
+      cond do
+        key in [:handler, :authorize] and valid_callback_term?(value) ->
+          {:cont, {:ok, Map.put(acc, key, value)}}
+
+        key == :cache ->
+          case CachePolicy.normalize_policy(value) do
+            {:ok, policy} -> {:cont, {:ok, Map.put(acc, :cache, policy)}}
+            {:error, _reason} -> {:halt, {:error, {:invalid_definition, :cache}}}
+          end
+
+        true ->
+          normalize_definition_value(acc, key, value)
       end
     end)
+  end
+
+  defp normalize_definition_value(acc, key, value) do
+    case canonical_json_value(value) do
+      {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+      {:error, _} -> {:halt, {:error, {:invalid_definition, key}}}
+    end
   end
 
   defp valid_callback_term?(value) when is_function(value), do: true
@@ -653,21 +666,11 @@ defmodule AttestoMCP.Server.Registry do
 
   defp optional_metadata_string(_, field), do: {:error, {:invalid_definition, field}}
 
-  defp optional_icons(nil), do: :ok
-
-  defp optional_icons(icons) when is_list(icons) do
-    if Enum.all?(icons, fn icon ->
-         is_map(icon) and is_binary(icon["src"]) and icon["src"] != "" and
-           (is_nil(icon["mimeType"]) or is_binary(icon["mimeType"])) and
-           (is_nil(icon["theme"]) or icon["theme"] in ["light", "dark"]) and
-           (is_nil(icon["sizes"]) or
-              (is_list(icon["sizes"]) and Enum.all?(icon["sizes"], &is_binary/1)))
-       end),
-       do: :ok,
-       else: {:error, {:invalid_definition, :icons}}
+  defp optional_icons(icons) do
+    if Icons.component_list?(icons),
+      do: :ok,
+      else: {:error, {:invalid_definition, :icons}}
   end
-
-  defp optional_icons(_), do: {:error, {:invalid_definition, :icons}}
 
   defp optional_json_metadata(nil, _max_bytes), do: :ok
 
@@ -703,6 +706,11 @@ defmodule AttestoMCP.Server.Registry do
         :ok
     end
   end
+
+  # Definition cache policies apply where one definition is selected for a
+  # standard cacheable operation, which is `resources/read`.
+  defp validate_type(type, %{cache: _policy}, _max_bytes) when type not in [:resource, :template],
+    do: {:error, {:invalid_definition, :cache}}
 
   defp validate_type(:tool, value, max_bytes) do
     with :ok <- valid_name(value[:name], :name),

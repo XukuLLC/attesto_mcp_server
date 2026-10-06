@@ -391,6 +391,9 @@ defmodule AttestoMCP.Server.Stdio do
 
   defp start_worker_process(server, context, opts, request, pending, id, key, parent, work_ref) do
     request_context = request_context(server, context, request)
+    # Lets legacy initialize check its reply against this frame bound before
+    # the session is negotiated.
+    frame_bytes = Process.get(:attesto_mcp_stdio_json_budget)
 
     {pid, monitor} =
       spawn_monitor(fn ->
@@ -403,7 +406,8 @@ defmodule AttestoMCP.Server.Stdio do
             owner: self(),
             on_event: on_event,
             request_ref: work_ref,
-            timeout: Keyword.get(opts, :request_timeout) || 30_000
+            timeout: Keyword.get(opts, :request_timeout) || 30_000,
+            max_response_bytes: frame_bytes
           )
 
         case result do

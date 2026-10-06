@@ -31,7 +31,9 @@ defmodule AttestoMCP.Server.API do
   `:attesto_mcp_scopes`, `:attesto_mcp_sender`, `:attesto_mcp_principal`, and
   `:attesto_context`) when the Plug boundary is used. The context also exposes
   the supervised server's `:max_json_bytes`, `:output_canonicalization`, and
-  `:tool_argument_keys` values. `AttestoMCP.Server.Result.tool_from_context/2,3`
+  `:tool_argument_keys` values, and `:request_meta`, an immutable snapshot of
+  the request's untrusted `params["_meta"]` object (see
+  `AttestoMCP.Server.RequestMeta`). `AttestoMCP.Server.Result.tool_from_context/2,3`
   consumes the first two automatically; low-level constructors can still use
   them as explicit options. A successful callback
   returns `{:ok, result}`, an application failure returns `{:error, reason}`,
@@ -39,6 +41,13 @@ defmodule AttestoMCP.Server.API do
   typed MRTR request entries. An HTTP `context_builder` contributes only the
   nested `:host_context` map. Use `AttestoMCP.Server.Result.error/2` when an
   error message and stable code are intentionally safe to disclose.
+  `:instructions_provider` and `:tool_presentation` customize server guidance
+  and visible tool descriptors for the current caller
+  (`AttestoMCP.Server.Presentation`); `:cache_policy` selects cache hints by
+  operation and definition (`AttestoMCP.Server.CachePolicy`); `:server_icons`
+  adds icons to the server's implementation identity; and
+  `export_schema_dialect: true` makes the default JSON Schema 2020-12 dialect
+  explicit in exported tool schemas without changing validation.
   For interactive workflows with `mode: "url"`, `AttestoMCP.Server.API` provides
   staged, single-use, subject-bound approval records via `stage_url_elicitation/5`,
   `resolve_url_elicitation/3`, and `consume_url_elicitation/3`.
@@ -49,6 +58,16 @@ defmodule AttestoMCP.Server.API do
 
   @typedoc "A cache scope; string values are restricted to `\"private\"` or `\"public\"`."
   @type cache_scope :: :private | :public | String.t()
+
+  @typedoc "A host callback: a function, `{module, function}`, or `{module, function, prefix_args}`."
+  @type host_callback :: function() | {module(), atom()} | {module(), atom(), list()}
+
+  @typedoc """
+  An MCP icon. `src` is an absolute `https:` URL or a Base64 `data:` URI with an
+  `image/*` media type; `mimeType` (or `mime_type`), `sizes` (`"WxH"` or
+  `"any"`), and `theme` (`"light"` or `"dark"`) are optional.
+  """
+  @type icon :: %{optional(atom() | String.t()) => String.t() | [String.t()]}
 
   @typedoc "One primitive registration accepted by the atomic batch and startup APIs."
   @type registration :: {atom(), String.t(), map() | keyword()}
@@ -98,10 +117,16 @@ defmodule AttestoMCP.Server.API do
           | {:cache_ttl_ms, non_neg_integer()}
           | {:cache_scope, cache_scope()}
           | {:allow_public_cache, boolean()}
+          | {:cache_policy, keyword() | map()}
+          | {:max_request_meta_bytes, pos_integer()}
           | {:initialize_callback, (map(), map() -> :ok | {:error, term()})}
           | {:instructions, String.t()}
+          | {:instructions_provider, host_callback()}
+          | {:tool_presentation, host_callback()}
           | {:server_name, String.t()}
           | {:server_version, String.t()}
+          | {:server_icons, [icon()]}
+          | {:export_schema_dialect, boolean()}
           | {:capabilities, map()}
           | {:modern_tasks, false}
           | {:legacy_tasks, false}

@@ -906,6 +906,24 @@ defmodule AttestoMCP.Server.Schema do
   defp type_name(type) when is_atom(type), do: Atom.to_string(type)
   defp type_name(types), do: types
 
+  @doc """
+  Returns an exported schema root with the default dialect made explicit.
+
+  An object schema without `$schema` receives the canonical JSON Schema
+  2020-12 identifier, which is the dialect the validator already applies. An
+  explicit `$schema`, a boolean schema, and every nested value are returned
+  unchanged.
+  """
+  @spec export_dialect(term()) :: term()
+  def export_dialect(schema) when is_map(schema) and not is_map_key(schema, "$schema"),
+    do: Map.put(schema, "$schema", @default_dialect)
+
+  def export_dialect(schema), do: schema
+
+  @doc "Returns the dialects accepted in an explicit `$schema` declaration."
+  @spec supported_dialects() :: [String.t()]
+  def supported_dialects, do: @supported_dialects
+
   @doc "Checks that a term can be represented losslessly as JSON."
   @spec json_value(term(), keyword()) :: :ok | {:error, :not_json}
   def json_value(value, opts \\ []) do

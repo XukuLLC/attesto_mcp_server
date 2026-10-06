@@ -66,8 +66,16 @@ defmodule AttestoMCP.Server.Cursor do
       "page_size" => positive_integer(Keyword.get(opts, :page_size), 100)
     }
 
-    digest(context)
+    # Optional bindings are added only when present so cursors issued for an
+    # unchanged default catalog keep the same context digest.
+    context
+    |> maybe_bind("presentation_digest", Keyword.get(opts, :presentation_digest))
+    |> maybe_bind("cache_scope", Keyword.get(opts, :cache_scope))
+    |> digest()
   end
+
+  defp maybe_bind(context, _key, nil), do: context
+  defp maybe_bind(context, key, value), do: Map.put(context, key, value)
 
   defp positive_ttl(value, _fallback) when is_integer(value) and value > 0, do: value
   defp positive_ttl(_, fallback), do: fallback
