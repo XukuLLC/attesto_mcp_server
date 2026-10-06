@@ -1,12 +1,12 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 2.3.1. It does not
+This is reproducible test evidence for `attesto_mcp_server` 2.4.0. It does not
 establish certification, endorsement, or support for every optional MCP extension.
 
 ## Tested candidate
 
 - source fingerprint:
-  `5ff199298ef2481599259801b5d1993a3ff320e1c8cd03d2d545d255dfce876b`
+  `17cfbc3ccdcfe89f90ce78d47d6a6efd7045102b3e894339eb4f0477581d5f44`
 - official runner source: package version `0.2.0-alpha.12`, including PR #396
 - runner commit: `c37eec888e1c6ff140af79987a40008548b7cc5f`
 - runner archive SHA-256:
@@ -42,9 +42,11 @@ under `--requirements 2026-07-28`. Tasks are disabled and are not advertised.
 This exclusion is specific to that requirements set. The unscored JSON Schema
 and HTTP-header scenarios passed. No Tasks failure was ignored in the legacy run.
 
-Two modern SHOULD checks emit warnings because the frozen runner sends
-`inputResponses` on the first call without obtaining or echoing request state.
-This implementation requires bound state for retries. Package regressions
+The 2.3.1 run recorded two modern SHOULD warnings because the frozen runner
+sends `inputResponses` on the first call without obtaining or echoing request
+state. The 2.4.0 console summary reports no per-check warning lines, so this
+record does not restate them; the server still requires bound state for
+retries and rejects `inputResponses` without it. Package regressions
 cover valid retries that ignore unknown keys and request missing answers again,
 preserving earlier validated answers and the original expiry.
 
@@ -139,19 +141,24 @@ The corpus selects `formats: false` annotation semantics. Direct validation
 and server tool input/output retain format assertions by default in 2.x.
 Internal elicitation URLs and form responses always assert their formats.
 
-The JSV 0.24.0 dependency floor also passes all 751 server checks and the same
+The JSV 0.24.0 dependency floor also passes all 886 server checks and the same
 pinned corpus, with 1,252 passes and the same 49 explicit exclusions.
 
 ## Package gates
 
-- All 751 checks passed, including the PostgreSQL-backed session and URL
-  elicitation store tests.
+- All 886 checks passed, including the PostgreSQL-backed session and URL
+  elicitation store tests. Two schema validation tests exceeded their
+  one-second evaluation budget in a full run while Dialyzer shared the
+  machine; both passed when rerun, and the schema code is unchanged.
 - Dialyzer completed with zero errors and zero skips.
 - Package construction, source/package hygiene, formatting, documentation,
-  and the Hex advisory audit passed.
+  the production dependency tree check, the dependency-neutral consumer with
+  Ecto activation and removal, and the Hex advisory audit passed.
 - The coordinated OAuth fixture passed all five tests.
-- The complete PostgreSQL lane also passed on the declared Elixir 1.18.3/OTP
-  27.3 floor, with 751 checks and zero failures.
+- The complete PostgreSQL lane also ran on the declared Elixir 1.18.3/OTP
+  27.3 floor: 884 of 886 checks passed in the full run, and the two schema
+  tests that exceeded the one-second budget during cold start passed when
+  rerun on that runtime.
 
 The frozen runner does not score `2025-06-18`. Package-owned HTTP, stdio,
 lifecycle, revision-filtering, and configuration regressions cover that

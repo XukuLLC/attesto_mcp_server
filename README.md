@@ -410,7 +410,7 @@ principals, or tenants. The session-free `2026-07-28` transport has no server
 session IDs to list.
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 2.0.1 in
+`2025-06-18`. The latest recorded runner and SDK evidence covers 2.4.0 in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST
