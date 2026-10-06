@@ -6,7 +6,7 @@ establish certification, endorsement, or support for every optional MCP extensio
 ## Documentation snapshot (2026-10-06)
 
 - source fingerprint:
-  `fbbd56c86b2d24eb49dd73d265d5b1aa03001c8b755fbc243d27986651252f2e`
+  `7aabd1dfd2457126c0c6373ebe561091e806f3412ae6f5b32b3edc0d9eacd8f6`
 
 This checkout adds progressive setup documentation and updates the Livebook
 and ExDoc extras. Product code, configuration, tests, scripts, and existing

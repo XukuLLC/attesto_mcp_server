@@ -456,7 +456,7 @@ false = Process.alive?(bandit)
 ```
 
 For a supervised application and real OAuth clients, continue with
-[setup](https://hexdocs.pm/attesto_mcp_server/setup.html). A Phoenix host already
+[setup](https://github.com/XukuLLC/attesto_mcp_server/blob/main/docs/setup.md). A Phoenix host already
 using `attesto_phoenix` can reuse its validated authorization configuration with
 `mix igniter.install attesto_mcp_server --base-url https://mcp.example.com`.
 Review the generated notices, storage migrations, granted scopes, and starter
