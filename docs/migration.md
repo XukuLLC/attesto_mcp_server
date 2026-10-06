@@ -5,6 +5,54 @@ This guide maps an existing MCP catalog and deployment onto
 authorization, and rollout safety. The [usage guide](usage.md) contains the
 complete option reference.
 
+## 2.4 request metadata, presentation, and cache hints
+
+The new options are additive: `max_request_meta_bytes`,
+`instructions_provider`, `tool_presentation`, `cache_policy`, `server_icons`,
+and `export_schema_dialect`. Without them, catalogs, instructions, and the
+private 30-second cache hint behave as in 2.3. No migration, database column,
+or Phoenix change is required.
+
+These corrections apply to every deployment:
+
+- A request whose `_meta` object encodes above 65,536 bytes now returns invalid
+  params (`"request_meta_too_large"`). Raise `max_request_meta_bytes`, up to
+  `max_json_bytes`, if clients legitimately send larger metadata.
+- A multi-round retry now has to repeat only the operation parameters and the
+  `io.modelcontextprotocol/protocolVersion` and `clientCapabilities` metadata.
+  Trace context, progress tokens, `clientInfo`, and application metadata may
+  differ, so clients that send a fresh `traceparent` per request no longer get
+  `invalid_request_state`. Request state issued by 2.3 does not verify under
+  2.4, so a retry in flight during the upgrade is rejected once and the client
+  starts the request again.
+- Complete results from a multi-round retry (`requestState` present) now carry
+  `ttlMs: 0` and `cacheScope: "private"`, as MCP requires. Earlier releases
+  emitted the configured TTL.
+- `cacheScope: "public"` now also requires a caller-independent response. With
+  `cache_scope: :public`, `allow_public_cache: true`, and a trusted
+  `public_catalog` context, a list containing a definition with scope clauses
+  or an `authorize` callback, a list served under an HTTP definition policy,
+  or a read of such a resource is now private.
+- A list page with `nextCursor` is capped at the cursor lifetime, and a private
+  hint is capped at the remaining lifetime of the verified access token.
+- `cache_ttl_ms` must be at most 9,007,199,254,740,991 (the largest JSON-safe
+  integer); larger values fail at startup.
+- Session-bound `resources/read` and `prompts/get` results no longer pass
+  through handler-supplied `ttlMs` or `cacheScope` fields, which those revisions
+  do not define.
+- Handler-authored `io.modelcontextprotocol/serverInfo` metadata is kept only
+  when every field is a valid MCP `Implementation` field. Extra fields or
+  malformed optional fields now cause the configured server identity to be
+  stamped instead.
+- The `cache/choice` telemetry event adds bounded `method` and `source`
+  metadata.
+
+Handlers that read client metadata should use `context.request_meta` rather
+than re-reading transport input, and must treat it as untrusted. Hosts that
+need caller-specific tool text should use `tool_presentation` rather than
+replacing the catalog per connection; availability still comes from scope
+clauses and `authorize`.
+
 ## JSON Schema evaluation and format policy
 
 The JSV evaluator accepts standard reference scope and unevaluated annotations

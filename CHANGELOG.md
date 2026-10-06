@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.4.0 - 2026-10-05
+
+- Expose an immutable, bounded snapshot of each request's `_meta` object to
+  handlers and per-request callbacks as `context.request_meta`, for HTTP,
+  stdio, and direct test dispatch. The snapshot is untrusted input kept apart
+  from verified identity, scopes, tenant, and host context. Metadata above
+  `max_request_meta_bytes` (65,536 bytes by default) is rejected, not
+  truncated. `AttestoMCP.Server.RequestMeta` documents the contract.
+- Bind multi-round retry state to the operation parameters plus the request's
+  protocol version and client capabilities only, so a retry may carry its own
+  trace context, progress token, client information, and application
+  metadata.
+- Add `instructions_provider` for caller-specific guidance in modern discovery
+  and session-bound initialization, and `tool_presentation` for caller-specific
+  titles, descriptions, icons, and application `_meta` on visible tools.
+  Failures return controlled errors, never fall back to static text, and leave
+  a session-bound initialization retryable. Customized catalogs are part of
+  the pagination fingerprint.
+- Add `cache_policy` for cache hints by operation, resource definition, and an
+  optional resolver, with handler hints that can only shorten or restrict.
+  Personalized, filtered, and retried results stay private; continuation
+  cursors are bound to the effective scope. See the migration runbook for the
+  corrections that apply without a policy.
+- Add `server_icons` to the server implementation identity in discovery,
+  modern result metadata, and `2025-11-25` initialization, with full icon
+  validation. Handler-authored implementation metadata is validated with the
+  same rules.
+- Add opt-in `export_schema_dialect` to declare the default JSON Schema 2020-12
+  dialect on exported tool schema roots without changing validation.
+- Extend `AttestoMCP.Server.Test` with resource, prompt, completion,
+  discovery, catalog, and generic request helpers that share one request
+  builder and support metadata, cursors, and multi-round retry fields.
+
 ## 2.3.1 - 2026-10-04
 
 - Support JSV 0.24.x as well as 0.25.x. Both retain the existing bounded

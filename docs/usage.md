@@ -865,6 +865,42 @@ that has already authenticated. This helper does not exercise token, DPoP,
 mTLS, HTTP header, parser-order, or mount-policy checks. Keep Plug-level tests
 for that boundary.
 
+The same request builder backs `read_resource/3`, `get_prompt/4`,
+`complete/4`, `discover/2`, `list_tools/2`, `list_resources/2`,
+`list_resource_templates/2`, `list_prompts/2`, and the generic `request/4`:
+
+```elixir
+alias AttestoMCP.Server.Test, as: MCPTest
+
+assert %{"result" => %{"contents" => [_]}} =
+         MCPTest.read_resource(MyApp.MCP, "file:///items/item-7", scopes: ["items.read"])
+
+page = MCPTest.list_tools(MyApp.MCP, scopes: ["items.read"])
+next = MCPTest.list_tools(MyApp.MCP, scopes: ["items.read"], cursor: page["result"]["nextCursor"])
+
+assert %{"result" => %{"resultType" => "input_required", "requestState" => state}} =
+         MCPTest.call_tool(MyApp.MCP, "confirm", %{}, client_capabilities: %{"elicitation" => %{}})
+
+MCPTest.call_tool(MyApp.MCP, "confirm", %{},
+  client_capabilities: %{"elicitation" => %{}},
+  request_state: state,
+  input_responses: %{"confirm" => %{"action" => "accept", "content" => %{"ok" => true}}},
+  meta: %{"com.example/request-purpose" => "test"}
+)
+```
+
+`:meta` supplies application metadata; the helper generates the protocol
+version and client-capability keys and raises if `:meta` sets them.
+`:request_state` and `:input_responses` send modern retry fields, `:cursor`
+continues a list, and `:completion_context` sets the completion request's
+`context`. Every helper returns the complete JSON-RPC response, including
+protocol errors. Malformed setup raises `ArgumentError`.
+
+These helpers test the dispatcher: scopes, definition authorization, schemas,
+handlers, cache hints, and wire validation. They do not establish HTTP
+header/body mirroring, session-bound negotiation, stdio framing, or disconnect
+behaviour; keep Plug and stdio tests for those transport paths.
+
 ### Per-definition authorization
 
 Every tool, resource, resource template, prompt, and completion definition may
@@ -1528,6 +1564,188 @@ events; a failing store emits
 `[:attesto_mcp_server, :url_elicitation_store, :failure]` and never affects
 tool results.
 
+## Request metadata, guidance, and cache hints
+
+### Request metadata
+
+Handlers and per-request callbacks receive `context.request_meta`, an
+immutable snapshot of the request's `params["_meta"]` object with its JSON
+string keys and values unchanged. A session-bound request without `_meta`
+produces `%{}`. HTTP, stdio, and `AttestoMCP.Server.Test` dispatch expose the
+same value.
+
+```elixir
+handler: fn _arguments, context ->
+  purpose = context.request_meta["com.example/request-purpose"]
+  {:ok, "recorded for #{purpose || "unspecified"}"}
+end
+```
+
+The snapshot is client input. It is never merged into `principal`,
+`principal_binding`, `tenant`, `scopes`, claims, sender constraints, or
+`host_context`, and the server never derives an issuer, audience,
+authorization decision, or outbound destination from it. Protocol keys such as
+`io.modelcontextprotocol/protocolVersion` appear exactly as sent; the server's
+validated interpretation stays in `context.protocol_version`,
+`context.trace_context`, and `context.logging_level`.
+`AttestoMCP.Server.RequestMeta.application/1` returns only keys outside the
+reserved MCP names.
+
+The complete `_meta` object must encode within `max_request_meta_bytes`
+(65,536 bytes by default, configurable from 512 bytes up to `max_json_bytes`)
+and the existing JSON depth and node bounds. Larger metadata returns invalid
+params with reason `"request_meta_too_large"`; it is never truncated. Metadata
+values are not added to logs, telemetry, error payloads, or response metadata.
+`handler_task_init` runs before request validation and does not receive the
+snapshot.
+
+### Server guidance
+
+`instructions` remains a static string. An `instructions_provider` callback
+returns guidance for the current authenticated caller in modern
+`server/discover` and session-bound `initialize`:
+
+```elixir
+instructions_provider: fn context ->
+  if "reports.write" in context.scopes,
+    do: {:ok, "Use draft_report before publish_report."},
+    else: {:ok, "Reports are read-only for this account."}
+end
+```
+
+The provider returns `{:ok, instructions}` (a non-empty UTF-8 string of at most
+65,536 bytes), `:omit` to send none, or `{:error, reason}`. When configured it
+supplies the instructions; the static string is used only without a provider,
+and a failing provider never falls back to it. Errors, exceptions, exits,
+throws, invalid values, and the request timeout return an internal error with
+reason `"instructions_provider_failure"`. Session-bound `initialize` runs the
+provider and checks the final reply size, including the stdio frame limit,
+before committing the negotiated revision. A failure leaves the session
+unnegotiated so a later valid `initialize` can succeed. Guidance is not an
+authorization mechanism; every catalog and invocation check still applies.
+
+### Tool presentation
+
+`tool_presentation` customizes descriptors for tools the caller can already
+see. It receives the tool's public descriptor and the request context:
+
+```elixir
+tool_presentation: fn tool, context ->
+  case tool["name"] do
+    "search" when context.tenant == "acct-eu" ->
+      {:ok, %{"description" => "Search EU records.", "_meta" => %{"com.example/region" => "eu"}}}
+
+    _other ->
+      :default
+  end
+end
+```
+
+Overrides may set `"title"`, `"description"`, `"icons"`, and application
+`"_meta"` keys, which merge over the registered `_meta`. Names, schemas,
+annotations, `execution`, handlers, scopes, authorization callbacks, reserved
+`_meta` keys, and unknown fields fail the whole list with
+`"tool_presentation_failure"`; no partial catalog is returned. Scope clauses,
+`authorize`, and HTTP definition policies run first, so hidden tools never
+reach the callback, and `tools/call` repeats its own eligibility checks. The
+callback runs for every visible tool on each `tools/list` page because the
+customized catalog is part of the cursor fingerprint. Keep it cheap and
+deterministic; a cursor stops working when the presentation it was issued for
+changes. Registered definitions are never modified.
+
+### Cache hints
+
+Modern complete results from `server/discover`, `tools/list`, `prompts/list`,
+`resources/list`, `resources/templates/list`, and `resources/read` carry
+`ttlMs` and `cacheScope`. The server does not cache responses. Without
+`cache_policy`, `cache_ttl_ms` (default `30_000`) and a private scope apply,
+as in 2.3. `prompts/get` keeps emitting the same extra fields; it is not a
+standard cacheable operation.
+
+```elixir
+cache_policy: [
+  methods: %{
+    "server/discover" => [ttl_ms: 300_000],
+    "tools/list" => [ttl_ms: 60_000, scope: :public],
+    "resources/read" => [ttl_ms: 5_000]
+  },
+  resolver: {MyApp.MCPCache, :policy, []},
+  max_ttl_ms: 600_000
+]
+```
+
+A resource or resource template may carry `cache: [ttl_ms: 1_000]` or
+`cache: [scope: :private]`. Precedence is the global default, then the method
+policy, the definition policy, the optional resolver, and valid handler hints
+on `resources/read`. Handler hints can shorten `ttlMs` or select
+`"private"`; they cannot lengthen freshness or select `"public"`. The resolver
+receives `%{method:, definition:, policy:}` and the request context and returns
+`{:ok, policy}` or `:default`. A resolver failure produces `ttlMs: 0` with a
+private scope for that response.
+
+These constraints apply with or without `cache_policy`:
+
+- Interim `input_required` results carry no hints, and complete results from a
+  multi-round retry use `ttlMs: 0` and `"private"`.
+- `"public"` requires `allow_public_cache: true`, an explicit public choice,
+  and a caller-independent response. A list is caller-independent only when
+  no definition of that type has scope clauses or an `authorize` callback, no
+  HTTP definition policy applies, and no presentation callback is configured.
+  A resource read requires an unrestricted selected definition. A method-level
+  scope requirement does not make a result caller-dependent; a public hint
+  lets shared caches serve it to callers without that scope, so choose public
+  only for content you would publish.
+- Output that includes `instructions_provider` or `tool_presentation` results
+  is private, with `ttlMs: 0` unless a method policy, definition policy, or
+  resolver supplies a TTL.
+- A list page with `nextCursor` is never fresher than the cursor lifetime,
+  and a private hint is never fresher than the verified access token.
+- Every page of one list request has the same scope, and a continuation is
+  rejected if the effective scope changes.
+- Session-bound results never carry `ttlMs` or `cacheScope`.
+
+MCP cache hints do not authorize HTTP caching. Protected HTTP responses keep
+`Cache-Control: private, no-store`. The `cache/choice` telemetry event reports
+only the method, the chosen scope, and the policy source.
+
+### Server identity and icons
+
+`server_name`, `server_version`, and `server_icons` define the implementation
+value sent in modern discovery, the `io.modelcontextprotocol/serverInfo`
+stamp on modern results, and session-bound `initialize`:
+
+```elixir
+server_icons: [
+  %{src: "https://example.com/icons/catalog.png", mime_type: "image/png", sizes: ["48x48"]},
+  %{src: "https://example.com/icons/catalog-dark.svg", mime_type: "image/svg+xml", theme: "dark"}
+]
+```
+
+Each icon `src` must be an absolute `https:` URL or a Base64 `data:` URI with
+an `image/*` media type. `mimeType` must be an `image/*` type, `sizes` entries
+are `"WxH"` or `"any"`, and `theme` is `"light"` or `"dark"`. At most 16
+icons are accepted, with a 131,072-byte encoded budget. Icon URLs are never
+fetched or resolved. `2025-06-18` initialization omits icons. A handler may
+author its own `serverInfo` in a modern result's `_meta`; it is kept only when
+every field is a valid MCP `Implementation` field (`name`, `version`, `title`,
+`description`, `websiteUrl`, and `icons` checked by the same rules), and is
+otherwise replaced by the configured value. Implementation identity is display
+metadata only. Registered component icons keep their 2.3 checks.
+
+### JSON Schema dialects
+
+Tool schemas without `$schema` are validated as JSON Schema 2020-12. Explicit
+2020-12 and draft-07 declarations are supported
+(`AttestoMCP.Server.Schema.supported_dialects/0`); other dialects are rejected
+at registration. `export_schema_dialect: true` inserts
+`"$schema" => "https://json-schema.org/draft/2020-12/schema"` at the root of
+exported `inputSchema` and `outputSchema` objects that have none. It does not
+change validation, nested schemas, data values, boolean schemas, or registered
+definitions. The export applies to `2026-07-28` and `2025-11-25`; the
+`2025-06-18` Tool type has no `$schema` member. The exported catalog is checked
+against `max_json_bytes` and included in pagination fingerprints. MCP defines
+no capability for negotiating schema dialects.
+
 ## Era separation
 
 The JSON-RPC decoder rejects batches, invalid UTF-8, fractional/null IDs,
@@ -1685,7 +1903,8 @@ earlier revision must open the dated `initialize`/`notifications/initialized`
 flow; a modern metadata envelope cannot carry a session-bound revision.
 
 Revision-specific output is filtered before it reaches the client.
-`2025-06-18` catalogs and resource content omit the later `icons` field. That
+`2025-06-18` catalogs, resource content, and implementation identity omit the
+later `icons` field, and its tool schemas never receive an exported `$schema`. That
 revision cannot send an explicit elicitation `mode` or sampling
 `tools`/`toolChoice` fields; form elicitation remains available by omitting
 `mode`. A server-side attempt to use one of those later fields returns
