@@ -6,7 +6,7 @@ establish certification, endorsement, or support for every optional MCP extensio
 ## Release snapshot (2026-10-15)
 
 - source fingerprint:
-  `cb14c9056ea89daa9f8d93efd27ab2238ebf8d4455ad9c1c7eb999c8524b0a71`
+  `3caa0c93645ffe93b46e50d4060d87d4fc58bcb033fe625496395213da357723`
 
 This fingerprint covers the tracked code, configuration, tests, scripts, and
 fixtures in the 2.5.0 release candidate. The package, installer, coordinated

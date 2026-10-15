@@ -342,36 +342,51 @@ defmodule AttestoMCP.ConformanceFixture do
       "test_input_required_result_capabilities",
       "Capability-filtered input diagnostic",
       %{},
-      fn args, _ ->
+      fn args, context ->
         if Map.has_key?(args, "sample_answer") or Map.has_key?(args, "elicitation_answer") do
           {:ok, "capability-filtered"}
         else
-          {:input_required,
-           %{
-             "sample_answer" => %{
-               "method" => "sampling/createMessage",
-               "params" => %{
-                 "messages" => [
-                   %{
-                     "role" => "user",
-                     "content" => %{"type" => "text", "text" => "Provide a sample"}
-                   }
-                 ],
-                 "maxTokens" => 32
-               }
-             },
-             "elicitation_answer" => %{
-               "method" => "elicitation/create",
-               "params" => %{
-                 "message" => "Provide an answer",
-                 "requestedSchema" => %{
-                   "type" => "object",
-                   "properties" => %{"value" => %{"type" => "string"}},
-                   "required" => ["value"]
+          capabilities =
+            get_in(context, [
+              :request_meta,
+              "io.modelcontextprotocol/clientCapabilities"
+            ]) || %{}
+
+          requests =
+            [
+              {"sample_answer", "sampling",
+               %{
+                 "method" => "sampling/createMessage",
+                 "params" => %{
+                   "messages" => [
+                     %{
+                       "role" => "user",
+                       "content" => %{"type" => "text", "text" => "Provide a sample"}
+                     }
+                   ],
+                   "maxTokens" => 32
                  }
-               }
-             }
-           }}
+               }},
+              {"elicitation_answer", "elicitation",
+               %{
+                 "method" => "elicitation/create",
+                 "params" => %{
+                   "message" => "Provide an answer",
+                   "requestedSchema" => %{
+                     "type" => "object",
+                     "properties" => %{"value" => %{"type" => "string"}},
+                     "required" => ["value"]
+                   }
+                 }
+               }}
+            ]
+            |> Enum.reduce(%{}, fn {key, capability, request}, acc ->
+              if is_map(capabilities) and Map.has_key?(capabilities, capability),
+                do: Map.put(acc, key, request),
+                else: acc
+            end)
+
+          {:input_required, requests}
         end
       end
     )

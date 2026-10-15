@@ -709,10 +709,13 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
         |> Server.Plug.call(plug)
 
       assert response.status == 200
-      refute Map.has_key?(response.assigns, :attesto_mcp_principal)
+
+      # Supported AttestoMCP releases either omit a nil principal assign or
+      # write nil explicitly to overwrite an upstream value.
+      assert response.assigns[:attesto_mcp_principal] == nil
 
       if custom_key?,
-        do: refute(Map.has_key?(response.assigns, :host_principal)),
+        do: assert(response.assigns[:host_principal] == nil),
         else: assert(response.assigns.host_principal == :untrusted)
 
       assert_receive {:principal_fallback_context, context}
