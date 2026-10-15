@@ -122,7 +122,9 @@ defmodule AttestoMCP.Server.RequestState do
   defp responses_valid?(_payload, _responses), do: true
 
   defp digest(value),
-    do: :crypto.hash(:sha256, :erlang.term_to_binary(value)) |> Base.url_encode64(padding: false)
+    do:
+      :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic]))
+      |> Base.url_encode64(padding: false)
 
   defp secret do
     case Application.get_env(:attesto_mcp_server, :request_state_secret) do
@@ -133,12 +135,16 @@ defmodule AttestoMCP.Server.RequestState do
         # persistent_term has no insert-if-absent operation.  Serialize the
         # one-time fallback initialization so concurrent first use cannot
         # overwrite a secret between issuing and verifying a state token.
-        :global.trans({{__MODULE__, :secret}, self()}, fn ->
-          case :persistent_term.get({__MODULE__, :secret}, nil) do
-            value when is_binary(value) -> value
-            _ -> persist(:crypto.strong_rand_bytes(32))
-          end
-        end)
+        :global.trans(
+          {{__MODULE__, :secret}, self()},
+          fn ->
+            case :persistent_term.get({__MODULE__, :secret}, nil) do
+              value when is_binary(value) -> value
+              _ -> persist(:crypto.strong_rand_bytes(32))
+            end
+          end,
+          [node()]
+        )
     end
   end
 

@@ -1,6 +1,8 @@
 defmodule OAuthHost.MixProject do
   use Mix.Project
 
+  @bandit_security_ref "d88b21953c65061f21136ea76a89a4f95a2ac7a1"
+
   def project do
     [app: :oauth_host, version: "0.1.0", elixir: "~> 1.18", deps: deps()]
   end
@@ -15,7 +17,11 @@ defmodule OAuthHost.MixProject do
       {:attesto_phoenix, path: source("ATTESTO_PHOENIX_SOURCE_PATH", "attesto_phoenix")},
       {:attesto_mcp_server, path: Path.expand("../..", __DIR__)},
       {:phoenix, ">= 1.7.0 and < 2.0.0"},
-      {:bandit, "~> 1.0", only: :test},
+      {:bandit,
+       git: "https://github.com/mtrudel/bandit.git",
+       ref: @bandit_security_ref,
+       override: true,
+       only: :test},
       {:req, "~> 0.5"}
     ]
   end

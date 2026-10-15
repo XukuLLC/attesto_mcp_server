@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.5.0 - 2026-10-15
+
+- Extend automatic AttestoPhoenix installation through the 4.x line while
+  retaining the 2.14 floor and 3.x compatibility. The coordinated source and
+  published-package lanes exercise the new major-version boundary.
+- Make multi-round input requests all-or-nothing when the client lacks any
+  required capability. Tool and prompt retries now validate their original
+  arguments before merging typed input responses, reject response keys that
+  collide with declared arguments, and leave signed request state unconsumed
+  when the client can repair the request.
+- Encode RequestState digests deterministically so clustered nodes agree on
+  map-backed operation and caller bindings. This changes RequestState
+  signatures: a mixed 2.4/2.5 rolling deployment can reject an in-flight
+  multi-round request issued by the other version. RequestState lifetime is
+  capped at 120 seconds, after which clients can begin a fresh round.
+- Re-run the configured authentication `:principal` callback before each
+  matching subscription event is delivered. This refreshes revocation and
+  principal data while preserving the stream's original actor, binding, and
+  tenant. Hosts should keep callback lookups indexed and bounded because their
+  cost now applies once per candidate event and subscriber; rejection or
+  callback failure suppresses that delivery.
+- Reject `javascript:`, `data:`, and `vbscript:` resource identifiers and
+  links. URI checks remain syntactic; hosts that dereference accepted resources
+  must continue to enforce their own destination policy.
+- Bound the built-in URL elicitation store to 10,000 records and 64 MiB by
+  default. Add `url_elicitation_max_entries` and
+  `url_elicitation_max_bytes` for configuring those limits. Admission reclaims
+  enough expired records to avoid a false capacity failure and never evicts a
+  live approval. `UrlElicitationStore.ETS.put/2` now returns
+  `{:error, :already_exists}` for every duplicate key, including consumed
+  records, and `{:error, :capacity}` when no safe space remains.
+- Treat only Plug's exact `%{"_json" => list}` parsed-body wrapper as a
+  top-level JSON array. A JSON-RPC object may use `_json` as an extension key
+  without being mistaken for an unsupported batch.
+- Scope one-time RequestState and cursor secret initialization locks to the
+  local node, and treat an explicitly null token `client_id` like an absent
+  client identifier during stream ownership checks.
+- Temporarily pin the repository's dev/test-only Bandit dependency to upstream
+  commit `d88b21953c65061f21136ea76a89a4f95a2ac7a1`, which contains the official
+  fix for GHSA-69m6-wcv4-rwcf. No patched Hex release exists yet; replace this
+  pin with the first patched release when Bandit publishes one. Runtime
+  consumers do not inherit this repository-only dependency.
+
 ## 2.4.0 - 2026-10-06
 
 - Expose an immutable, bounded snapshot of each request's `_meta` object to

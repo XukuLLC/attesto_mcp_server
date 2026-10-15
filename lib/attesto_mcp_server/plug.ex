@@ -1908,7 +1908,8 @@ defmodule AttestoMCP.Server.Plug do
           trusted_audiences,
           initial_context,
           owner,
-          required_scope_sets
+          required_scope_sets,
+          state.auth_opts
         )
       else
         _ -> false
@@ -2588,9 +2589,7 @@ defmodule AttestoMCP.Server.Plug do
     end)
     |> case do
       {:ok, ranges} ->
-        media_types = Enum.map(ranges, &elem(&1, 0))
-
-        if length(media_types) == length(Enum.uniq(media_types)), do: {:ok, ranges}, else: :error
+        {:ok, ranges}
 
       :error ->
         :error
@@ -3310,7 +3309,8 @@ defmodule AttestoMCP.Server.Plug do
           trusted_audiences,
           context,
           owner,
-          required_scope_sets
+          required_scope_sets,
+          state.auth_opts
         )
       else
         _ -> false
@@ -3330,7 +3330,8 @@ defmodule AttestoMCP.Server.Plug do
          trusted_audiences,
          initial_context,
          owner,
-         required_scope_sets
+         required_scope_sets,
+         auth_opts
        )
        when is_binary(token) do
     claims = Map.get(initial_context, :attesto_mcp_claims) || %{}
@@ -3347,6 +3348,7 @@ defmodule AttestoMCP.Server.Plug do
          ^initial_actor <- token_actor(current_claims),
          current_tenant <- current_claims["tenant"],
          current_scopes when is_list(current_scopes) <- token_scopes(current_claims),
+         :ok <- reauthorize_principal(auth_opts, current_claims, sender),
          true <- context_principal_binding(initial_context) == owner_value(owner, :principal),
          true <- current_tenant == owner_value(owner, :tenant),
          true <- scope_sets_grant?(required_scope_sets, current_scopes) do
@@ -3358,7 +3360,22 @@ defmodule AttestoMCP.Server.Plug do
     _ -> false
   end
 
-  defp reauthorize_delivery?(_, _, _, _, _, _), do: false
+  defp reauthorize_delivery?(_, _, _, _, _, _, _), do: false
+
+  defp reauthorize_principal(auth_opts, claims, sender) when is_list(auth_opts) do
+    case Keyword.get(auth_opts, :principal) do
+      nil ->
+        :ok
+
+      callback ->
+        case HostCallback.invoke(callback, [claims, sender]) do
+          {:ok, principal} when not is_nil(principal) -> :ok
+          _rejected_or_invalid -> :error
+        end
+    end
+  end
+
+  defp reauthorize_principal(_auth_opts, _claims, _sender), do: :error
 
   defp trusted_audience_policy(auth_opts, canonical) do
     case Keyword.fetch(auth_opts, :trusted_audiences) do
@@ -3414,7 +3431,7 @@ defmodule AttestoMCP.Server.Plug do
       {:ok, client_id} when is_binary(client_id) and client_id != "" ->
         {:subject, subject, client_id}
 
-      :error ->
+      client_id when client_id in [:error, {:ok, nil}, {:ok, :null}] ->
         {:subject, subject, nil}
 
       _invalid ->
@@ -3596,11 +3613,17 @@ defmodule AttestoMCP.Server.Plug do
 
   defp read_parsed_body_bounded(conn, body, max) do
     case Jason.encode(body) do
-      {:ok, encoded} when byte_size(encoded) <= max -> {:ok, body, conn}
+      {:ok, encoded} when byte_size(encoded) <= max -> {:ok, unwrap_parsed_json(body), conn}
       {:ok, _encoded} -> {:error, Error.parse(%{"reason" => "body_too_large"})}
       {:error, _reason} -> {:error, Error.parse(%{"reason" => "body_read_failed"})}
     end
   end
+
+  defp unwrap_parsed_json(%{"_json" => value} = body)
+       when is_list(value) and map_size(body) == 1,
+       do: value
+
+  defp unwrap_parsed_json(body), do: body
 
   defp read_unparsed_body_bounded(conn, max) do
     case read_body(conn, length: max) do

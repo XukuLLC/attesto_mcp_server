@@ -64,12 +64,12 @@ defmodule AttestoMCP.Server.Phoenix do
   the adapter callbacks close over the current validated configuration and
   must not be baked into a compiled Phoenix router.
 
-  `attesto_phoenix` 3.x binds each callback to the named profile loaded from
+  `attesto_phoenix` 3.x and 4.x bind each callback to the named profile loaded from
   the `otp_app` argument, so multiple named host profiles remain isolated.
   This helper does not select a profile from `conn.private`. The 2.14
   compatibility path supports one globally configured profile; using it for
   multiple profiles can route persistent replay or revocation reads through
-  that global profile's store. Use `attesto_phoenix` 3.x when serving more than
+  that global profile's store. Use `attesto_phoenix` 3.x or 4.x when serving more than
   one named profile.
 
   This helper fails closed when the optional package or its supported public

@@ -34,13 +34,16 @@ defmodule AttestoMCP.Server.P4RegressionTest do
     refute Map.has_key?(result, "instructions")
   end
 
-  test "mixed MRTR requests are filtered to declared client capabilities" do
+  test "mixed MRTR requests fail on every missing capability without issuing a continuation" do
     {:ok, server} = Server.start_link([])
+    owner = self()
 
     assert :ok =
              Server.register_tool(server, "mixed_inputs", %{
                input_schema: %{"type" => "object"},
                handler: fn _, _ ->
+                 send(owner, :mixed_inputs_called)
+
                  {:input_required,
                   %{
                     "sampling" => %{
@@ -81,13 +84,19 @@ defmodule AttestoMCP.Server.P4RegressionTest do
       }
     end
 
-    assert {1, %{"result" => %{"resultType" => "input_required", "inputRequests" => requests}}} =
+    assert {1,
+            %{
+              "error" => %{
+                "code" => -32021,
+                "data" => %{"requiredCapabilities" => %{"elicitation" => %{}}}
+              }
+            }} =
              Server.dispatch(server, request.(1, %{"sampling" => %{}}), %{principal: "mrtr"},
                version: @modern
              )
 
-    assert map_size(requests) == 1
-    assert [%{"method" => "sampling/createMessage"}] = Map.values(requests)
+    assert_receive :mixed_inputs_called
+    refute_receive :mixed_inputs_called
 
     assert {2,
             %{
@@ -126,6 +135,22 @@ defmodule AttestoMCP.Server.P4RegressionTest do
              "application/json;q=1, text/event-stream;q=1"
            ).status ==
              200
+
+    assert http_conn(
+             server,
+             config,
+             token,
+             "tools/list",
+             "application/json; charset=utf-8, application/json; q=0.8, text/event-stream"
+           ).status == 200
+
+    assert http_conn(
+             server,
+             config,
+             token,
+             "tools/list",
+             "application/json;q=0, application/json;q=0, text/event-stream"
+           ).status == 400
   end
 
   test "Attesto authentication runs before malformed or oversized body work" do

@@ -110,17 +110,21 @@ defmodule AttestoMCP.Server.Cursor do
         value
 
       _ ->
-        :global.trans({{__MODULE__, :secret}, self()}, fn ->
-          case :persistent_term.get({__MODULE__, :secret}, nil) do
-            value when is_binary(value) ->
-              value
+        :global.trans(
+          {{__MODULE__, :secret}, self()},
+          fn ->
+            case :persistent_term.get({__MODULE__, :secret}, nil) do
+              value when is_binary(value) ->
+                value
 
-            _ ->
-              value = :crypto.strong_rand_bytes(32)
-              :persistent_term.put({__MODULE__, :secret}, value)
-              value
-          end
-        end)
+              _ ->
+                value = :crypto.strong_rand_bytes(32)
+                :persistent_term.put({__MODULE__, :secret}, value)
+                value
+            end
+          end,
+          [node()]
+        )
     end
   end
 end

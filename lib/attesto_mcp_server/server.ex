@@ -126,6 +126,8 @@ defmodule AttestoMCP.Server do
     :session_namespace,
     :session_clustered,
     :url_elicitation_store,
+    :url_elicitation_max_entries,
+    :url_elicitation_max_bytes,
     :telemetry_metadata,
     :exception_reporter,
     :handler_task_init,
@@ -2128,7 +2130,12 @@ defmodule AttestoMCP.Server do
   defp setup_url_elicitation_store(opts) do
     case Keyword.get(opts, :url_elicitation_store) do
       nil ->
-        {:ok, store} = AttestoMCP.Server.UrlElicitationStore.ETS.start_link([])
+        {:ok, store} =
+          AttestoMCP.Server.UrlElicitationStore.ETS.start_link(
+            max_entries: opts[:url_elicitation_max_entries],
+            max_bytes: opts[:url_elicitation_max_bytes]
+          )
+
         {AttestoMCP.Server.UrlElicitationStore.ETS, store, false, nil}
 
       {module, store} when is_atom(module) ->
@@ -2197,6 +2204,14 @@ defmodule AttestoMCP.Server do
       |> Keyword.put_new(:legacy_initialized_grace_ms, 50)
       |> Keyword.put_new(:max_request_timeout, 120_000)
       |> Keyword.put_new(:request_state_ttl, 120_000)
+      |> Keyword.put_new(
+        :url_elicitation_max_entries,
+        AttestoMCP.Server.UrlElicitationStore.ETS.default_max_entries()
+      )
+      |> Keyword.put_new(
+        :url_elicitation_max_bytes,
+        AttestoMCP.Server.UrlElicitationStore.ETS.default_max_bytes()
+      )
       |> Keyword.put_new(:max_json_bytes, Schema.default_instance_bytes())
       |> Keyword.put_new(:schema_formats, true)
       |> Keyword.put_new(:output_canonicalization, :strict)
@@ -2356,7 +2371,9 @@ defmodule AttestoMCP.Server do
       :stream_queue_size,
       :subscription_queue_size,
       :session_idle_timeout,
-      :session_absolute_timeout
+      :session_absolute_timeout,
+      :url_elicitation_max_entries,
+      :url_elicitation_max_bytes
     ]
 
     nonnegative = [
@@ -5966,7 +5983,19 @@ defmodule AttestoMCP.Server do
            ),
          {:ok, selected_definition} <-
            authorize_selected_tool(runtime.registry, name, context, opts),
+         :ok <-
+           reject_retry_input_collisions(
+             state_payload,
+             tool_argument_names(selected_definition.input_schema, arguments)
+           ),
          :ok <- validate_input_responses(state_payload, params, runtime.opts),
+         {:ok, handler_arguments} <-
+           prepare_tool_handler_arguments(
+             arguments,
+             input_responses(params, state_payload),
+             selected_definition,
+             runtime
+           ),
          :ok <- consume_retry_state(state_payload, runtime.opts) do
       call_tool_validated(
         params,
@@ -5975,7 +6004,8 @@ defmodule AttestoMCP.Server do
         opts,
         era,
         name,
-        Map.merge(arguments, input_responses(params, state_payload)),
+        arguments,
+        handler_arguments,
         salient,
         operation,
         selected_definition
@@ -5997,6 +6027,9 @@ defmodule AttestoMCP.Server do
           salient,
           operation
         )
+
+      {:error, :invalid_input_requests} ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
 
       {:error, %Error{} = error} ->
         {:error, error}
@@ -6188,6 +6221,42 @@ defmodule AttestoMCP.Server do
   end
 
   defp input_responses(params, _), do: input_responses(params)
+
+  defp request_state_input_keys(nil), do: []
+
+  defp request_state_input_keys(payload) when is_map(payload) do
+    requested =
+      case Map.get(payload, "q", %{}) do
+        value when is_map(value) -> Map.keys(value)
+        _ -> []
+      end
+
+    carried =
+      case Map.get(payload, "a", %{}) do
+        value when is_map(value) -> Map.keys(value)
+        _ -> []
+      end
+
+    Enum.uniq(requested ++ Map.get(payload, "k", []) ++ carried)
+  end
+
+  defp request_state_input_keys(_), do: []
+
+  defp reject_retry_input_collisions(state_payload, disallowed_keys) do
+    reject_input_key_collisions(request_state_input_keys(state_payload), disallowed_keys)
+  end
+
+  defp reject_input_request_collisions(requests, disallowed_keys) when is_map(requests) do
+    reject_input_key_collisions(Map.keys(requests), disallowed_keys)
+  end
+
+  defp reject_input_key_collisions(input_keys, disallowed_keys) do
+    disallowed = MapSet.new(disallowed_keys)
+
+    if Enum.any?(input_keys, &MapSet.member?(disallowed, &1)),
+      do: {:error, :invalid_input_requests},
+      else: :ok
+  end
 
   defp consume_retry_state(nil, _opts), do: :ok
 
@@ -6488,26 +6557,21 @@ defmodule AttestoMCP.Server do
         _ -> %{}
       end
 
-    {supported, missing} =
+    {_supported, missing} =
       Enum.split_with(requests, fn {_key, %{"method" => method}} ->
         capability = input_capability(method)
         Map.has_key?(capabilities, capability)
       end)
 
-    cond do
-      supported != [] ->
-        {:ok, Map.new(supported)}
+    if missing == [] do
+      {:ok, Map.new(requests)}
+    else
+      required =
+        missing
+        |> Enum.map(fn {_key, %{"method" => method}} -> {input_capability(method), %{}} end)
+        |> Map.new()
 
-      missing == [] ->
-        {:ok, %{}}
-
-      true ->
-        required =
-          missing
-          |> Enum.map(fn {_key, %{"method" => method}} -> {input_capability(method), %{}} end)
-          |> Map.new()
-
-        {:error, Error.missing_capability(%{"requiredCapabilities" => required})}
+      {:error, Error.missing_capability(%{"requiredCapabilities" => required})}
     end
   end
 
@@ -6538,6 +6602,7 @@ defmodule AttestoMCP.Server do
          era,
          name,
          arguments,
+         handler_arguments,
          salient,
          operation,
          selected_definition
@@ -6561,101 +6626,118 @@ defmodule AttestoMCP.Server do
       tool when is_map(tool) ->
         handler_context = handler_identity_context(context, :tool, tool)
 
-        with :ok <-
-               Schema.validate(arguments, tool.input_schema, schema_validation_opts(runtime.opts)),
-             handler_arguments <-
-               handler_tool_arguments(
-                 arguments,
-                 tool.input_schema,
-                 runtime.opts[:tool_argument_keys],
-                 tool.handler
-               ),
-             result <-
-               invoke(
-                 tool.handler,
-                 handler_arguments,
-                 handler_context,
-                 opts
-               ) do
-          case result do
-            {:input_required, input} when era == @modern ->
-              with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
-                   {:ok, requests} <- require_input_capabilities(params, requests) do
-                state =
-                  RequestState.issue(
-                    principal(context),
-                    tenant(context),
-                    era,
-                    "tools/call",
-                    salient,
-                    secret: runtime.opts[:request_state_secret],
-                    instance: runtime.opts[:request_state_instance],
-                    ttl: runtime.opts[:request_state_ttl],
-                    request_id: context[:request_id],
-                    operation_identity: operation,
-                    input_keys: Map.keys(requests),
-                    input_types: input_request_types(requests)
-                  )
-
-                Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "tools/call"})
-
-                modern_result(
-                  %{
-                    "resultType" => "input_required",
-                    "inputRequests" => requests,
-                    "requestState" => state
-                  },
-                  runtime.opts
+        case invoke(
+               tool.handler,
+               handler_arguments,
+               handler_context,
+               opts
+             ) do
+          {:input_required, input} when era == @modern ->
+            with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
+                 :ok <-
+                   reject_input_request_collisions(
+                     requests,
+                     tool_argument_names(tool.input_schema, arguments)
+                   ),
+                 {:ok, requests} <- require_input_capabilities(params, requests) do
+              state =
+                RequestState.issue(
+                  principal(context),
+                  tenant(context),
+                  era,
+                  "tools/call",
+                  salient,
+                  secret: runtime.opts[:request_state_secret],
+                  instance: runtime.opts[:request_state_instance],
+                  ttl: runtime.opts[:request_state_ttl],
+                  request_id: context[:request_id],
+                  operation_identity: operation,
+                  input_keys: Map.keys(requests),
+                  input_types: input_request_types(requests)
                 )
-              else
-                {:error, :invalid_input_requests} ->
-                  {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
 
-                {:error, %Error{} = error} ->
-                  {:error, error}
-              end
+              Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "tools/call"})
 
-            {:ok, output_value} ->
-              output = normalize_tool_result(output_value, runtime.opts, handler_context)
-              output = if era == @legacy, do: legacy_tool_result(output), else: output
-              output = filter_tool_result_revision(output, context[:protocol_version])
+              modern_result(
+                %{
+                  "resultType" => "input_required",
+                  "inputRequests" => requests,
+                  "requestState" => state
+                },
+                runtime.opts
+              )
+            else
+              {:error, :invalid_input_requests} ->
+                {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
 
-              output =
-                if not is_nil(tool.output_schema),
-                  do: validate_output(output, tool.output_schema, runtime.opts),
-                  else: output
+              {:error, %Error{} = error} ->
+                {:error, error}
+            end
 
-              if valid_tool_result?(output, runtime.opts) do
-                {:ok,
-                 Map.merge(
-                   output,
-                   if(era == @modern, do: %{"resultType" => "complete"}, else: %{})
-                 )}
-              else
-                {:ok,
-                 %{
-                   "content" => [%{"type" => "text", "text" => "tool output was invalid"}],
-                   "isError" => true,
-                   "resultType" => if(era == @modern, do: "complete", else: nil)
-                 }
-                 |> drop_nil()}
-              end
+          {:ok, output_value} ->
+            output = normalize_tool_result(output_value, runtime.opts, handler_context)
+            output = if era == @legacy, do: legacy_tool_result(output), else: output
+            output = filter_tool_result_revision(output, context[:protocol_version])
 
-            {:error, %Error{} = error} ->
-              {:error, error}
+            output =
+              if not is_nil(tool.output_schema),
+                do: validate_output(output, tool.output_schema, runtime.opts),
+                else: output
 
-            {:error, reason} ->
-              {:ok, tool_error_result(reason, era)}
-          end
-        else
+            if valid_tool_result?(output, runtime.opts) do
+              {:ok,
+               Map.merge(
+                 output,
+                 if(era == @modern, do: %{"resultType" => "complete"}, else: %{})
+               )}
+            else
+              {:ok,
+               %{
+                 "content" => [%{"type" => "text", "text" => "tool output was invalid"}],
+                 "isError" => true,
+                 "resultType" => if(era == @modern, do: "complete", else: nil)
+               }
+               |> drop_nil()}
+            end
+
           {:error, %Error{} = error} ->
             {:error, error}
 
-          {:error, _reason} ->
-            {:error, Error.invalid_params(%{"reason" => "tool_arguments_invalid"})}
+          {:error, reason} ->
+            {:ok, tool_error_result(reason, era)}
         end
     end
   end
+
+  defp prepare_tool_handler_arguments(arguments, responses, tool, runtime) do
+    case Schema.validate(arguments, tool.input_schema, schema_validation_opts(runtime.opts)) do
+      :ok ->
+        with :ok <-
+               reject_input_key_collisions(
+                 Map.keys(responses),
+                 tool_argument_names(tool.input_schema, arguments)
+               ) do
+          {:ok,
+           arguments
+           |> Map.merge(responses)
+           |> handler_tool_arguments(
+             tool.input_schema,
+             runtime.opts[:tool_argument_keys],
+             tool.handler
+           )}
+        end
+
+      _ ->
+        {:error, Error.invalid_params(%{"reason" => "tool_arguments_invalid"})}
+    end
+  end
+
+  defp tool_argument_names(%{"properties" => properties}, arguments)
+       when is_map(properties) and is_map(arguments) do
+    Enum.uniq(Map.keys(arguments) ++ Map.keys(properties))
+  end
+
+  defp tool_argument_names(_schema, arguments) when is_map(arguments), do: Map.keys(arguments)
 
   defp read_resource(params, context, runtime, opts, era) do
     uri = params["uri"]
@@ -7828,111 +7910,115 @@ defmodule AttestoMCP.Server do
              operation,
              runtime.opts
            ),
-         :ok <- validate_input_responses(state_payload, params, runtime.opts),
-         :ok <- consume_retry_state(state_payload, runtime.opts) do
+         :ok <- reject_retry_input_collisions(state_payload, Map.keys(arguments)),
+         :ok <- validate_input_responses(state_payload, params, runtime.opts) do
       case Registry.list(runtime.registry, :prompt)
            |> Enum.filter(&(&1.name == name and visible?(&1, context))) do
         [] ->
           {:error, Error.invalid_params(%{"name" => name})}
 
         [prompt | _] ->
-          prompt_arguments = Map.merge(arguments, input_responses(params, state_payload))
-
-          input_keys =
-            if is_map(state_payload),
-              do:
-                Enum.uniq(
-                  Map.get(state_payload, "k", []) ++ Map.keys(Map.get(state_payload, "a", %{}))
-                ),
-              else: []
-
-          case invoke_prompt(
-                 prompt,
-                 name,
-                 prompt_arguments,
-                 handler_identity_context(context, :prompt, prompt),
-                 input_keys
-               ) do
-            {:input_required, input} when era == @modern ->
-              with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
-                   {:ok, requests} <- require_input_capabilities(params, requests) do
-                request_state =
-                  RequestState.issue(
-                    principal(context),
-                    tenant(context),
-                    era,
-                    "prompts/get",
-                    salient,
-                    secret: runtime.opts[:request_state_secret],
-                    instance: runtime.opts[:request_state_instance],
-                    ttl: runtime.opts[:request_state_ttl],
-                    request_id: context[:request_id],
-                    operation_identity: operation,
-                    input_keys: Map.keys(requests),
-                    input_types: input_request_types(requests)
-                  )
-
-                Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "prompts/get"})
-
-                modern_result(
-                  %{
-                    "resultType" => "input_required",
-                    "inputRequests" => requests,
-                    "requestState" => request_state
-                  },
-                  runtime.opts
-                )
-              else
-                {:error, :invalid_input_requests} ->
-                  {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
-
-                {:error, %Error{} = error} ->
-                  {:error, error}
-              end
-
-            {:ok, content} ->
-              normalized = normalize_prompt_messages(content, runtime.opts)
-
-              normalized =
-                if era == @legacy,
-                  do: Map.drop(normalized, ["resultType" | @cache_hint_fields]),
-                  else: normalized
-
-              normalized = filter_prompt_result_revision(normalized, context[:protocol_version])
-
-              # prompts/get is not a standard cacheable operation. It keeps the
-              # 2.3 extra fields from the global setting, with the same retry
-              # and caller-independence constraints as the standard results.
-              if valid_prompt_result?(normalized, runtime.opts) do
-                {:ok,
-                 Map.merge(
-                   normalized,
-                   if(era == @modern,
-                     do:
-                       Map.merge(
-                         %{"resultType" => "complete"},
-                         cache_hints("prompts/get", runtime.opts, context,
-                           standard?: false,
-                           retry?: not is_nil(state_payload),
-                           invariant?:
-                             unrestricted_definition?(
-                               prompt,
-                               list_options(runtime.opts, opts)
-                             )
-                         )
+          with {:ok, prompt_arguments, input_keys} <-
+                 prepare_prompt_handler_arguments(
+                   prompt,
+                   arguments,
+                   input_responses(params, state_payload),
+                   state_payload
+                 ),
+               :ok <- consume_retry_state(state_payload, runtime.opts) do
+            case invoke_prompt(
+                   prompt,
+                   name,
+                   prompt_arguments,
+                   handler_identity_context(context, :prompt, prompt),
+                   input_keys
+                 ) do
+              {:input_required, input} when era == @modern ->
+                with {:ok, requests} <- normalize_input_requests(input, runtime.opts),
+                     :ok <-
+                       reject_input_request_collisions(
+                         requests,
+                         prompt_argument_names(prompt.arguments)
                        ),
-                     else: %{}
-                   )
-                 )}
-              else
-                {:error, Error.internal(%{"reason" => "invalid_prompt_result"})}
-              end
+                     {:ok, requests} <- require_input_capabilities(params, requests) do
+                  request_state =
+                    RequestState.issue(
+                      principal(context),
+                      tenant(context),
+                      era,
+                      "prompts/get",
+                      salient,
+                      secret: runtime.opts[:request_state_secret],
+                      instance: runtime.opts[:request_state_instance],
+                      ttl: runtime.opts[:request_state_ttl],
+                      request_id: context[:request_id],
+                      operation_identity: operation,
+                      input_keys: Map.keys(requests),
+                      input_types: input_request_types(requests)
+                    )
 
-            {:error, %Error{} = error} ->
-              {:error, error}
+                  Telemetry.execute([:mrtr, :round], %{count: 1}, %{method: "prompts/get"})
 
-            {:error, reason} ->
-              {:error, application_error(reason, %{"reason" => "prompt_handler_failure"})}
+                  modern_result(
+                    %{
+                      "resultType" => "input_required",
+                      "inputRequests" => requests,
+                      "requestState" => request_state
+                    },
+                    runtime.opts
+                  )
+                else
+                  {:error, :invalid_input_requests} ->
+                    {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
+
+                  {:error, %Error{} = error} ->
+                    {:error, error}
+                end
+
+              {:ok, content} ->
+                normalized = normalize_prompt_messages(content, runtime.opts)
+
+                normalized =
+                  if era == @legacy,
+                    do: Map.drop(normalized, ["resultType" | @cache_hint_fields]),
+                    else: normalized
+
+                normalized = filter_prompt_result_revision(normalized, context[:protocol_version])
+
+                # prompts/get is not a standard cacheable operation. It keeps the
+                # 2.3 extra fields from the global setting, with the same retry
+                # and caller-independence constraints as the standard results.
+                if valid_prompt_result?(normalized, runtime.opts) do
+                  {:ok,
+                   Map.merge(
+                     normalized,
+                     if(era == @modern,
+                       do:
+                         Map.merge(
+                           %{"resultType" => "complete"},
+                           cache_hints("prompts/get", runtime.opts, context,
+                             standard?: false,
+                             retry?: not is_nil(state_payload),
+                             invariant?:
+                               unrestricted_definition?(
+                                 prompt,
+                                 list_options(runtime.opts, opts)
+                               )
+                           )
+                         ),
+                       else: %{}
+                     )
+                   )}
+                else
+                  {:error, Error.internal(%{"reason" => "invalid_prompt_result"})}
+                end
+
+              {:error, %Error{} = error} ->
+                {:error, error}
+
+              {:error, reason} ->
+                {:error, application_error(reason, %{"reason" => "prompt_handler_failure"})}
+            end
           end
       end
     else
@@ -7951,6 +8037,9 @@ defmodule AttestoMCP.Server do
           salient,
           operation
         )
+
+      {:error, :invalid_input_requests} ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
 
       {:error, %Error{} = error} ->
         {:error, error}
@@ -8098,6 +8187,27 @@ defmodule AttestoMCP.Server do
         {:error, Error.invalid_params(%{"reason" => "invalid_prompt_arguments"})}
     end
   end
+
+  defp prepare_prompt_handler_arguments(prompt, arguments, responses, state_payload) do
+    input_keys = request_state_input_keys(state_payload)
+
+    with :ok <- reject_input_key_collisions(input_keys, prompt_argument_names(prompt.arguments)),
+         :ok <- validate_prompt_call_arguments(prompt.arguments, arguments, []) do
+      {:ok, Map.merge(arguments, responses), input_keys}
+    else
+      {:error, :invalid_input_requests} ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
+
+      {:error, _reason} ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_prompt_arguments"})}
+    end
+  end
+
+  defp prompt_argument_names(definitions) when is_list(definitions) do
+    Enum.map(definitions, fn argument -> argument[:name] || argument["name"] end)
+  end
+
+  defp prompt_argument_names(_), do: []
 
   defp listen(params, context, runtime) do
     notifications = params["notifications"]

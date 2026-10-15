@@ -166,6 +166,181 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
              )
   end
 
+  test "strict tool schemas validate raw arguments before merging typed responses" do
+    server = start_server()
+    owner = self()
+
+    :ok =
+      Server.register_tool(server, "strict-input", %{
+        input_schema: %{
+          "type" => "object",
+          "properties" => %{"query" => %{"type" => "string"}},
+          "required" => ["query"],
+          "additionalProperties" => false
+        },
+        handler: fn arguments, _ ->
+          send(owner, {:strict_input, arguments})
+
+          if Map.has_key?(arguments, "approval"),
+            do: {:ok, arguments},
+            else: {:input_required, %{"approval" => form_input_request()}}
+        end
+      })
+
+    params =
+      repair_params(%{
+        "name" => "strict-input",
+        "arguments" => %{"query" => "status"}
+      })
+
+    context = %{principal: "strict-input"}
+
+    assert {20, %{"result" => %{"requestState" => state}}} =
+             repair_dispatch(server, 20, "tools/call", params, context)
+
+    assert_receive {:strict_input, %{"query" => "status"}}
+
+    approval = %{"action" => "accept", "content" => %{"value" => "approved"}}
+
+    retry =
+      Map.merge(params, %{
+        "requestState" => state,
+        "inputResponses" => %{"approval" => approval}
+      })
+
+    assert {21,
+            %{
+              "result" => %{
+                "resultType" => "complete",
+                "structuredContent" => %{
+                  "query" => "status",
+                  "approval" => ^approval
+                }
+              }
+            }} = repair_dispatch(server, 21, "tools/call", retry, context)
+
+    assert_receive {:strict_input, %{"query" => "status", "approval" => ^approval}}
+
+    assert {22,
+            %{"error" => %{"code" => -32602, "data" => %{"reason" => "invalid_request_state"}}}} =
+             repair_dispatch(server, 22, "tools/call", retry, context)
+  end
+
+  test "tool and prompt input requests cannot collide with argument names" do
+    server = start_server()
+    owner = self()
+
+    :ok =
+      Server.register_tool(server, "tool-collision", %{
+        input_schema: %{
+          "type" => "object",
+          "properties" => %{"choice" => %{"type" => "string"}},
+          "additionalProperties" => false
+        },
+        handler: fn arguments, _ ->
+          send(owner, {:tool_collision, arguments})
+          {:input_required, %{"choice" => form_input_request()}}
+        end
+      })
+
+    tool_params =
+      repair_params(%{
+        "name" => "tool-collision",
+        "arguments" => %{"choice" => "original"}
+      })
+
+    assert {30,
+            %{"error" => %{"code" => -32602, "data" => %{"reason" => "invalid_input_requests"}}}} =
+             repair_dispatch(server, 30, "tools/call", tool_params, %{principal: "collision"})
+
+    assert_receive {:tool_collision, %{"choice" => "original"}}
+
+    :ok =
+      Server.register_prompt(server, "prompt-collision", %{
+        arguments: [%{"name" => "approval", "required" => false}],
+        handler: fn %{arguments: arguments}, _ ->
+          send(owner, {:prompt_collision, arguments})
+          {:input_required, %{"approval" => form_input_request()}}
+        end
+      })
+
+    prompt_params =
+      repair_params(%{
+        "name" => "prompt-collision",
+        "arguments" => %{}
+      })
+
+    assert {31,
+            %{"error" => %{"code" => -32602, "data" => %{"reason" => "invalid_input_requests"}}}} =
+             repair_dispatch(server, 31, "prompts/get", prompt_params, %{principal: "collision"})
+
+    assert_receive {:prompt_collision, %{}}
+  end
+
+  test "tool retry input keys cannot collide with omitted schema properties and rejection is retryable" do
+    server = start_server()
+    owner = self()
+
+    handler = fn arguments, _ ->
+      send(owner, {:optional_collision, arguments})
+
+      if Map.has_key?(arguments, "approval"),
+        do: {:ok, arguments},
+        else: {:input_required, %{"approval" => form_input_request()}}
+    end
+
+    original =
+      {:tool, "optional-collision",
+       %{
+         input_schema: %{"type" => "object"},
+         handler: handler
+       }}
+
+    assert :ok = Server.replace_catalog(server, [original])
+
+    params = repair_params(%{"name" => "optional-collision", "arguments" => %{}})
+    context = %{principal: "optional-collision"}
+
+    assert {32, %{"result" => %{"requestState" => state}}} =
+             repair_dispatch(server, 32, "tools/call", params, context)
+
+    assert_receive {:optional_collision, %{}}
+
+    colliding =
+      {:tool, "optional-collision",
+       %{
+         input_schema: %{
+           "type" => "object",
+           "properties" => %{"approval" => %{"type" => "string"}},
+           "additionalProperties" => false
+         },
+         handler: handler
+       }}
+
+    assert :ok = Server.replace_catalog(server, [colliding])
+
+    approval = %{"action" => "accept", "content" => %{"value" => "approved"}}
+
+    retry =
+      Map.merge(params, %{
+        "requestState" => state,
+        "inputResponses" => %{"approval" => approval}
+      })
+
+    assert {33,
+            %{"error" => %{"code" => -32602, "data" => %{"reason" => "invalid_input_requests"}}}} =
+             repair_dispatch(server, 33, "tools/call", retry, context)
+
+    refute_receive {:optional_collision, _}
+
+    assert :ok = Server.replace_catalog(server, [original])
+
+    assert {34, %{"result" => %{"resultType" => "complete"}}} =
+             repair_dispatch(server, 34, "tools/call", retry, context)
+
+    assert_receive {:optional_collision, %{"approval" => ^approval}}
+  end
+
   test "partial retries re-request only missing inputs, preserve validated answers, and remain bound and single-use" do
     server = start_server()
     owner = self()

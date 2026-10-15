@@ -385,6 +385,23 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert length(:binary.matches(phoenix_three_mix, ~s({:attesto_phoenix, "~> 3.0"}))) == 1
     assert phoenix_three_mix =~ ~s({:attesto_phoenix, "~> 3.0"})
 
+    phoenix_four =
+      true
+      |> project(attesto_phoenix_requirement: "~> 4.0")
+      |> install(["--base-url", "https://mcp.example.com"])
+
+    assert phoenix_four.issues == []
+
+    phoenix_four_mix =
+      phoenix_four
+      |> apply_igniter!()
+      |> Map.fetch!(:rewrite)
+      |> Rewrite.source!("mix.exs")
+      |> Rewrite.Source.get(:content)
+
+    assert length(:binary.matches(phoenix_four_mix, ~s({:attesto_phoenix, "~> 4.0"}))) == 1
+    assert phoenix_four_mix =~ ~s({:attesto_phoenix, "~> 4.0"})
+
     phoenix_ceiling =
       true
       |> project(attesto_phoenix_requirement: ">= 2.14.1 and < 5.0.0")
@@ -392,8 +409,19 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
 
     assert phoenix_ceiling.issues == []
 
-    assert Igniter.Test.diff(phoenix_ceiling) =~
-             ~s({:attesto_phoenix, ">= 2.14.1 and < 4.0.0"})
+    phoenix_ceiling_mix =
+      phoenix_ceiling
+      |> apply_igniter!()
+      |> Map.fetch!(:rewrite)
+      |> Rewrite.source!("mix.exs")
+      |> Rewrite.Source.get(:content)
+
+    assert length(
+             :binary.matches(
+               phoenix_ceiling_mix,
+               ~s({:attesto_phoenix, ">= 2.14.1 and < 5.0.0"})
+             )
+           ) == 1
 
     partial =
       true
@@ -463,14 +491,13 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       [req_dependency: ~s({:req, "~> 0.7", [:not_a_keyword_option]})],
       [attesto_phoenix_requirement: "2.13.0"],
       [attesto_phoenix_requirement: "< 2.14.1"],
-      [attesto_phoenix_requirement: "~> 4.0"],
       [
         attesto_phoenix_dependency:
-          ~s({:attesto_phoenix, ">= 2.14.1 and < 4.0.0", git: "https://example.com/attesto_phoenix.git"})
+          ~s({:attesto_phoenix, ">= 2.14.1 and < 5.0.0", git: "https://example.com/attesto_phoenix.git"})
       ],
       [
         attesto_phoenix_dependency:
-          ~s({:attesto_phoenix, ">= 2.14.1 and < 4.0.0", path: "../attesto_phoenix"})
+          ~s({:attesto_phoenix, ">= 2.14.1 and < 5.0.0", path: "../attesto_phoenix"})
       ]
     ]
 

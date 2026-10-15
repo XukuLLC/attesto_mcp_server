@@ -64,6 +64,13 @@ defmodule AttestoMCP.Server.P2ASchemaResourceTest do
 
     assert {:error, {:invalid_definition, :uri}} =
              Server.Registry.register(registry, :resource, "http://localhost/private", %{})
+
+    for uri <- ["javascript:alert(1)", "DaTa:text/plain,unsafe", "vbscript:msgbox(1)"] do
+      assert {:error, {:invalid_definition, :uri}} =
+               Server.Registry.register(registry, :resource, uri, %{})
+    end
+
+    assert :ok = Server.Registry.register(registry, :resource, "git:commit:abc123", %{})
   end
 
   test "resource URI templates dispatch captured variables and reject traversal" do

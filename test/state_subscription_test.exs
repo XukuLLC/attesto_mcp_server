@@ -24,6 +24,26 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
              RequestState.verify(other, "bob", "tenant-a", "2026-07-28", "tools/call", %{"n" => 1})
   end
 
+  test "request state digests wide atom-keyed terms deterministically" do
+    principal =
+      Map.new(1..40, fn index -> {String.to_atom("principal_field_#{index}"), index} end)
+
+    state =
+      RequestState.issue(principal, nil, "2026-07-28", "tools/call", %{},
+        secret: "deterministic-secret",
+        ttl: 5_000
+      )
+
+    [encoded, _signature] = String.split(state, ".", parts: 2)
+    payload = encoded |> Base.url_decode64!(padding: false) |> Jason.decode!()
+
+    expected =
+      :crypto.hash(:sha256, :erlang.term_to_binary(principal, [:deterministic]))
+      |> Base.url_encode64(padding: false)
+
+    assert payload["p"] == expected
+  end
+
   test "subscriptions acknowledge filters and deliver only matching events" do
     {:ok, subscriptions} = Subscriptions.start_link([])
 

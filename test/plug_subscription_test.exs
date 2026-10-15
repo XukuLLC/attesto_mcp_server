@@ -10,6 +10,10 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
   @version "2026-07-28"
   @legacy "2025-11-25"
 
+  def telemetry_handler(event, measurements, metadata, parent) do
+    send(parent, {:telemetry_event, event, measurements, metadata})
+  end
+
   test "delivery verifier options reject mismatched sender bindings" do
     config = AttestoMCP.Test.Factory.config()
     verify_opts = [expected_typ: "access", trusted_audiences: [@resource]]
@@ -235,10 +239,14 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     refute Process.alive?(pid)
   end
 
-  test "DPoP subscription delivery retains custom auth assigns without reloading an opaque principal" do
+  test "DPoP subscription delivery rechecks the principal and suppresses events after revocation" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()
     parent = self()
+    event = [:attesto_mcp_server, :subscription, :suppressed]
+    handler_id = {__MODULE__, :principal_recheck, make_ref()}
+    :ok = :telemetry.attach(handler_id, event, &__MODULE__.telemetry_handler/4, parent)
+    on_exit(fn -> :telemetry.detach(handler_id) end)
 
     policy =
       start_supervised!({Agent, fn -> %{allowed: true, calls: 0} end})
@@ -301,8 +309,17 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     assert :ok = await_subscriptions(server, 1)
 
     assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
-    refute_receive {:principal_policy, 2, _allowed, _sender}, 50
-    assert Agent.get(policy, & &1.calls) == 1
+    assert_receive {:principal_policy, 2, true, %{binding: :dpop, jkt: ^jkt}}, 1_000
+
+    Agent.update(policy, &%{&1 | allowed: false})
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    assert_receive {:principal_policy, 3, false, %{binding: :dpop, jkt: ^jkt}}, 1_000
+
+    assert_receive {:telemetry_event, ^event, %{count: 1},
+                    %{reason: :authorization, transport: :core}},
+                   1_000
+
+    assert Agent.get(policy, & &1.calls) == 3
 
     Server.close_subscription(server, id, pid)
 
@@ -401,7 +418,175 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     refute Process.alive?(pid)
   end
 
-  test "legacy DPoP stream delivery retains its sender binding and opaque principal" do
+  test "subscription delivery accepts an explicit null optional client_id" do
+    {:ok, server} = Server.start_link([])
+    base_config = AttestoMCP.Test.Factory.config()
+    parent = self()
+
+    config = %{
+      base_config
+      | principal_kinds: [Attesto.PrincipalKind.new("user", "usr_")]
+    }
+
+    {:ok, %{access_token: token}} =
+      Attesto.Token.mint(config, %{
+        claims: %{"client_id" => nil},
+        kind: "user",
+        scopes: [AttestoMCP.Scopes.tools_read()],
+        sub: "usr_123"
+      })
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [
+          config: config,
+          resource: @resource,
+          principal: fn claims, _sender ->
+            send(parent, {:null_client_principal, claims["client_id"]})
+            {:ok, claims["sub"]}
+          end
+        ]
+      )
+
+    id = 115
+    pid = start_stream(self(), plug, token, id, %{"toolsListChanged" => true})
+
+    assert_receive {:null_client_principal, :null}, 1_000
+    assert :ok = await_subscriptions(server, 1)
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    assert_receive {:null_client_principal, :null}, 1_000
+    Server.close_subscription(server, id, pid)
+
+    assert_receive {:subscription_done, ^id, conn}, 2_000
+
+    assert Enum.map(stream_messages(conn), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             "notifications/tools/list_changed",
+             nil
+           ]
+
+    refute Process.alive?(pid)
+  end
+
+  test "Phoenix subscription delivery reruns revocation and principal loading" do
+    config_module = Module.concat([AttestoPhoenix, Config])
+    adapter_module = Module.concat([AttestoPhoenix, DPoP, Adapter])
+    protected_resource_module = Module.concat([AttestoPhoenix, ProtectedResource])
+    callback_module = Module.concat([AttestoPhoenix, Callback])
+
+    modules = [callback_module, protected_resource_module, adapter_module, config_module]
+
+    Enum.each(modules, fn module ->
+      :code.purge(module)
+      :code.delete(module)
+    end)
+
+    config = AttestoMCP.Test.Factory.config()
+    policy = start_supervised!({Agent, fn -> true end})
+
+    runtime_key = {
+      __MODULE__,
+      :phoenix_stream_reauthorization,
+      System.unique_integer([:positive, :monotonic])
+    }
+
+    :persistent_term.put(runtime_key, %{config: config, owner: self(), policy: policy})
+
+    on_exit(fn ->
+      :persistent_term.erase(runtime_key)
+
+      Enum.each(modules, fn module ->
+        :code.purge(module)
+        :code.delete(module)
+      end)
+    end)
+
+    Module.create(
+      config_module,
+      quote do
+        def from_otp_app(:stream_reauthorization),
+          do: :persistent_term.get(unquote(Macro.escape(runtime_key)))
+
+        def to_attesto_config(%{config: config}), do: config
+
+        def load_principal_fun(%{owner: owner}),
+          do: {__MODULE__, :load_principal, [owner]}
+
+        def load_principal(subject, owner) do
+          send(owner, {:phoenix_principal_loaded, subject})
+          {:ok, %{subject: subject}}
+        end
+      end,
+      Macro.Env.location(__ENV__)
+    )
+
+    Module.create(
+      adapter_module,
+      quote do
+        def protected_resource_opts(_config), do: []
+      end,
+      Macro.Env.location(__ENV__)
+    )
+
+    Module.create(
+      protected_resource_module,
+      quote do
+        def access_token_revoked?(%{owner: owner, policy: policy}, claims) do
+          active? = Agent.get(policy, & &1)
+          send(owner, {:phoenix_revocation_checked, claims["sub"], active?})
+          not active?
+        end
+      end,
+      Macro.Env.location(__ENV__)
+    )
+
+    Module.create(
+      callback_module,
+      quote do
+        def invoke({module, function, extra}, args), do: apply(module, function, args ++ extra)
+      end,
+      Macro.Env.location(__ENV__)
+    )
+
+    auth_opts =
+      :stream_reauthorization
+      |> AttestoMCP.Server.Phoenix.protected_resource_options()
+      |> Keyword.put(:resource, @resource)
+
+    {:ok, server} = Server.start_link([])
+
+    token =
+      AttestoMCP.Test.Factory.access_token(config,
+        scopes: [AttestoMCP.Scopes.tools_read()]
+      )
+
+    plug = AttestoMCP.Server.Plug.init(server: server, path: "/mcp", auth: auth_opts)
+    id = 116
+    pid = start_stream(self(), plug, token, id, %{"toolsListChanged" => true})
+
+    assert_receive {:phoenix_revocation_checked, "usr_123", true}, 1_000
+    assert_receive {:phoenix_principal_loaded, "usr_123"}, 1_000
+    assert :ok = await_subscriptions(server, 1)
+
+    Agent.update(policy, fn _active? -> false end)
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    assert_receive {:phoenix_revocation_checked, "usr_123", false}, 1_000
+    refute_receive {:phoenix_principal_loaded, "usr_123"}, 50
+
+    Server.close_subscription(server, id, pid)
+    assert_receive {:subscription_done, ^id, conn}, 2_000
+
+    assert Enum.map(stream_messages(conn), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             nil
+           ]
+
+    refute Process.alive?(pid)
+  end
+
+  test "legacy DPoP stream rechecks the principal and suppresses events after revocation" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()
     parent = self()
@@ -473,14 +658,21 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     assert :ok = await_legacy_streams(server, 1)
 
     assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
-    refute_receive {:principal_policy, 3, _allowed, _sender}, 50
-    assert Agent.get(policy, & &1.calls) == 2
+    assert_receive {:principal_policy, 3, true, %{binding: :dpop, jkt: ^jkt}}, 1_000
+
+    Agent.update(policy, &%{&1 | allowed: false})
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    assert_receive {:principal_policy, 4, false, %{binding: :dpop, jkt: ^jkt}}, 1_000
+    assert Agent.get(policy, & &1.calls) == 4
 
     assert :ok = Server.delete_session(server, session_id)
     assert_receive {:legacy_stream_done, conn}, 2_000
     assert conn.status == 200
     assert conn.resp_body =~ ": keepalive"
     assert conn.resp_body =~ "notifications/tools/list_changed"
+
+    assert length(Regex.scan(~r/notifications\/tools\/list_changed/, conn.resp_body)) == 1
+
     refute Process.alive?(pid)
   end
 

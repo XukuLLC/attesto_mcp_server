@@ -214,8 +214,7 @@ defmodule OAuthHost.IntegrationTest do
       refute_received :tool_invoked
     end
 
-    {params, transaction} =
-      authorization_response(ctx.store, host, opts, %{"dpop_jkt" => JOSE.JWK.thumbprint(key)})
+    {params, transaction} = authorization_response(ctx.store, host, opts, dpop: key)
 
     assert {:error, {:oauth_error, 400, %{"error" => "invalid_grant"}}} =
              OAuthHTTP.post_form(
@@ -232,8 +231,7 @@ defmodule OAuthHost.IntegrationTest do
   defp authorize(store, _host, opts, options \\ []) do
     key = Keyword.get(options, :dpop)
     extra = %{"resource" => Keyword.get(options, :resource, OAuthHost.resource())}
-    extra = if key, do: Map.put(extra, "dpop_jkt", JOSE.JWK.thumbprint(key)), else: extra
-    assert {:ok, %{url: url}} = AuthorizationCode.start(store, start_options(opts, extra))
+    assert {:ok, %{url: url}} = AuthorizationCode.start(store, start_options(opts, extra, key))
     assert {:ok, response} = Req.get(url, Keyword.put(opts, :redirect, false))
     assert response.status == 302
     [location] = Req.Response.get_header(response, "location")
@@ -249,11 +247,13 @@ defmodule OAuthHost.IntegrationTest do
     {callback, result}
   end
 
-  defp authorization_response({TransactionStore, pid} = store, _host, opts, extra \\ %{}) do
+  defp authorization_response({TransactionStore, pid} = store, _host, opts, options \\ []) do
+    key = Keyword.get(options, :dpop)
+
     assert {:ok, %{url: url, state: state}} =
              AuthorizationCode.start(
                store,
-               start_options(opts, Map.merge(%{"resource" => OAuthHost.resource()}, extra))
+               start_options(opts, %{"resource" => OAuthHost.resource()}, key)
              )
 
     assert {:ok, transaction} = TransactionStore.take(pid, state)
@@ -263,8 +263,8 @@ defmodule OAuthHost.IntegrationTest do
     {URI.decode_query(URI.parse(location).query), transaction}
   end
 
-  defp start_options(opts, extra),
-    do: [
+  defp start_options(opts, extra, dpop) do
+    options = [
       issuer: OAuthHost.issuer(),
       client_id: OAuthHost.client_id(),
       redirect_uri: OAuthHost.redirect_uri(),
@@ -274,6 +274,9 @@ defmodule OAuthHost.IntegrationTest do
       authorization_params: extra,
       req_options: opts
     ]
+
+    if dpop, do: Keyword.put(options, :dpop, dpop), else: options
+  end
 
   defp redemption(params, verifier),
     do: %{

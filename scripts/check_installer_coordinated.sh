@@ -113,7 +113,7 @@ digest_tree() {
   # The automatic Phoenix installer intentionally accepts only literal public
   # Hex requirements. This source-linked lane therefore installs through the
   # explicit callback path, then executes that callback through the real
-  # AttestoPhoenix 3 bridge below. The published-dependency compatibility lane
+  # AttestoPhoenix 4 bridge below. The published-dependency compatibility lane
   # separately exercises the complete automatic path against released packages.
 
   elixir -e '
@@ -293,7 +293,7 @@ digest_tree() {
     expected = [
       {:attesto, ">= 2.0.0 and < 3.0.0"},
       {:attesto_mcp, ">= 1.3.0 and < 2.0.0"},
-      {:attesto_phoenix, ">= 3.0.0 and < 4.0.0"}
+      {:attesto_phoenix, ">= 4.0.0 and < 5.0.0"}
     ]
 
     for {app, requirement} <- expected do

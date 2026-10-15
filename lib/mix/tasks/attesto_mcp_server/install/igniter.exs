@@ -5,7 +5,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
   @moduledoc Mix.Tasks.AttestoMcpServer.Install.Docs.long_doc()
   @example Mix.Tasks.AttestoMcpServer.Install.Docs.example()
   @origin_pattern ~r/\A(https?):\/\/(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?\/?\z/i
-  @attesto_phoenix_requirement ">= 2.14.1 and < 4.0.0"
+  @attesto_phoenix_requirement ">= 2.14.1 and < 5.0.0"
   @req_requirement ">= 0.6.1 and < 1.0.0"
   @max_version_component 99_999_999_999_999
   @max_session_namespace_bytes 256

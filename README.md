@@ -36,7 +36,7 @@ using a dedicated Elixir 1.18+ runtime.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 2.14.1 and < 4.0.0`:
+version compatible with `>= 2.14.1 and < 5.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -61,7 +61,7 @@ The installer:
 - adds a starter `server_status` tool and registration test.
 
 If one Phoenix host serves multiple named authorization profiles, use
-`attesto_phoenix` 3.x. The automatic integration keeps each profile's runtime
+`attesto_phoenix` 3.x or 4.x. The automatic integration keeps each profile's runtime
 callbacks isolated. The 2.14 compatibility path supports one globally
 configured profile; using it for multiple profiles can route persistent replay
 or revocation reads through that global profile's store.
@@ -395,13 +395,13 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 2.4"}]
+  [{:attesto_mcp_server, "~> 2.5"}]
 end
 ```
 
 Supervise `AttestoMCP.Server`, register definitions through
 `AttestoMCP.Server.API`, and mount `AttestoMCP.Server.Plug` directly. The
-[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.4.0/examples/bandit.exs) program demonstrates direct server
+[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.5.0/examples/bandit.exs) program demonstrates direct server
 startup, registration, and the protected Plug; the [usage guide](docs/usage.md)
 documents the transport and authentication options. Router and supervision
 wiring remain specific to the host. It also includes a
@@ -412,7 +412,7 @@ The production library depends on Plug rather than a particular HTTP server.
 Bandit is the documented development/test adapter. The loopback example returns
 401 until given a valid credential. The stdio adapter is available through
 `AttestoMCP.Server.Stdio.run/2` and
-[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.4.0/examples/stdio.exs).
+[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.5.0/examples/stdio.exs).
 
 ## Add features as needed
 

@@ -509,6 +509,72 @@ defmodule AttestoMCP.Server.P12TransportTest do
     assert Jason.decode!(response.resp_body)["result"]["protocolVersion"] == @legacy
   end
 
+  test "POST reports a pre-parsed top-level JSON array as an unsupported batch" do
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    {:ok, server} = Server.start_link([])
+
+    plug =
+      Server.Plug.init(server: server, path: "/mcp", auth: [config: config, resource: @resource])
+
+    batch = [%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}]
+    parser = Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
+
+    parsed_conn =
+      conn(:post, "/mcp", Jason.encode!(batch))
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> Plug.Parsers.call(parser)
+
+    assert parsed_conn.body_params == %{"_json" => batch}
+
+    response = Server.Plug.call(parsed_conn, plug)
+
+    assert response.status == 400
+
+    assert Jason.decode!(response.resp_body)["error"] == %{
+             "code" => -32600,
+             "data" => %{"reason" => "batch_not_supported"},
+             "message" => "Invalid Request"
+           }
+  end
+
+  test "POST preserves a JSON-RPC object that has an _json extension alongside other keys" do
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    {:ok, server} = Server.start_link([])
+
+    plug =
+      Server.Plug.init(server: server, path: "/mcp", auth: [config: config, resource: @resource])
+
+    payload = %{
+      "jsonrpc" => "2.0",
+      "id" => 2,
+      "method" => "tools/list",
+      "params" => modern_meta(),
+      "_json" => [%{"application" => "extension-data"}]
+    }
+
+    parser = Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
+
+    parsed_conn =
+      conn(:post, "/mcp", Jason.encode!(payload))
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> put_req_header("mcp-method", payload["method"])
+      |> put_req_header("mcp-protocol-version", @modern)
+      |> Plug.Parsers.call(parser)
+
+    assert parsed_conn.body_params == payload
+
+    response = Server.Plug.call(parsed_conn, plug)
+
+    assert response.status == 200
+    assert %{"id" => 2, "result" => %{"tools" => []}} = Jason.decode!(response.resp_body)
+  end
+
   test "POST reads raw JSON left behind by a pass-through parser" do
     config = AttestoMCP.Test.Factory.config()
     token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())

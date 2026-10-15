@@ -47,7 +47,7 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
-Use `attesto_phoenix` 3.x when one Phoenix host serves multiple named profiles.
+Use `attesto_phoenix` 3.x or 4.x when one Phoenix host serves multiple named profiles.
 It binds each automatic protected-resource callback to the named profile
 loaded from the `otp_app` passed to the helper, keeping those profiles
 isolated. It does not select a profile from `conn.private`. The 2.14
@@ -175,7 +175,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 2.14.1 and < 4.0.0` and Req requirements that overlap
+overlap `>= 2.14.1 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -476,7 +476,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 2.4"},
+    {:attesto_mcp_server, "~> 2.5"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -585,10 +585,13 @@ access token's validity, audience, sender binding, applicable scopes, and any
 matched resource definition scopes before modern or session-bound
 subscription-notification delivery.
 Comparisons with the opening token actor, principal binding, and tenant preserve
-the authenticated stream's ownership snapshot; they do not re-run host policy.
-Host revocation, principal, and mount-authorization callbacks run when the
-stream is authenticated, not inside shared publish processes; a later
-host-policy change applies on the next request or reconnect. An `issuer:`
+the authenticated stream's ownership snapshot. When `:principal` is configured,
+the server invokes it again with the freshly verified claims and the established
+sender context before each matching event. The Phoenix integration therefore
+rechecks token revocation and reloads the principal for every delivery. Keep
+those lookups indexed and bounded; rejection, an invalid return, or a callback
+failure suppresses the event. Mount authorization still runs only when the
+stream is authenticated. An `issuer:`
 without a verifier configuration is
 metadata-only: it may serve RFC 9728 metadata, but protected traffic fails
 closed until the host supplies an executable Attesto configuration.
@@ -1038,9 +1041,10 @@ alternative.
 Subscriptions are outside this callback contract. Establishment does not
 consult a resource definition's `authorize`, and subscription-notification
 delivery reauthorization checks the captured identity, sender binding,
-applicable scopes, and any matched resource definition scopes rather than
-re-running host business policy. Apply changed host policy on the next request
-or reconnect, and do not rely on `authorize` to suppress subscription updates.
+applicable scopes, any matched resource definition scopes, and the configured
+authentication `:principal` callback. It does not invoke a definition's
+`authorize` callback, so do not rely on that callback to suppress subscription
+updates.
 
 ### Limits and scope policy
 
@@ -1625,8 +1629,16 @@ The browser-side binding must be derived from the same source as the
 transport's `:principal_binding`; otherwise every link resolves as foreign.
 
 Records live in the server's `url_elicitation_store`. The default is an
-in-process store owned by the server, suitable for a single node. Clustered
-deployments configure `url_elicitation_store: {AttestoMCP.Server.UrlElicitationStore.Ecto, store}`
+in-process store owned by the server, suitable for a single node. It defaults
+to at most 10,000 live records and 64 MiB of approximate external-term data;
+configure those bounds with `url_elicitation_max_entries:` and
+`url_elicitation_max_bytes:`. When either limit is reached, staging fails
+closed instead of evicting an unexpired approval. Before reporting capacity,
+the store synchronously scans at most its configured entry bound and reclaims
+as many expired records as the new record needs; periodic cleanup remains
+limited to 1,000 records per sweep. These options apply only to the built-in
+store. Clustered deployments configure
+`url_elicitation_store: {AttestoMCP.Server.UrlElicitationStore.Ecto, store}`
 with a handle from `AttestoMCP.Server.UrlElicitationStore.Ecto.new/1`
 (`repo:`, `namespace:` matching `session_namespace`, optional
 `schema_prefix:`). `mix attesto_mcp_server.gen.migration` generates the

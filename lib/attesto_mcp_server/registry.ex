@@ -1014,10 +1014,14 @@ defmodule AttestoMCP.Server.Registry do
   defp valid_uri(uri) when is_binary(uri) and byte_size(uri) in 1..@max_identity_bytes do
     parsed = URI.parse(uri)
     host = parsed.host || ""
+    scheme = parsed.scheme && String.downcase(parsed.scheme)
 
+    # URI validation here is syntactic hardening. A host that dereferences a
+    # registered identifier must apply its own destination policy.
     String.valid?(uri) and not String.contains?(uri, ["..", "\\", "\u0000", "\r", "\n"]) and
       is_nil(parsed.userinfo) and
       host not in ["localhost", "127.0.0.1", "::1", "0.0.0.0"] and
+      scheme not in ["javascript", "data", "vbscript"] and
       (String.starts_with?(uri, ["http://", "https://", "urn:", "file:", "/"]) or
          parsed.scheme not in [nil, ""])
       |> bool_ok(:uri)

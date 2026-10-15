@@ -33,7 +33,7 @@ the boundary without setting up a login flow.
 In an existing Elixir project, add the dependency and fetch it:
 
 ```elixir
-{:attesto_mcp_server, "~> 2.4"}
+{:attesto_mcp_server, "~> 2.5"}
 ```
 
 ```sh
@@ -88,7 +88,7 @@ covers both forms and catalog replacement.
 The shortest deployed HTTP path assumes a working Phoenix application with
 AttestoPhoenix already issuing tokens. Run inside the Phoenix child application,
 with Igniter available and a direct Hex dependency on `attesto_phoenix`
-compatible with `>= 2.14.1 and < 4.0.0`.
+compatible with `>= 2.14.1 and < 5.0.0`.
 
 If the Igniter task is not available, add it to the host's development
 dependencies and run `mix deps.get` first:
@@ -129,7 +129,7 @@ mix phx.server
 For loopback development, use
 `--base-url http://127.0.0.1:4000 --allow-http-loopback`. Production origins
 use HTTPS. Applications with multiple named authorization profiles should
-use AttestoPhoenix 3.x. See the
+use AttestoPhoenix 3.x or 4.x. See the
 [Phoenix reference](usage.md#phoenix-installation) for prerequisites, manual
 wiring, CIMD, metadata reuse, and installer recovery.
 
@@ -146,7 +146,7 @@ Supply these pieces through the host application's supervision and routing:
 
 Start from the Livebook for a complete authenticated Bandit example. The
 [Bandit reference](usage.md#bandit-development-server) explains direct wiring;
-[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.4.0/examples/bandit.exs) is a credential-free boundary
+[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.5.0/examples/bandit.exs) is a credential-free boundary
 example that returns 401 until configured with a valid key and credential.
 Setting an issuer URL alone does not supply a token verifier. See
 [Attesto and resource metadata](usage.md#attesto-and-resource-metadata) for

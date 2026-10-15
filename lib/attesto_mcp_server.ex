@@ -109,6 +109,8 @@ defmodule AttestoMCP.Server.API do
           | {:session_namespace, String.t()}
           | {:session_clustered, boolean()}
           | {:url_elicitation_store, AttestoMCP.Server.UrlElicitationStore.adapter()}
+          | {:url_elicitation_max_entries, pos_integer()}
+          | {:url_elicitation_max_bytes, pos_integer()}
           | {:telemetry_metadata, map()}
           | {:exception_reporter, term()}
           | {:handler_task_init, term()}

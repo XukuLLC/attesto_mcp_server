@@ -113,10 +113,123 @@ defmodule AttestoMCP.Server.ServerUrlElicitationTest do
     for invalid_opts <- [
           [url_elicitation_store: "not_a_tuple"],
           [url_elicitation_store: {:not_a_module, :store}],
-          [url_elicitation_store: {IncompleteStore, :store}]
+          [url_elicitation_store: {IncompleteStore, :store}],
+          [url_elicitation_max_entries: 0],
+          [url_elicitation_max_entries: "10"],
+          [url_elicitation_max_bytes: 0],
+          [url_elicitation_max_bytes: "1024"]
         ] do
       assert {:error, {%ArgumentError{}, _}} = Server.start_link(invalid_opts)
     end
+  end
+
+  test "built-in store limits fail staging closed while external adapters keep their own limits" do
+    {:ok, bounded_server} =
+      Server.start_link(url_elicitation_max_entries: 1, url_elicitation_max_bytes: 1_000_000)
+
+    context = %{principal_binding: "bounded-principal"}
+
+    assert {:ok, _staged} =
+             API.stage_url_elicitation(bounded_server, context, "first", %{"value" => 1})
+
+    assert {:error, :store_unavailable} =
+             API.stage_url_elicitation(bounded_server, context, "second", %{"value" => 2})
+
+    {:ok, external_store} = ETS.start_link(max_entries: 2, max_bytes: 1_000_000)
+
+    {:ok, external_server} =
+      Server.start_link(
+        url_elicitation_store: {ETS, external_store},
+        url_elicitation_max_entries: 1,
+        url_elicitation_max_bytes: 1
+      )
+
+    assert {:ok, _staged} =
+             API.stage_url_elicitation(external_server, context, "first", %{"value" => 1})
+
+    assert {:ok, _staged} =
+             API.stage_url_elicitation(external_server, context, "second", %{"value" => 2})
+  end
+
+  test "default store rejects duplicate keys, including consumed records" do
+    {:ok, store} = ETS.start_link(max_entries: 2, max_bytes: 1_000_000)
+    record = record("duplicate", System.system_time(:millisecond) + 60_000)
+
+    assert :ok = ETS.put(store, record)
+
+    assert {:ok, consumed} =
+             ETS.consume(
+               store,
+               record["namespace"],
+               record["id"],
+               record["subject_hash"],
+               System.system_time(:millisecond)
+             )
+
+    assert is_integer(consumed["consumed_at_ms"])
+    assert {:error, :already_exists} = ETS.put(store, record)
+    assert {:ok, persisted} = ETS.fetch(store, record["namespace"], record["id"])
+    assert persisted["consumed_at_ms"] == consumed["consumed_at_ms"]
+  end
+
+  test "default store enforces entry and byte limits without changing live records" do
+    first = record("first-id", System.system_time(:millisecond) + 60_000)
+    second = record("other-id", System.system_time(:millisecond) + 60_000)
+
+    {:ok, entry_store} = ETS.start_link(max_entries: 1, max_bytes: 1_000_000)
+    assert :ok = ETS.put(entry_store, first)
+    assert {:error, :capacity} = ETS.put(entry_store, second)
+    assert {:ok, ^first} = ETS.fetch(entry_store, first["namespace"], first["id"])
+    assert :not_found = ETS.fetch(entry_store, second["namespace"], second["id"])
+
+    {:ok, byte_store} =
+      ETS.start_link(max_entries: 2, max_bytes: :erlang.external_size(first))
+
+    assert :ok = ETS.put(byte_store, first)
+    assert {:error, :capacity} = ETS.put(byte_store, second)
+    assert {:ok, ^first} = ETS.fetch(byte_store, first["namespace"], first["id"])
+    assert :not_found = ETS.fetch(byte_store, second["namespace"], second["id"])
+  end
+
+  test "default store removes expired records before reporting capacity" do
+    {:ok, store} = ETS.start_link(max_entries: 1, max_bytes: 1_000_000)
+    expired = record("expired", 0)
+    current = record("current", System.system_time(:millisecond) + 60_000)
+
+    assert :ok = ETS.put(store, expired)
+    assert :ok = ETS.put(store, current)
+    assert :not_found = ETS.fetch(store, expired["namespace"], expired["id"])
+    assert {:ok, ^current} = ETS.fetch(store, current["namespace"], current["id"])
+  end
+
+  test "capacity admission reclaims more than one periodic cleanup batch when needed" do
+    expired = Enum.map(1..1_001, &record("expired-#{&1}", 0))
+    expired_bytes = Enum.sum(Enum.map(expired, &:erlang.external_size/1))
+    base = record("replacement", System.system_time(:millisecond) + 600_000)
+    base_bytes = :erlang.external_size(base)
+
+    replacement =
+      put_in(
+        base,
+        ["fields", "payload"],
+        String.duplicate("x", max(expired_bytes - base_bytes - 64, 1))
+      )
+
+    replacement_bytes = :erlang.external_size(replacement)
+    smallest_expired = expired |> Enum.map(&:erlang.external_size/1) |> Enum.min()
+
+    assert replacement_bytes <= expired_bytes
+    assert replacement_bytes + smallest_expired > expired_bytes
+
+    {:ok, store} = ETS.start_link(max_entries: 1_002, max_bytes: expired_bytes)
+
+    Enum.each(expired, fn record ->
+      assert :ok = ETS.put(store, record)
+    end)
+
+    assert :ok = ETS.put(store, replacement)
+    assert {:ok, ^replacement} = ETS.fetch(store, replacement["namespace"], replacement["id"])
+    assert {:ok, []} = ETS.cleanup_expired(store, System.system_time(:millisecond))
   end
 
   @tag capture_log: true
@@ -131,5 +244,18 @@ defmodule AttestoMCP.Server.ServerUrlElicitationTest do
     Process.exit(store_pid, :kill)
 
     assert_receive {:EXIT, ^server, :url_elicitation_store_unavailable}, 1_000
+  end
+
+  defp record(id, expires_at_ms) do
+    %{
+      "id" => id,
+      "namespace" => "test-namespace",
+      "subject_hash" => "subject-hash",
+      "action" => "approve",
+      "fields" => %{"id" => id},
+      "created_at_ms" => 0,
+      "expires_at_ms" => expires_at_ms,
+      "consumed_at_ms" => nil
+    }
   end
 end

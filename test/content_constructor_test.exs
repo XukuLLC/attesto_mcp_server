@@ -67,10 +67,17 @@ defmodule AttestoMCP.Server.ContentConstructorTest do
           "http://localhost/private",
           "https://user@example.test/private",
           "urn:item/../private",
-          "urn:item\nother"
+          "urn:item\nother",
+          "javascript:alert(1)",
+          "JaVaScRiPt:alert(1)",
+          "data:text/html,<h1>unsafe</h1>",
+          "vbscript:msgbox(1)"
         ] do
       assert_raise ArgumentError, fn -> Content.resource_link(uri, "item") end
     end
+
+    assert Content.resource_link("git:commit:abc123", "commit")["uri"] ==
+             "git:commit:abc123"
 
     assert_raise ArgumentError, fn ->
       Content.resource_link("urn:item", "item", size: -1)

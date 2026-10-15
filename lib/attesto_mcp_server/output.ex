@@ -143,10 +143,15 @@ defmodule AttestoMCP.Server.Output do
     if String.valid?(uri) and not String.contains?(uri, ["..", "\\", "\u0000", "\r", "\n"]) do
       try do
         parsed = URI.parse(uri)
-        scheme = parsed.scheme
+        scheme = parsed.scheme && String.downcase(parsed.scheme)
         host = parsed.host && String.downcase(parsed.host)
 
-        valid_scheme? = is_binary(scheme) and byte_size(scheme) > 0
+        valid_scheme? =
+          is_binary(scheme) and byte_size(scheme) > 0 and
+            scheme not in ["javascript", "data", "vbscript"]
+
+        # URI validation here is syntactic hardening. A host that dereferences
+        # resource identifiers must apply its own destination policy.
         safe_host? = host not in ["localhost", "127.0.0.1", "::1", "0.0.0.0"]
 
         (valid_scheme? or String.starts_with?(uri, "/")) and is_nil(parsed.userinfo) and
