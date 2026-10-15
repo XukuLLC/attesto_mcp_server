@@ -1,20 +1,24 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 2.4.0. It does not
+This is reproducible test evidence for `attesto_mcp_server` 2.5.0. It does not
 establish certification, endorsement, or support for every optional MCP extension.
 
-## Documentation snapshot (2026-10-06)
+## Release snapshot (2026-10-15)
 
 - source fingerprint:
-  `7aabd1dfd2457126c0c6373ebe561091e806f3412ae6f5b32b3edc0d9eacd8f6`
+  `cb14c9056ea89daa9f8d93efd27ab2238ebf8d4455ad9c1c7eb999c8524b0a71`
 
-This checkout adds progressive setup documentation and updates the Livebook
-and ExDoc extras. Product code, configuration, tests, scripts, and existing
-executable fixtures are unchanged from the released `v2.4.0` commit below.
-The official conformance results remain evidence for that tested release;
-the runners were not repeated for this documentation update.
+This fingerprint covers the tracked code, configuration, tests, scripts, and
+fixtures in the 2.5.0 release candidate. The package, installer, coordinated
+source, and exact released-dependency OAuth gates described below were repeated
+for this candidate.
 
-All ten updated Livebook code cells passed headlessly against public Hex
+The official runner scores and exact SDK smoke results below remain frozen
+evidence for the tested `v2.4.0` candidate. They are not relabeled as 2.5.0
+results. CI repeats those pinned interop lanes before release.
+
+For the preceding 2.4.0 documentation update, all ten updated Livebook code
+cells passed headlessly against public Hex
 `attesto_mcp_server` 2.4.0, AttestoMCP 1.3.2, Attesto 2.2.2, Bandit 1.12.5,
 and JSV 0.25.0 on Elixir 1.20.4/OTP 29.0.5. Two complete repeats also verified
 cleanup, closed loopback ports, and restoration of prior static-keystore
@@ -22,7 +26,7 @@ configuration. These walkthrough checks are separate from the official MCP
 results below. The setup guide's focused tool checks and stdio command passed,
 and the documentation built with warnings treated as errors.
 
-## Tested candidate
+## Frozen official runner candidate (`v2.4.0`)
 
 - release commit: `bef18c29cd51cd59936cc02a52aee5bc0e660b17`
 - tested source fingerprint:
@@ -166,17 +170,10 @@ The corpus also passed on Elixir 1.18.3/OTP 27.3 with JSV 0.24.0:
 
 ## Package gates
 
-- All 915 checks (two doctests and 913 tests) passed in a complete run on
-  Elixir 1.20.4/OTP 29.0.5, including the PostgreSQL-backed session and URL
-  elicitation store tests. Coverage was 84.15%.
-- All 915 checks also passed in a complete PostgreSQL run on the declared
-  Elixir 1.18.3/OTP 27.3 floor. The primary applications in both runs used
-  JSV 0.25.0 with Attesto 2.1.0 and AttestoMCP 1.3.0, exercising the existing
-  dependency versions.
-- A separate complete PostgreSQL run passed all 915 checks on Elixir
-  1.18.3/OTP 27.3 with the primary application using JSV 0.24.0, Attesto
-  2.2.2, and AttestoMCP 1.3.2. Standalone `Mix.install` stdio examples resolve
-  their own permitted dependency versions; they are not pinned to JSV 0.24.0.
+- All 879 checks (two doctests and 877 tests) passed in a complete run on
+  Elixir 1.20.4/OTP 29. Forty-nine tests, including the optional
+  PostgreSQL-backed tests, were skipped by their declared conditions. Coverage
+  was 80.55%.
 - The fixed embedded meta-schemas initialize at application startup under
   one ten-second total deadline. User-supplied schema compilation and
   evaluation retain their one-second deadlines. Cold-start and held-lock
@@ -185,10 +182,10 @@ The corpus also passed on Elixir 1.18.3/OTP 27.3 with JSV 0.24.0:
 - Dialyzer completed with zero errors and zero skips.
 - Package construction, source/package hygiene, formatting, documentation,
   the production dependency tree check, and the Hex advisory audit passed.
-- The generic integration example passed ten checks covering the public API,
-  a production dependency tree without SQL, and optional Ecto activation and
-  removal. Its final dependency lock matched the initial lock byte for byte.
-- The coordinated OAuth fixture passed all five tests.
+- The published-dependency installer matrix and coordinated source installer
+  checks passed.
+- The coordinated OAuth fixture passed all five tests against the exact
+  released family pins.
 - Default strict Credo is not a passing gate. The repository does not
   configure Credo; a temporary default configuration reported style and
   complexity findings in both the baseline and candidate. This record does
