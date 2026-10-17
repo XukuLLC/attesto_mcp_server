@@ -294,6 +294,26 @@ defmodule AttestoMCP.Server.PlugAuthTest do
 
     refute_receive :completion_handler_called
 
+    for {ref, expected_scope} <- refs do
+      token = AttestoMCP.Test.Factory.access_token(config, scopes: [expected_scope])
+
+      response =
+        call(
+          server,
+          config,
+          token,
+          "completion/complete",
+          %{"ref" => ref, "argument" => %{"name" => "id", "value" => "1"}},
+          scopes: []
+        )
+
+      assert response.status == 200
+      assert Jason.decode!(response.resp_body)["result"]["completion"]["values"] == ["secret"]
+    end
+
+    assert_receive :completion_handler_called
+    assert_receive :completion_handler_called
+
     override_scope = "mcp:completion:custom"
 
     override_token =

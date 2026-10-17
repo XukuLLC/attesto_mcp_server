@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.6.0 - 2026-10-17
+
+- Make the server-side HTTP authorization gate use the same per-method scope
+  defaults and params-dependent completion/subscription rules as the Plug
+  boundary. The Plug records its resolved policy so the direct server gate does
+  not apply `default_scopes` twice. The local stdio adapter continues to require
+  no fallback scopes unless `scope_map` or `default_scopes` is configured.
+- Apply one header-name policy during both tool registration and HTTP request
+  handling, including identical token syntax and length limits for every
+  `x-mcp-header` suffix and its generated `Mcp-Param-*` wire header.
+- Expand the supported `attesto_mcp` range to `>= 1.3.0 and < 3.0.0`, retaining
+  the original minimum while allowing the coordinated AttestoMCP 2.0 release.
+- Exercise the retained JSV 0.24.0 floor in an explicit CI lane, and label the
+  archived 2.3.0 dependency inventory as historical release evidence.
+
 ## 2.5.0 - 2026-10-15
 
 - Extend automatic AttestoPhoenix installation through the 4.x line while

@@ -789,7 +789,7 @@ defmodule AttestoMCP.Server.P12TransportTest do
         Server.dispatch(
           server,
           request,
-          %{principal: "legacy-owner"},
+          %{principal: "legacy-owner", scopes: [AttestoMCP.Scopes.tools_call()]},
           version: @legacy,
           transport: :http,
           owner: {:legacy_session, "session-77"}

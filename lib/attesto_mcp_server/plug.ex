@@ -40,7 +40,17 @@ defmodule AttestoMCP.Server.Plug do
   import Plug.Conn
 
   alias AttestoMCP.Server
-  alias AttestoMCP.Server.{Error, HostCallback, JSONRPC, Schema, ScopeMap, Session, Telemetry}
+
+  alias AttestoMCP.Server.{
+    Error,
+    HeaderName,
+    HostCallback,
+    JSONRPC,
+    Schema,
+    ScopeMap,
+    Session,
+    Telemetry
+  }
 
   @behaviour Plug
   @modern "2026-07-28"
@@ -872,6 +882,7 @@ defmodule AttestoMCP.Server.Plug do
         |> Map.put(:session_id, session_id)
         |> Map.put(:scope_map, dispatch_scope_map(state, request))
         |> Map.put(:default_scopes, state.opts[:default_scopes])
+        |> Map.put(:http_scope_policy_resolved, true)
         |> Map.put(
           :definition_scope_policy,
           scope_policy_for(request, state) in [:visible_definitions, :selected_definition]
@@ -947,7 +958,13 @@ defmodule AttestoMCP.Server.Plug do
         Map.delete(scope_map, request.method)
 
       _ ->
-        scope_map
+        case http_required_scopes_for(state, request) do
+          scopes when is_list(scopes) and scopes != [] ->
+            Map.put(scope_map, request.method, scopes)
+
+          _ ->
+            scope_map
+        end
     end
   end
 
@@ -2151,135 +2168,19 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp required_scopes_for(%{method: "subscriptions/listen", params: params}, opts) do
-    subscription_scope_for(params["notifications"], opts)
-  end
-
   defp required_scopes_for(%{kind: :response}, _opts), do: []
 
-  defp required_scopes_for(%{method: "completion/complete", params: params}, opts) do
-    case configured_scope_for("completion/complete", opts) do
-      {:ok, scopes} ->
-        scopes
-
-      :error ->
-        case params["ref"] do
-          %{"type" => "ref/resource"} -> default_scope_for("resources/read")
-          _ -> default_scope_for("completion/complete")
-        end
-    end
+  defp required_scopes_for(%{method: method, params: params}, opts) do
+    ScopeMap.required_http_scopes(
+      method,
+      params,
+      opts[:scope_map],
+      opts[:default_scopes],
+      opts[:subscription_scopes]
+    )
   end
 
-  defp required_scopes_for(%{method: method}, opts), do: scope_for(method, opts)
   defp required_scopes_for(_request, _opts), do: []
-
-  defp subscription_scope_for(notifications, opts) when is_map(notifications) do
-    category_scopes =
-      case configured_default_scopes(opts) do
-        {:ok, scopes} ->
-          case configured_scope_for("subscriptions/listen", opts) do
-            {:ok, _explicit_scopes} -> generic_subscription_category_scopes(notifications)
-            :error -> scopes
-          end
-
-        :error ->
-          generic_subscription_category_scopes(notifications)
-      end
-
-    Enum.uniq(category_scopes ++ configured_subscription_scopes(opts))
-  end
-
-  defp subscription_scope_for(_notifications, opts),
-    do: configured_subscription_scopes(opts)
-
-  defp generic_subscription_category_scopes(notifications) do
-    [
-      {"toolsListChanged", AttestoMCP.Scopes.tools_read()},
-      {"promptsListChanged", AttestoMCP.Scopes.prompts_read()},
-      {"resourcesListChanged", AttestoMCP.Scopes.resources_read()},
-      {"resourceSubscriptions", AttestoMCP.Scopes.resources_read()}
-    ]
-    |> Enum.filter(fn {key, _scope} ->
-      case key do
-        "resourceSubscriptions" ->
-          is_list(Map.get(notifications, key, Map.get(notifications, :resourceSubscriptions))) and
-            Map.get(notifications, key, Map.get(notifications, :resourceSubscriptions)) != []
-
-        _ ->
-          Map.get(notifications, key, Map.get(notifications, filter_atom_key(key), false)) == true
-      end
-    end)
-    |> Enum.map(&elem(&1, 1))
-  end
-
-  defp filter_atom_key("toolsListChanged"), do: :toolsListChanged
-  defp filter_atom_key("promptsListChanged"), do: :promptsListChanged
-  defp filter_atom_key("resourcesListChanged"), do: :resourcesListChanged
-
-  defp configured_subscription_scopes(opts) do
-    configured =
-      case configured_scope_for("subscriptions/listen", opts) do
-        {:ok, scopes} -> scopes
-        :error -> configured_default_scopes_value(opts)
-      end
-
-    explicit = Keyword.get(opts, :subscription_scopes, [])
-    Enum.filter(List.wrap(configured) ++ List.wrap(explicit), &is_binary/1)
-  end
-
-  defp scope_for(method, opts) do
-    case configured_scope_for(method, opts) do
-      {:ok, scopes} ->
-        scopes
-
-      :error ->
-        case configured_default_scopes(opts) do
-          {:ok, scopes} -> scopes
-          :error -> default_scope_for(method)
-        end
-    end
-  end
-
-  defp configured_scope_for(method, opts) do
-    case Map.get(opts[:scope_map] || %{}, method) do
-      scopes when is_list(scopes) and scopes != [] -> {:ok, scopes}
-      _ -> :error
-    end
-  end
-
-  defp configured_default_scopes(opts) do
-    case Keyword.get(opts, :default_scopes) do
-      scopes when is_list(scopes) and scopes != [] -> {:ok, scopes}
-      _ -> :error
-    end
-  end
-
-  defp configured_default_scopes_value(opts) do
-    case configured_default_scopes(opts) do
-      {:ok, scopes} -> scopes
-      :error -> []
-    end
-  end
-
-  defp default_scope_for(method) when method in ["tools/list"],
-    do: [AttestoMCP.Scopes.tools_read()]
-
-  defp default_scope_for(method) when method in ["tools/call"],
-    do: [AttestoMCP.Scopes.tools_call()]
-
-  defp default_scope_for(method)
-       when method in ["resources/list", "resources/read", "resources/templates/list"],
-       do: [AttestoMCP.Scopes.resources_read()]
-
-  defp default_scope_for(method)
-       when method in ["resources/subscribe", "resources/unsubscribe"],
-       do: [AttestoMCP.Scopes.resources_read()]
-
-  defp default_scope_for(method)
-       when method in ["prompts/list", "prompts/get", "completion/complete"],
-       do: [AttestoMCP.Scopes.prompts_read()]
-
-  defp default_scope_for(_), do: []
 
   defp validate_modern_headers(_conn, _request, @legacy, _state), do: :ok
 
@@ -2433,7 +2334,7 @@ defmodule AttestoMCP.Server.Plug do
 
     cond do
       Enum.uniq(names) != names -> {:error, :duplicate_header_name}
-      Enum.all?(entries, fn {name, _} -> valid_header_name?(name) end) -> :ok
+      Enum.all?(entries, fn {name, _} -> HeaderName.valid?(name) end) -> :ok
       true -> {:error, :invalid_header_name}
     end
   end
@@ -2452,32 +2353,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp trim_ows(value), do: value
 
-  defp valid_header_name?(name) when is_binary(name) and byte_size(name) in 1..256 do
-    name
-    |> String.to_charlist()
-    |> Enum.all?(fn code ->
-      code in ?a..?z or code in ?A..?Z or code in ?0..?9 or
-        code in [?!, ?#, ?$, ?%, ?&, ?', ?*, ?+, ?-, ?., ?^, ?_, ?`, ?|, ?~]
-    end) and
-      String.downcase(name) not in [
-        "authorization",
-        "cookie",
-        "host",
-        "content-length",
-        "transfer-encoding",
-        "connection",
-        "upgrade"
-      ]
-  end
-
-  defp valid_header_name?(_), do: false
-
-  defp valid_header_suffix?(suffix) when is_binary(suffix) and byte_size(suffix) in 1..128 do
-    not String.starts_with?(String.downcase(suffix), "mcp-param-") and
-      Regex.match?(~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, suffix)
-  end
-
-  defp valid_header_suffix?(_), do: false
+  defp valid_header_suffix?(suffix), do: HeaderName.valid_suffix?(suffix)
 
   defp property_primitive?(schema) when is_map(schema) do
     Map.get(schema, "type") in ["string", "integer", "boolean"] and

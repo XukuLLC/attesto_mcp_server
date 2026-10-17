@@ -10,7 +10,7 @@ defmodule AttestoMCP.Server.Registry do
   @type registration :: {primitive(), String.t(), map() | keyword()}
   use GenServer
 
-  alias AttestoMCP.Server.{CachePolicy, Icons, Schema}
+  alias AttestoMCP.Server.{CachePolicy, HeaderName, Icons, Schema}
 
   @types [:tool, :resource, :template, :prompt, :completion]
   @max_identity_bytes 256
@@ -823,7 +823,7 @@ defmodule AttestoMCP.Server.Registry do
 
       with true <- primitive,
            {:ok, names} <- header_names(annotation),
-           true <- Enum.all?(names, &valid_header_name?/1) do
+           true <- Enum.all?(names, &HeaderName.valid?/1) do
         {:ok, acc ++ Enum.map(names, &{&1, path ++ [property]})}
       else
         _ -> {:error, :x_mcp_header}
@@ -839,12 +839,7 @@ defmodule AttestoMCP.Server.Registry do
 
   defp header_names(_), do: {:error, :x_mcp_header}
 
-  defp valid_header_suffix?(suffix) when byte_size(suffix) in 1..128 do
-    not String.starts_with?(String.downcase(suffix), "mcp-param-") and
-      Regex.match?(~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, suffix)
-  end
-
-  defp valid_header_suffix?(_), do: false
+  defp valid_header_suffix?(suffix), do: HeaderName.valid_suffix?(suffix)
 
   defp header_annotation_outside_properties?(schema, allow_direct)
        when is_map(schema) and is_boolean(allow_direct) do
@@ -883,12 +878,6 @@ defmodule AttestoMCP.Server.Registry do
     do: Enum.any?(value, &has_header_annotation?/1)
 
   defp has_header_annotation?(_), do: false
-
-  defp valid_header_name?(name) when is_binary(name) and byte_size(name) in 1..256 do
-    Regex.match?(~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, name)
-  end
-
-  defp valid_header_name?(_), do: false
 
   defp valid_identity(type, identity) do
     case type do

@@ -476,7 +476,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 2.5"},
+    {:attesto_mcp_server, "~> 2.6"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -575,7 +575,7 @@ non-header bearer-token locations. Resolution failure produces a generic 500
 response. `allow_dynamic_origin` remains only for explicitly local development;
 do not derive a production audience from an untrusted request Host header.
 
-The package requires `attesto_mcp >= 1.3.0 and < 2.0.0` and calls the public
+The package requires `attesto_mcp >= 1.3.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 

@@ -322,6 +322,21 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
     event_scope = "events.receive"
     notifications = %{"toolsListChanged" => true}
 
+    default_only_state =
+      Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource],
+        default_scopes: [default_scope],
+        subscription_timeout: 20
+      )
+
+    default_only = AttestoMCP.Test.Factory.access_token(config, scopes: [default_scope])
+
+    assert modern_http_call(default_only_state, default_only, "subscriptions/listen", %{
+             "notifications" => notifications
+           }).status == 200
+
     default_state =
       Server.Plug.init(
         server: server,
@@ -331,8 +346,6 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
         subscription_scopes: [event_scope],
         subscription_timeout: 20
       )
-
-    default_only = AttestoMCP.Test.Factory.access_token(config, scopes: [default_scope])
 
     default_union =
       AttestoMCP.Test.Factory.access_token(config, scopes: [default_scope, event_scope])

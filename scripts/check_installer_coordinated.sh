@@ -292,7 +292,7 @@ digest_tree() {
   mix run --no-start -e '
     expected = [
       {:attesto, ">= 2.0.0 and < 3.0.0"},
-      {:attesto_mcp, ">= 1.3.0 and < 2.0.0"},
+      {:attesto_mcp, ">= 1.3.0 and < 3.0.0"},
       {:attesto_phoenix, ">= 4.0.0 and < 5.0.0"}
     ]
 

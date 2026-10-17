@@ -1,10 +1,14 @@
-# Production dependency inventory (2.3.0)
+# Historical production dependency inventory (2.3.0 evidence)
+
+This document is frozen evidence for the 2.3.0 release. It is not the current
+2.6.0 dependency inventory or an evergreen SBOM. The declared ranges in
+`mix.exs`, the release package metadata, and the consumer's resolved dependency
+graph are authoritative for 2.6.0.
 
 This inventory records the public-Hex resolution observed locally on 2026-10-03,
 before the coordinated releases, using `mix deps.get` and
-`mix deps.tree --only prod`. This library does not
-maintain or ship a project lockfile, so consumers resolve the declared version
-ranges.
+`mix deps.tree --only prod`. The Hex package does not ship the repository's
+project lockfile, so consumers resolve the declared version ranges.
 
 | Component | Resolved version | License policy | Production path |
 |---|---:|---|---|
@@ -74,6 +78,7 @@ loaded when the host does not declare Ecto.
 The declared package floor is Elixir 1.18 with OTP 27. The 2.3.0 local gates
 passed on Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.1.1. CI independently
 declares strict lanes for Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.0.5.
-License and version claims
-above are tied to this resolution date and must be regenerated when dependency
-constraints change.
+License and version claims above are tied to this resolution date. Dependency
+constraints have changed since 2.3.0, so this evidence must not be used as a
+current 2.6.0 inventory. Release and deployment tooling should generate an SBOM
+from the dependency graph resolved for that build.

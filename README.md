@@ -395,13 +395,13 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 2.5"}]
+  [{:attesto_mcp_server, "~> 2.6"}]
 end
 ```
 
 Supervise `AttestoMCP.Server`, register definitions through
 `AttestoMCP.Server.API`, and mount `AttestoMCP.Server.Plug` directly. The
-[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.5.0/examples/bandit.exs) program demonstrates direct server
+[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.6.0/examples/bandit.exs) program demonstrates direct server
 startup, registration, and the protected Plug; the [usage guide](docs/usage.md)
 documents the transport and authentication options. Router and supervision
 wiring remain specific to the host. It also includes a
@@ -412,7 +412,7 @@ The production library depends on Plug rather than a particular HTTP server.
 Bandit is the documented development/test adapter. The loopback example returns
 401 until given a valid credential. The stdio adapter is available through
 `AttestoMCP.Server.Stdio.run/2` and
-[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.5.0/examples/stdio.exs).
+[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.6.0/examples/stdio.exs).
 
 ## Add features as needed
 

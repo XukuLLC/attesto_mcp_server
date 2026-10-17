@@ -5125,7 +5125,7 @@ defmodule AttestoMCP.Server do
          :ok <- validate_legacy_initialize_request(method, era, params, runtime.opts),
          :ok <- validate_era(era, params, runtime.opts),
          :ok <- validate_trace_context(params),
-         :ok <- authorization(method, context, runtime.opts, era) do
+         :ok <- authorization(method, params, context, runtime.opts, era) do
       # The snapshot replaces any caller-supplied value. It is client input and
       # stays separate from the verified identity and host context fields.
       context = Map.put(context, :request_meta, request_meta)
@@ -5292,19 +5292,36 @@ defmodule AttestoMCP.Server do
       end)
   end
 
-  defp authorization(method, context, opts, _era) do
+  defp authorization(method, params, context, opts, _era) do
     scope_map = Map.get(context, :scope_map, opts[:scope_map] || %{}) || %{}
+    default_scopes = Map.get(context, :default_scopes, opts[:default_scopes])
+    subscription_scopes = Map.get(context, :subscription_scopes, opts[:subscription_scopes])
 
     required =
       cond do
         Map.get(context, :definition_scope_policy) == true ->
           []
 
+        Map.get(context, :http_scope_policy_resolved) == true ->
+          case Map.get(scope_map, method) do
+            scopes when is_list(scopes) -> scopes
+            _other -> []
+          end
+
+        Map.get(context, :transport, :core) == :http ->
+          ScopeMap.required_http_scopes(
+            method,
+            params,
+            scope_map,
+            default_scopes,
+            subscription_scopes
+          )
+
         match?(scopes when is_list(scopes) and scopes != [], Map.get(scope_map, method)) ->
           Map.get(scope_map, method)
 
-        is_list(Map.get(context, :default_scopes, opts[:default_scopes])) ->
-          Map.get(context, :default_scopes, opts[:default_scopes]) || []
+        is_list(default_scopes) ->
+          default_scopes
 
         true ->
           []

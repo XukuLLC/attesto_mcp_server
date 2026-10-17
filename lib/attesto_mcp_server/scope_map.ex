@@ -70,6 +70,127 @@ defmodule AttestoMCP.Server.ScopeMap do
   @spec supported_methods() :: [String.t()]
   def supported_methods, do: @supported_methods |> MapSet.to_list() |> Enum.sort()
 
+  @doc false
+  @spec default_scopes(String.t()) :: [String.t()]
+  def default_scopes("tools/list"), do: [AttestoMCP.Scopes.tools_read()]
+  def default_scopes("tools/call"), do: [AttestoMCP.Scopes.tools_call()]
+
+  def default_scopes(method)
+      when method in ["resources/list", "resources/read", "resources/templates/list"],
+      do: [AttestoMCP.Scopes.resources_read()]
+
+  def default_scopes(method)
+      when method in ["resources/subscribe", "resources/unsubscribe"],
+      do: [AttestoMCP.Scopes.resources_read()]
+
+  def default_scopes(method)
+      when method in ["prompts/list", "prompts/get", "completion/complete"],
+      do: [AttestoMCP.Scopes.prompts_read()]
+
+  def default_scopes(_method), do: []
+
+  @doc false
+  @spec required_http_scopes(
+          String.t(),
+          map(),
+          map() | nil,
+          [String.t()] | nil,
+          [String.t()] | nil
+        ) ::
+          [String.t()]
+  def required_http_scopes(method, params, scope_map, default_scopes, subscription_scopes)
+
+  def required_http_scopes(
+        "subscriptions/listen",
+        params,
+        scope_map,
+        default_scopes,
+        subscription_scopes
+      ) do
+    notifications = if is_map(params), do: Map.get(params, "notifications"), else: nil
+    explicit = configured_scopes(scope_map, "subscriptions/listen")
+    fallback = configured_default(default_scopes)
+
+    category_scopes =
+      cond do
+        is_list(fallback) and is_list(explicit) -> subscription_category_scopes(notifications)
+        is_list(fallback) -> fallback
+        true -> subscription_category_scopes(notifications)
+      end
+
+    configured = explicit || fallback || []
+
+    Enum.uniq(
+      category_scopes ++ configured ++ Enum.filter(List.wrap(subscription_scopes), &is_binary/1)
+    )
+  end
+
+  def required_http_scopes(
+        "completion/complete",
+        params,
+        scope_map,
+        _default_scopes,
+        _subscription_scopes
+      ) do
+    case configured_scopes(scope_map, "completion/complete") do
+      scopes when is_list(scopes) ->
+        scopes
+
+      nil ->
+        case if(is_map(params), do: Map.get(params, "ref"), else: nil) do
+          %{"type" => "ref/resource"} -> default_scopes("resources/read")
+          _other -> default_scopes("completion/complete")
+        end
+    end
+  end
+
+  def required_http_scopes(method, _params, scope_map, default_scopes, _subscription_scopes) do
+    configured_scopes(scope_map, method) || configured_default(default_scopes) ||
+      default_scopes(method)
+  end
+
+  defp configured_scopes(scope_map, method) when is_map(scope_map) do
+    case Map.get(scope_map, method) do
+      scopes when is_list(scopes) and scopes != [] -> scopes
+      _other -> nil
+    end
+  end
+
+  defp configured_scopes(_scope_map, _method), do: nil
+
+  defp configured_default(scopes) when is_list(scopes) and scopes != [], do: scopes
+  defp configured_default(_scopes), do: nil
+
+  defp subscription_category_scopes(notifications) when is_map(notifications) do
+    [
+      {"toolsListChanged", :toolsListChanged, AttestoMCP.Scopes.tools_read()},
+      {"promptsListChanged", :promptsListChanged, AttestoMCP.Scopes.prompts_read()},
+      {"resourcesListChanged", :resourcesListChanged, AttestoMCP.Scopes.resources_read()}
+    ]
+    |> Enum.reduce([], fn {string_key, atom_key, scope}, scopes ->
+      if Map.get(notifications, string_key, Map.get(notifications, atom_key, false)) == true,
+        do: [scope | scopes],
+        else: scopes
+    end)
+    |> maybe_add_resource_subscription_scope(notifications)
+    |> Enum.reverse()
+  end
+
+  defp subscription_category_scopes(_notifications), do: []
+
+  defp maybe_add_resource_subscription_scope(scopes, notifications) do
+    subscriptions =
+      Map.get(
+        notifications,
+        "resourceSubscriptions",
+        Map.get(notifications, :resourceSubscriptions)
+      )
+
+    if is_list(subscriptions) and subscriptions != [],
+      do: [AttestoMCP.Scopes.resources_read() | scopes],
+      else: scopes
+  end
+
   defp supported_method?(method) when is_binary(method),
     do: MapSet.member?(@supported_methods, method)
 

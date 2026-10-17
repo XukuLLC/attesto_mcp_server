@@ -61,6 +61,149 @@ defmodule AttestoMCP.Server.ScopeMapTest do
     assert :ok = ScopeMap.validate!(%{"ping" => ["scope:read"]})
   end
 
+  test "publishes the HTTP method defaults from one shared table" do
+    assert ScopeMap.default_scopes("tools/list") == [AttestoMCP.Scopes.tools_read()]
+    assert ScopeMap.default_scopes("tools/call") == [AttestoMCP.Scopes.tools_call()]
+
+    for method <- [
+          "resources/list",
+          "resources/read",
+          "resources/templates/list",
+          "resources/subscribe",
+          "resources/unsubscribe"
+        ] do
+      assert ScopeMap.default_scopes(method) == [AttestoMCP.Scopes.resources_read()]
+    end
+
+    for method <- ["prompts/list", "prompts/get", "completion/complete"] do
+      assert ScopeMap.default_scopes(method) == [AttestoMCP.Scopes.prompts_read()]
+    end
+
+    for method <- ["initialize", "ping", "logging/setLevel", "server/discover"] do
+      assert ScopeMap.default_scopes(method) == []
+    end
+  end
+
+  test "HTTP dispatch enforces shared defaults while stdio keeps its local fallback" do
+    server = start_supervised!({Server, []})
+
+    request = %{
+      kind: :request,
+      id: 71,
+      method: "tools/list",
+      params: %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        }
+      }
+    }
+
+    assert {71,
+            %{
+              "error" => %{
+                "code" => -32003,
+                "data" => %{"required_scopes" => ["mcp:tools:read"]}
+              }
+            }} =
+             Server.dispatch(server, request, %{principal: "http"},
+               version: "2026-07-28",
+               transport: :http
+             )
+
+    assert {71, %{"result" => %{"tools" => []}}} =
+             Server.dispatch(
+               server,
+               request,
+               %{principal: "http", scopes: [AttestoMCP.Scopes.tools_read()]},
+               version: "2026-07-28",
+               transport: :http
+             )
+
+    assert {71, %{"result" => %{"tools" => []}}} =
+             Server.dispatch(server, request, %{principal: "stdio", scopes: []},
+               version: "2026-07-28",
+               transport: :stdio
+             )
+  end
+
+  test "direct HTTP dispatch applies params-dependent completion and subscription scopes" do
+    server = start_supervised!({Server, []})
+
+    completion = %{
+      kind: :request,
+      id: 73,
+      method: "completion/complete",
+      params: %{
+        "ref" => %{"type" => "ref/resource", "uri" => "file:///catalog"},
+        "argument" => %{"name" => "query", "value" => "attesto"},
+        "_meta" => request_meta()
+      }
+    }
+
+    assert {73,
+            %{
+              "error" => %{
+                "code" => -32003,
+                "data" => %{"required_scopes" => ["mcp:resources:read"]}
+              }
+            }} =
+             Server.dispatch(server, completion, %{principal: "http"},
+               version: "2026-07-28",
+               transport: :http
+             )
+
+    subscription = %{
+      kind: :request,
+      id: 74,
+      method: "subscriptions/listen",
+      params: %{
+        "notifications" => %{"toolsListChanged" => true},
+        "_meta" => request_meta()
+      }
+    }
+
+    assert {74,
+            %{
+              "error" => %{
+                "code" => -32003,
+                "data" => %{"required_scopes" => ["mcp:tools:read"]}
+              }
+            }} =
+             Server.dispatch(server, subscription, %{principal: "http"},
+               version: "2026-07-28",
+               transport: :http
+             )
+  end
+
+  test "stdio still enforces explicitly configured server scopes" do
+    server = start_supervised!({Server, scope_map: %{"tools/list" => ["stdio:tools:read"]}})
+
+    request = %{
+      kind: :request,
+      id: 72,
+      method: "tools/list",
+      params: %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        }
+      }
+    }
+
+    assert {72,
+            %{
+              "error" => %{
+                "code" => -32003,
+                "data" => %{"required_scopes" => ["stdio:tools:read"]}
+              }
+            }} =
+             Server.dispatch(server, request, %{principal: "stdio", scopes: []},
+               version: "2026-07-28",
+               transport: :stdio
+             )
+  end
+
   test "rejects invalid, improper, duplicate, control, and non-UTF-8 scope lists" do
     invalid_maps = [
       %{"ping" => "scope:read"},
@@ -155,6 +298,13 @@ defmodule AttestoMCP.Server.ScopeMapTest do
       prefix = "scope:#{index}:"
       prefix <> String.duplicate("a", bytes_per_scope - byte_size(prefix))
     end)
+  end
+
+  defp request_meta do
+    %{
+      "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities" => %{}
+    }
   end
 
   defp server_validation(scope_map) do

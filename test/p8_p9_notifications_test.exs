@@ -380,7 +380,10 @@ defmodule AttestoMCP.Server.P8P9NotificationsTest do
 
     caller =
       Task.async(fn ->
-        Server.dispatch(server, request, %{principal: "http-caller"},
+        Server.dispatch(
+          server,
+          request,
+          %{principal: "http-caller", scopes: [AttestoMCP.Scopes.tools_call()]},
           version: @modern,
           transport: :http
         )
