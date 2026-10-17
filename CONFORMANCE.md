@@ -1,20 +1,20 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 2.5.0. It does not
+This is reproducible test evidence for `attesto_mcp_server` 2.6.0. It does not
 establish certification, endorsement, or support for every optional MCP extension.
 
-## Release snapshot (2026-10-15)
+## Release snapshot (2026-10-17)
 
 - source fingerprint:
-  `3caa0c93645ffe93b46e50d4060d87d4fc58bcb033fe625496395213da357723`
+  `73730ce6ce310d6301ca1a6762a4457144408c8c6180824d3486d5fd05ffe481`
 
 This fingerprint covers the tracked code, configuration, tests, scripts, and
-fixtures in the 2.5.0 release candidate. The package, installer, coordinated
+fixtures in the 2.6.0 release candidate. The package, installer, coordinated
 source, and exact released-dependency OAuth gates described below were repeated
 for this candidate.
 
 The official runner scores and exact SDK smoke results below remain frozen
-evidence for the tested `v2.4.0` candidate. They are not relabeled as 2.5.0
+evidence for the tested `v2.4.0` candidate. They are not relabeled as 2.6.0
 results. CI repeats those pinned interop lanes before release.
 
 For the preceding 2.4.0 documentation update, all ten updated Livebook code
