@@ -3,6 +3,8 @@ defmodule AttestoMCP.Server.P5BanditTest do
 
   alias AttestoMCP.Server
 
+  import AttestoMCP.Server.TestSupport.Async, only: [eventually: 1]
+
   @modern "2026-07-28"
   @resource "https://mcp.example.com/mcp"
 
@@ -155,7 +157,6 @@ defmodule AttestoMCP.Server.P5BanditTest do
     assert Jason.decode!(first_body)["error"] == "invalid_token"
     assert Jason.decode!(second_body)["error"] == "rate_limited"
     assert_receive {:bandit_auth_refusal, %{category: :invalid_credentials}}, 1_000
-    assert_receive {:bandit_auth_refusal, %{category: :invalid_credentials}}, 1_000
     refute_receive {:bandit_auth_refusal, _}, 50
     refute second =~ "AlreadySentError"
 
@@ -167,7 +168,7 @@ defmodule AttestoMCP.Server.P5BanditTest do
              )
   end
 
-  test "real Bandit ordinary invalid auth is 401 then 429 with one refusal event each" do
+  test "real Bandit ordinary invalid auth is 401 then pre-verification 429" do
     {:ok, _apps} = Application.ensure_all_started(:bandit)
     {:ok, server} = Server.start_link(rate_limits: %{auth_failures: %{burst: 1, window_ms: 150}})
     config = AttestoMCP.Test.Factory.config()
@@ -206,7 +207,6 @@ defmodule AttestoMCP.Server.P5BanditTest do
     assert {429, second_body} = response_status_body(second)
     assert Jason.decode!(first_body)["error"] == "invalid_token"
     assert Jason.decode!(second_body)["error"] == "rate_limited"
-    assert_receive {:bandit_auth_refusal, %{category: :invalid_credentials}}, 1_000
     assert_receive {:bandit_auth_refusal, %{category: :invalid_credentials}}, 1_000
     refute_receive {:bandit_auth_refusal, _}, 50
 
@@ -401,18 +401,6 @@ defmodule AttestoMCP.Server.P5BanditTest do
 
   def bandit_auth_event(_event, _measurements, metadata, parent) do
     send(parent, {:bandit_auth_refusal, metadata})
-  end
-
-  defp eventually(fun, attempts \\ 100)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
   end
 
   defp recv_all(socket, acc) do

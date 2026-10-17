@@ -101,7 +101,15 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     assert {:error, :not_found} = Server.get_session(server, session.id, "legacy", "other")
 
     assert {:ok, stream} =
-             Server.open_legacy_stream(server, session.id, "legacy", "tenant", self())
+             Server.open_legacy_stream(
+               server,
+               session.id,
+               "legacy",
+               "tenant",
+               self(),
+               nil,
+               [AttestoMCP.Scopes.resources_read()]
+             )
 
     assert {10, %{"result" => %{}}} =
              Server.dispatch(
@@ -507,6 +515,10 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     assert {:ok, retained} = Server.get_session(server, session.id, "legacy", nil)
     assert retained.version == @legacy_2025_06_18
     assert retained.client_capabilities == capabilities
+    assert Server.session_capabilities(server, session.id, "legacy", nil) == capabilities
+    assert Server.session_capabilities(server, session.id, "other", nil) == %{}
+    assert Server.session_capabilities(server, session.id, "legacy", "other") == %{}
+    assert Server.session_capabilities(server, "missing", "legacy", nil) == %{}
 
     request = %{kind: :request, id: 54, method: "tools/list", params: %{}}
 

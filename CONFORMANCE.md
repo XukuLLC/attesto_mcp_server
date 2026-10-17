@@ -5,6 +5,7 @@ establish certification, endorsement, or support for every optional MCP extensio
 
 ## Release snapshot (2026-10-17)
 
+- release commit: `32107392ba9c406400d94bfca48e965057aa5e56`
 - source fingerprint:
   `73730ce6ce310d6301ca1a6762a4457144408c8c6180824d3486d5fd05ffe481`
 

@@ -135,7 +135,12 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
                },
                self(),
                :replacement,
-               nil
+               nil,
+               [
+                 AttestoMCP.Scopes.tools_read(),
+                 AttestoMCP.Scopes.prompts_read(),
+                 AttestoMCP.Scopes.resources_read()
+               ]
              )
 
     assert_receive {:mcp_subscription, :replacement, "catalog-replacement", _ack}
@@ -145,7 +150,19 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
     assert :ok = Server.mark_initialized(server, session.id)
 
     assert {:ok, legacy_stream} =
-             Server.open_legacy_stream(server, session.id, "catalog-owner", nil, self())
+             Server.open_legacy_stream(
+               server,
+               session.id,
+               "catalog-owner",
+               nil,
+               self(),
+               nil,
+               [
+                 AttestoMCP.Scopes.tools_read(),
+                 AttestoMCP.Scopes.prompts_read(),
+                 AttestoMCP.Scopes.resources_read()
+               ]
+             )
 
     tool_handler = fn _arguments, _context -> {:ok, "tool"} end
     prompt_handler = fn _input, _context -> {:ok, %{"messages" => []}} end
@@ -247,7 +264,12 @@ defmodule AttestoMCP.Server.CatalogReplacementTest do
                },
                self(),
                :recovery,
-               nil
+               nil,
+               [
+                 AttestoMCP.Scopes.tools_read(),
+                 AttestoMCP.Scopes.prompts_read(),
+                 AttestoMCP.Scopes.resources_read()
+               ]
              )
 
     assert_receive {:mcp_subscription, :recovery, "replacement-recovery", _ack}

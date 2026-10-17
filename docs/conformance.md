@@ -9,7 +9,8 @@ See the root [`CONFORMANCE.md`](../CONFORMANCE.md) for the exact runner version,
 commit, archive digest, commands, observed scored and not-scored results,
 expected-failure status, client versions, and non-certification statement.
 
-The root record covers the fingerprinted 2.4.0 release candidate.
+The root record covers the fingerprinted 2.6.0 release candidate. Its official
+runner results remain the frozen 2.4.0 evidence identified there.
 
 `fixtures/oauth_host` separately exercises OAuth discovery, authorization code
 and PKCE, client token acquisition, ID-token verification, and authenticated MCP

@@ -105,6 +105,11 @@ defmodule AttestoMCP.Server.Session do
     end
   end
 
+  @doc false
+  @spec encode_binding_for_store(term()) ::
+          {:ok, String.t()} | {:error, :binding_too_large | :nonportable_binding}
+  def encode_binding_for_store(binding), do: encode_binding(binding)
+
   @doc "Serializes persistent session state without live processes or callbacks."
   @spec to_record(t()) :: {:ok, map()} | {:error, term()}
   def to_record(%__MODULE__{} = session) do
@@ -215,7 +220,7 @@ defmodule AttestoMCP.Server.Session do
 
   defp encode_binding(term) do
     if portable_term?(term) do
-      encoded = :erlang.term_to_binary(term)
+      encoded = :erlang.term_to_binary(term, [:deterministic])
 
       if byte_size(encoded) <= @max_binding_bytes,
         do: {:ok, Base.url_encode64(encoded, padding: false)},

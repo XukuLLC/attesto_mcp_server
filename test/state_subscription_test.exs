@@ -3,6 +3,17 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
 
   alias AttestoMCP.Server
   alias AttestoMCP.Server.{RequestState, Subscriptions}
+  alias AttestoMCP.Server.TestSupport.Async
+
+  test "request state fallback table can be initialized explicitly and repeatedly" do
+    table = RequestState.ensure_table()
+    same_table = RequestState.ensure_table()
+
+    assert :ets.info(table, :name) == :attesto_mcp_server_request_states
+    assert :ets.info(same_table, :name) == :attesto_mcp_server_request_states
+    assert :ets.info(table, :type) == :set
+    assert :ets.info(table, :protection) == :public
+  end
 
   test "request state is bound and single-use" do
     state =
@@ -428,7 +439,7 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
              Server.dispatch(
                server,
                %{kind: :request, id: 21, method: "subscriptions/listen", params: params},
-               %{principal: "alice"},
+               %{principal: "alice", scopes: [AttestoMCP.Scopes.tools_read()]},
                version: "2026-07-28",
                on_event: fn event -> send(parent, {:subscription_event, event}) end
              )
@@ -534,7 +545,11 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
                    method: "subscriptions/listen",
                    params: Map.put(request.params, "notifications", %{"toolsListChanged" => true})
                },
-               %{principal: "p", tenant: "t"},
+               %{
+                 principal: "p",
+                 tenant: "t",
+                 scopes: [AttestoMCP.Scopes.tools_read()]
+               },
                version: "2026-07-28",
                on_event: fn event -> send(self(), {:catalog_event, event}) end
              )
@@ -604,21 +619,25 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
     Process.sleep(20)
     assert :ok = Subscriptions.publish(subscriptions, %{"type" => "toolsListChanged"})
 
-    assert eventually(fn ->
-             match?(
-               {:ok, ^disconnected},
-               Subscriptions.open(
-                 subscriptions,
-                 "alice",
-                 "tenant-a",
-                 disconnected,
-                 %{"toolsListChanged" => true},
-                 self(),
-                 :reconnected,
-                 nil
+    assert Async.eventually(
+             fn ->
+               match?(
+                 {:ok, ^disconnected},
+                 Subscriptions.open(
+                   subscriptions,
+                   "alice",
+                   "tenant-a",
+                   disconnected,
+                   %{"toolsListChanged" => true},
+                   self(),
+                   :reconnected,
+                   nil
+                 )
                )
-             )
-           end)
+             end,
+             attempts: 20,
+             interval_ms: 5
+           )
 
     Subscriptions.close(subscriptions, disconnected)
   end
@@ -642,18 +661,5 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
         send(parent, {:relayed_subscription, message})
         relay_subscription_messages(parent)
     end
-  end
-
-  defp eventually(fun, attempts \\ 20)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.(),
-      do: true,
-      else:
-        (
-          Process.sleep(5)
-          eventually(fun, attempts - 1)
-        )
   end
 end

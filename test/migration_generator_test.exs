@@ -73,7 +73,7 @@ if Code.ensure_loaded?(Mix.Ecto) do
       File.read!(file)
     end
 
-    test "generates the session and url elicitation tables with contract columns", %{
+    test "generates the session stores and principal admission index", %{
       tmp_dir: tmp_dir
     } do
       run!([], tmp_dir)
@@ -135,6 +135,21 @@ if Code.ensure_loaded?(Mix.Ecto) do
 
       assert url_source =~ "def up do"
       assert url_source =~ "def down do"
+
+      principal_index_source =
+        generated_migration(tmp_dir, "add_attesto_mcp_sessions_principal_index")
+
+      assert principal_index_source ==
+               principal_index_source |> Code.format_string!() |> IO.iodata_to_binary()
+
+      assert principal_index_source =~
+               "AddAttestoMcpSessionsPrincipalIndex"
+
+      assert principal_index_source =~ "@disable_ddl_transaction true"
+      assert principal_index_source =~ "@disable_migration_lock true"
+
+      assert principal_index_source =~
+               "(namespace, (record ->> 'principal'), expires_at_ms)"
     end
 
     test "rejects a missing SQL migration layer before parsing or writing", %{
@@ -191,12 +206,23 @@ if Code.ensure_loaded?(Mix.Ecto) do
       assert url_source =~ "CREATE SCHEMA IF NOT EXISTS"
       assert url_source =~ "prefix: prefix"
       refute url_source =~ "mcp_sessions_attesto_mcp_url_elicitations"
+
+      principal_index_source =
+        generated_migration(tmp_dir, "add_attesto_mcp_sessions_principal_index")
+
+      assert principal_index_source =~
+               inspect(~s|"mcp_sessions"."attesto_mcp_sessions"|)
+
+      assert principal_index_source =~
+               inspect(
+                 ~s|"mcp_sessions"."attesto_mcp_sessions_namespace_principal_expires_at_ms_index"|
+               )
     end
 
-    test "produces two files and rerun produces only the missing one", %{tmp_dir: tmp_dir} do
+    test "produces three files and rerun produces only the missing one", %{tmp_dir: tmp_dir} do
       run!([], tmp_dir)
 
-      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 3
 
       assert [_] =
                Path.wildcard(
@@ -208,8 +234,16 @@ if Code.ensure_loaded?(Mix.Ecto) do
                  Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_url_elicitations.exs")
                )
 
+      assert [_] =
+               Path.wildcard(
+                 Path.join(
+                   migrations_dir(tmp_dir),
+                   "*_add_attesto_mcp_sessions_principal_index.exs"
+                 )
+               )
+
       run!([], tmp_dir)
-      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 3
 
       [url_migration] =
         Path.wildcard(
@@ -217,10 +251,10 @@ if Code.ensure_loaded?(Mix.Ecto) do
         )
 
       File.rm!(url_migration)
-      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 1
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
 
       run!([], tmp_dir)
-      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 2
+      assert length(Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs"))) == 3
 
       assert [_] =
                Path.wildcard(
@@ -230,6 +264,14 @@ if Code.ensure_loaded?(Mix.Ecto) do
       assert [_] =
                Path.wildcard(
                  Path.join(migrations_dir(tmp_dir), "*_create_attesto_mcp_url_elicitations.exs")
+               )
+
+      assert [_] =
+               Path.wildcard(
+                 Path.join(
+                   migrations_dir(tmp_dir),
+                   "*_add_attesto_mcp_sessions_principal_index.exs"
+                 )
                )
     end
 

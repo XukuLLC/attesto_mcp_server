@@ -32,7 +32,11 @@ plug =
     # embedded in the example.
     server: server,
     path: "/mcp",
-    auth: [config: auth_config, resource: "http://127.0.0.1:4000/mcp"]
+    auth: [
+      config: auth_config,
+      resource: "http://127.0.0.1:4000/mcp",
+      allow_http: true
+    ]
   }
 
 {:ok, _pid} = Bandit.start_link(plug: plug, scheme: :http, ip: {127, 0, 0, 1}, port: 4000)

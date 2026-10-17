@@ -7,6 +7,7 @@ defmodule AttestoMCP.Server.P4RegressionTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.JSONRPC
   alias AttestoMCP.Server.Schema
+  alias AttestoMCP.Server.TestSupport.Async
 
   @resource "https://mcp.example.com/mcp"
   @modern "2026-07-28"
@@ -262,7 +263,7 @@ defmodule AttestoMCP.Server.P4RegressionTest do
     assert_receive :owner_started, 1_000
     Process.exit(caller, :kill)
 
-    assert eventually(fn -> Server.stats(server).active == 0 end)
+    assert Async.eventually(fn -> Server.stats(server).active == 0 end, attempts: 50)
 
     assert {2, %{"result" => _}} =
              Server.dispatch(
@@ -528,18 +529,6 @@ defmodule AttestoMCP.Server.P4RegressionTest do
     |> put_req_header("mcp-method", "tools/call")
     |> put_req_header("mcp-name", "same_id")
     |> AttestoMCP.Server.Plug.call(plug)
-  end
-
-  defp eventually(fun, attempts \\ 50)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
   end
 
   def handle_event(_event, measurements, metadata, parent),

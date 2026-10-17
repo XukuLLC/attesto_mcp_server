@@ -328,7 +328,7 @@ defmodule AttestoMCP.Server.P10P13RegressionTest do
              Server.dispatch(
                server,
                %{kind: :request, id: 11, method: "subscriptions/listen", params: params},
-               %{principal: "sub"},
+               %{principal: "sub", scopes: [AttestoMCP.Scopes.tools_read()]},
                version: @modern,
                on_event: fn event -> send(parent, {:subscription_event, event}) end
              )

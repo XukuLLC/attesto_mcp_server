@@ -48,12 +48,12 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       AttestoMCP.Server.Plug.init(
         server: server,
         path: "/mcp",
-        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+        auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
       )
 
     conn = AttestoMCP.Server.Plug.call(conn, opts)
     assert conn.status == 200
-    assert %{"resource" => "http://www.example.com/mcp"} = Jason.decode!(conn.resp_body)
+    assert %{"resource" => "https://www.example.com/mcp"} = Jason.decode!(conn.resp_body)
   end
 
   test "protected-resource metadata bypasses mount authorization", %{server: server} do
@@ -67,7 +67,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
           send(parent, :mount_authorized)
           false
         end,
-        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+        auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
       )
 
     response =
@@ -75,7 +75,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       |> AttestoMCP.Server.Plug.call(opts)
 
     assert response.status == 200
-    assert %{"resource" => "http://www.example.com/mcp"} = Jason.decode!(response.resp_body)
+    assert %{"resource" => "https://www.example.com/mcp"} = Jason.decode!(response.resp_body)
     refute_receive :mount_authorized
   end
 
@@ -181,7 +181,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
         server: server,
         path: "/mcp",
         auth: [
-          resource: "http://www.example.com/mcp",
+          resource: "https://www.example.com/mcp",
           config: fn -> %{issuer: "https://issuer.example"} end
         ]
       )
@@ -273,12 +273,12 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       AttestoMCP.Server.Plug.init(
         server: server,
         path: "/mcp",
-        resource: "http://www.example.com/mcp",
+        resource: "https://www.example.com/mcp",
         auth: [issuer: "https://issuer.example"]
       )
 
     conn = AttestoMCP.Server.Plug.call(conn, opts)
-    assert Jason.decode!(conn.resp_body)["resource"] == "http://www.example.com/mcp"
+    assert Jason.decode!(conn.resp_body)["resource"] == "https://www.example.com/mcp"
 
     assert_raise ArgumentError, ~r/conflicting/, fn ->
       AttestoMCP.Server.Plug.init(
@@ -295,7 +295,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
         path: "/mcp",
         auth: [
           issuer: "https://issuer.example",
-          resource: "http://www.example.com/mcp",
+          resource: "https://www.example.com/mcp",
           bearer_methods: [:body]
         ]
       )
@@ -309,7 +309,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       AttestoMCP.Server.Plug.init(
         server: server,
         path: "/mcp",
-        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+        auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
       )
 
     conn = AttestoMCP.Server.Plug.call(conn, opts)
@@ -320,7 +320,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
     base = [
       server: server,
       path: "/mcp",
-      auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+      auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
     ]
 
     state =
@@ -350,7 +350,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       AttestoMCP.Server.Plug.init(
         server: server,
         path: "/mcp",
-        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+        auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
       )
 
     conn = AttestoMCP.Server.Plug.call(conn, opts)
@@ -364,7 +364,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       AttestoMCP.Server.Plug.init(
         server: :late_mcp_server,
         path: "/mcp",
-        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+        auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
       )
 
     assert is_tuple(Macro.escape(state))
@@ -385,7 +385,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
       AttestoMCP.Server.Plug.init(
         server: server,
         path: "/mcp",
-        auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+        auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
       )
 
     response = AttestoMCP.Server.Plug.call(conn(:get, "/mcp"), state)
@@ -418,7 +418,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
         AttestoMCP.Server.Plug.init(
           server: server,
           path: "/mcp",
-          auth: [config: config, resource: "http://www.example.com/mcp"]
+          auth: [config: config, resource: "https://www.example.com/mcp"]
         )
 
       response =
@@ -445,7 +445,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
         path: "/mcp",
         auth: [
           config: fn -> throw(:simulated_auth_config_failure) end,
-          resource: "http://www.example.com/mcp"
+          resource: "https://www.example.com/mcp"
         ]
       )
 
@@ -459,7 +459,7 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
   test "Plug rejects unsafe paths and unknown options", %{server: server} do
     base = [
       server: server,
-      auth: [issuer: "https://issuer.example", resource: "http://www.example.com/mcp"]
+      auth: [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
     ]
 
     for path <- [

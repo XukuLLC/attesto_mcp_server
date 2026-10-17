@@ -6,6 +6,8 @@ defmodule AttestoMCP.Server.PresentationTest do
   import Plug.Test
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
   alias AttestoMCP.Server.Stdio
   alias AttestoMCP.Server.Test, as: ServerTest
 
@@ -13,10 +15,6 @@ defmodule AttestoMCP.Server.PresentationTest do
   @legacy "2025-11-25"
   @legacy_2025_06_18 "2025-06-18"
   @resource "https://mcp.example.com/mcp"
-
-  defp start_server(opts) do
-    start_supervised!(Supervisor.child_spec({Server, opts}, id: make_ref()))
-  end
 
   defp reporter(parent), do: fn report -> send(parent, {:reported, report.source}) end
 

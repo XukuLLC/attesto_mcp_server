@@ -33,7 +33,7 @@ the boundary without setting up a login flow.
 In an existing Elixir project, add the dependency and fetch it:
 
 ```elixir
-{:attesto_mcp_server, "~> 2.6"}
+{:attesto_mcp_server, "~> 2.7"}
 ```
 
 ```sh
@@ -146,7 +146,7 @@ Supply these pieces through the host application's supervision and routing:
 
 Start from the Livebook for a complete authenticated Bandit example. The
 [Bandit reference](usage.md#bandit-development-server) explains direct wiring;
-[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.6.0/examples/bandit.exs) is a credential-free boundary
+[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.7.0/examples/bandit.exs) is a credential-free boundary
 example that returns 401 until configured with a valid key and credential.
 Setting an issuer URL alone does not supply a token verifier. See
 [Attesto and resource metadata](usage.md#attesto-and-resource-metadata) for

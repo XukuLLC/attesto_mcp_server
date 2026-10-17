@@ -6,6 +6,8 @@ defmodule AttestoMCP.Server.RequestMetaTest do
   import Plug.Test
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 0, start_server: 1]
   alias AttestoMCP.Server.{RequestMeta, Stdio}
   alias AttestoMCP.Server.Test, as: ServerTest
 
@@ -18,8 +20,6 @@ defmodule AttestoMCP.Server.RequestMetaTest do
     "io.modelcontextprotocol/protocolVersion" => @modern,
     "io.modelcontextprotocol/clientCapabilities" => %{}
   }
-
-  defp start_server(opts \\ []), do: start_supervised!({Server, opts})
 
   defp register_meta_tool(server, name \\ "echo_meta") do
     parent = self()

@@ -5,7 +5,6 @@ defmodule AttestoMCP.Server.Output do
 
   @max_output_depth 64
   @max_output_nodes 10_000
-  @default_output_bytes 2_000_000
   @max_error_path_bytes 512
   @error_path_hash_bytes 8
 
@@ -53,7 +52,7 @@ defmodule AttestoMCP.Server.Output do
   @spec canonicalize_detailed(term(), keyword()) ::
           {:ok, term()} | {:error, CanonicalizationError.t()}
   def canonicalize_detailed(value, opts \\ []) do
-    max_bytes = configured_max_bytes(opts)
+    max_bytes = Schema.configured_max_bytes(opts)
     mode = configured_canonicalization(opts)
 
     if max_bytes > 0 and mode in [:strict, :json, :jason] do
@@ -799,17 +798,6 @@ defmodule AttestoMCP.Server.Output do
        do: {:ok, bytes + count}
 
   defp add_bytes(_bytes, _count, _max_bytes), do: :error
-
-  defp configured_max_bytes(opts) when is_list(opts) do
-    max_bytes = Keyword.get(opts, :max_bytes, @default_output_bytes)
-
-    if is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
-         max_bytes <= Schema.max_allowed_instance_bytes(),
-       do: max_bytes,
-       else: 0
-  end
-
-  defp configured_max_bytes(_opts), do: 0
 
   defp configured_canonicalization(opts) when is_list(opts) do
     case Keyword.get(opts, :output_canonicalization, :strict) do

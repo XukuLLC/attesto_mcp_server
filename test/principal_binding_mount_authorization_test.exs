@@ -7,6 +7,8 @@ defmodule AttestoMCP.Server.PrincipalBindingMountAuthorizationTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Session
 
+  import AttestoMCP.Server.TestSupport.Async, only: [eventually: 1]
+
   @resource "https://mcp.example.com/mcp"
   @modern "2026-07-28"
   @legacy "2025-11-25"
@@ -471,17 +473,4 @@ defmodule AttestoMCP.Server.PrincipalBindingMountAuthorizationTest do
   defp probe_body_reads(%Plug.Conn{adapter: {Plug.Adapters.Test.Conn, payload}} = conn, events) do
     %{conn | adapter: {BodyReadProbeAdapter, {payload, events}}}
   end
-
-  defp eventually(fun, attempts \\ 100)
-
-  defp eventually(fun, attempts) when attempts > 0 do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
-  end
-
-  defp eventually(_fun, 0), do: false
 end

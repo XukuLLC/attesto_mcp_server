@@ -3,6 +3,7 @@ defmodule AttestoMCP.Server.P5RegressionTest do
 
   alias AttestoMCP.Server
   alias AttestoMCP.Server.{JSONRPC, Schema, Subscriptions}
+  alias AttestoMCP.Server.TestSupport.Async
 
   @modern "2026-07-28"
   @legacy "2025-11-25"
@@ -42,7 +43,10 @@ defmodule AttestoMCP.Server.P5RegressionTest do
     assert {1, %{"error" => %{"code" => -32603}}} = result
     assert Process.alive?(self())
 
-    assert eventually(fn -> Server.stats(server).active == 0 end)
+    assert Async.eventually(fn -> Server.stats(server).active == 0 end,
+             attempts: 20,
+             interval_ms: 5
+           )
 
     assert {2, %{"result" => %{"resultType" => "complete"}}} =
              Server.dispatch(
@@ -238,18 +242,5 @@ defmodule AttestoMCP.Server.P5RegressionTest do
              )
 
     assert_receive {:version, @legacy}
-  end
-
-  defp eventually(fun, attempts \\ 20)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.(),
-      do: true,
-      else:
-        (
-          Process.sleep(5)
-          eventually(fun, attempts - 1)
-        )
   end
 end

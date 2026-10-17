@@ -2,6 +2,8 @@ defmodule AttestoMCP.Server.OutputArgumentErgonomicsTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
   alias AttestoMCP.Server.{Content, Output, Result}
 
   @modern "2026-07-28"
@@ -492,10 +494,6 @@ defmodule AttestoMCP.Server.OutputArgumentErgonomicsTest do
 
     capture_response = call_tool(capture_server, 7, "unloaded-capture", %{capture_key => "ok"})
     assert get_in(capture_response, ["result", "structuredContent", "atom_key?"]) == true
-  end
-
-  defp start_server(opts) do
-    start_supervised!(%{Server.child_spec(opts) | id: make_ref()})
   end
 
   defp call_tool(server, id, name, arguments) do

@@ -5,14 +5,14 @@ defmodule AttestoMCP.Server.HeaderNameTest do
 
   @reserved ~w(authorization cookie host content-length transfer-encoding connection upgrade)
 
-  test "accepts HTTP token names and rejects every reserved complete header" do
+  test "accepts HTTP token names and reserved words used under the mcp-param prefix" do
     assert HeaderName.valid?("x-request-id")
     assert HeaderName.valid?("mcp-param-account")
     assert HeaderName.valid_suffix?("account")
 
     for name <- @reserved do
-      refute HeaderName.valid?(name)
-      refute HeaderName.valid?(String.upcase(name))
+      assert HeaderName.valid?(name)
+      assert HeaderName.valid?(String.upcase(name))
       assert HeaderName.valid_suffix?(name)
     end
   end

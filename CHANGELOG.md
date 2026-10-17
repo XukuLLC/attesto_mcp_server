@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.7.0 - 2026-10-17
+
+- Keep request-path rate-limit decisions constant-time by storing buckets per
+  traffic category, pruning expired buckets during periodic cleanup, and
+  evicting one member of the largest category without scanning or sorting the
+  10,000 live keys. Group authentication failures from one IPv6 `/64`. Once an
+  authentication-failure bucket is exhausted, reject later attempts before
+  token-signature verification. A separate refundable `auth_checks` bucket
+  bounds concurrent verification without charging successful authentication
+  against the failure rate; failures are recorded after verification. A full
+  table reclaims one bucket from its most populous traffic category so one
+  category cannot globally deny admission to new sources.
+- Bind modern subscriptions and session-bound streams to the scopes captured
+  when they open, on every transport. Delivery now checks generic catalog
+  scopes and resource-definition scope alternatives before any optional host
+  reauthorization callback. Transport-neutral callers must pass granted scopes
+  when opening a subscription or stream; compatibility arities capture none
+  and therefore receive only notifications with no scope requirement.
+- Limit active session-bound sessions to 128 per principal and live legacy
+  streams to eight per session and server process by default. Add
+  `max_sessions_per_principal` and `max_legacy_streams_per_session`, exact
+  active-session counts for the bundled stores, atomic admission across shared
+  bundled stores, deterministic durable principal encoding across nodes, and
+  namespace-aware optional count/admission callbacks for custom stores. Ecto
+  updates now share the admission lock so an in-flight expiry extension cannot
+  exceed the principal cap. Existing Ecto hosts should rerun
+  `mix attesto_mcp_server.gen.migration` and apply the generated concurrent
+  principal-admission index migration.
+- Apply configured `default_scopes` to `completion/complete` before its
+  prompt/resource fallback scopes.
+- Replace full-catalog snapshots on selected tool, exact resource, and
+  registered-header request paths with indexed registry lookups. Registered
+  argument mirrors now follow a tool's wire-level name when it differs from
+  its registry identity.
+- Split URI-template matching, multi-round retry handling, store setup,
+  startup option validation, request-event delivery, handler invocation,
+  protocol negotiation, and scope policy into focused internal modules. Reuse
+  the same Ecto adapter checks, legacy-session lookup, telemetry correlation,
+  scope-set evaluation, and bounded JSON option parsing across their callers.
+  These internal moves preserve the public API and transport message protocol.
+- Consolidate test HTTP clients, polling, and supervised server startup in
+  `test/support` so transport and concurrency regressions exercise the same
+  helpers.
+- Retain the hidden cacheable-method and icon-limit getters as callable 2.x
+  compatibility entry points.
+- Correct the multi-mount Phoenix example so every protected-resource metadata
+  route names its trusted authorization-server issuer.
+- Translate the server's legacy `:resource` endpoint-path option to MCP 2.1's
+  unambiguous `:resource_path` boundary without forwarding both keys.
+- Preserve the explicitly local `allow_dynamic_origin` mode by translating it
+  to MCP 2.1's pinned callback contract, and have the installer emit
+  `allow_http: true` only for an accepted HTTP loopback origin.
+- Give bounded schema compilation and instance evaluation five seconds on a
+  loaded host. Schema and JSON node, depth, and byte limits continue to bound
+  the work below the server's 30-second request deadline.
+- Verify the frozen 2.6 conformance fingerprint against its recorded release
+  commit so later release work does not invalidate historical evidence.
+
 ## 2.6.0 - 2026-10-17
 
 - Make the server-side HTTP authorization gate use the same per-method scope

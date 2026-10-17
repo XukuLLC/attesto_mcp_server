@@ -17,8 +17,14 @@ defmodule AttestoMCP.Server.SessionStore do
   must return the updated record. If the supplied timestamp is older than the
   record's current `"last_seen_ms"`, adapters must retain the newer value; a
   successful touch must never rewind session activity. Adapters may implement
-  `count_active/1` to let server stats count sessions without materializing
-  bounded record pages; otherwise the server falls back to `list_active/1`.
+  `count_active/1` or namespace-aware `count_active/2` to let server stats
+  count sessions without materializing bounded record pages; otherwise the
+  server falls back to `list_active/1`. Adapters should implement
+  `count_active_for_principal/2` or its namespace-aware arity-three form so the
+  server can enforce its per-principal session limit without materializing all
+  active records. Shared adapters should also
+  implement `save_below_principal_limit/4` as one atomic count-and-save
+  operation so concurrent server processes cannot exceed that limit.
   They may also implement `list_active_keys/4` to provide bounded, cursor-based
   operator visibility without loading principal bindings or complete session
   records. The returned keys must be scoped to the requested namespace, ordered
@@ -40,10 +46,18 @@ defmodule AttestoMCP.Server.SessionStore do
           (session_record() -> {:ok, session_record()} | :delete | {:error, term()})
 
   @callback save(store(), key(), session_record()) :: :ok | {:error, term()}
+  @callback save_below_principal_limit(store(), key(), session_record(), pos_integer()) ::
+              :ok | :limit_reached | {:error, term()}
   @callback load(store(), key()) :: {:ok, session_record()} | :not_found | {:error, term()}
   @callback delete(store(), key()) :: :ok | {:error, term()}
   @callback list_active(store()) :: {:ok, [{key(), session_record()}]} | {:error, term()}
   @callback count_active(store()) :: {:ok, non_neg_integer()} | {:error, term()}
+  @callback count_active(store(), String.t()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+  @callback count_active_for_principal(store(), term()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+  @callback count_active_for_principal(store(), String.t(), term()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
   @callback list_active_keys(store(), String.t(), String.t() | nil, pos_integer()) ::
               {:ok, active_key_page()} | {:error, term()}
   @callback update_ttl(store(), key(), non_neg_integer()) ::
@@ -52,7 +66,12 @@ defmodule AttestoMCP.Server.SessionStore do
               {:ok, session_record()} | :not_found | {:error, term()}
   @callback cleanup_expired(store()) :: {:ok, [key()]} | {:error, term()}
 
-  @optional_callbacks count_active: 1, list_active_keys: 4
+  @optional_callbacks save_below_principal_limit: 4,
+                      count_active: 1,
+                      count_active: 2,
+                      count_active_for_principal: 2,
+                      count_active_for_principal: 3,
+                      list_active_keys: 4
 
   @typedoc "A configured adapter module and its opaque store handle."
   @type adapter :: {module(), store()}

@@ -2,6 +2,8 @@ defmodule AttestoMCP.Server.SessionVisibilityTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
   alias AttestoMCP.Server.API
   alias AttestoMCP.Server.Session
   alias AttestoMCP.Server.SessionStore.ETS
@@ -182,12 +184,5 @@ defmodule AttestoMCP.Server.SessionVisibilityTest do
 
     assert {:error, :session_store_unavailable} =
              Server.active_session_ids(no_progress, cursor: "same", limit: 1)
-  end
-
-  defp start_server(opts) do
-    start_supervised!(%{
-      id: make_ref(),
-      start: {Server, :start_link, [opts]}
-    })
   end
 end

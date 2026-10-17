@@ -129,7 +129,7 @@ defmodule AttestoMCP.Server.ScopeMap do
         "completion/complete",
         params,
         scope_map,
-        _default_scopes,
+        default_scopes,
         _subscription_scopes
       ) do
     case configured_scopes(scope_map, "completion/complete") do
@@ -137,10 +137,11 @@ defmodule AttestoMCP.Server.ScopeMap do
         scopes
 
       nil ->
-        case if(is_map(params), do: Map.get(params, "ref"), else: nil) do
-          %{"type" => "ref/resource"} -> default_scopes("resources/read")
-          _other -> default_scopes("completion/complete")
-        end
+        configured_default(default_scopes) ||
+          case if(is_map(params), do: Map.get(params, "ref"), else: nil) do
+            %{"type" => "ref/resource"} -> default_scopes("resources/read")
+            _other -> default_scopes("completion/complete")
+          end
     end
   end
 

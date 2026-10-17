@@ -6,18 +6,21 @@ defmodule AttestoMCP.Server.MultiMountExampleRouter do
     attesto_mcp_protected_resource_metadata("/mcp/catalog",
       scopes: ["catalog.mcp"],
       base_url: "https://mcp.example.com",
+      issuer: "https://auth.example.com",
       root: false
     )
 
     attesto_mcp_protected_resource_metadata("/mcp/operations",
       scopes: ["operations.mcp"],
       base_url: "https://mcp.example.com",
+      issuer: "https://auth.example.com",
       root: false
     )
 
     attesto_mcp_protected_resource_metadata("/mcp/preview",
       scopes: ["preview.mcp"],
       base_url: "https://mcp.example.com",
+      issuer: "https://auth.example.com",
       root: false
     )
   end

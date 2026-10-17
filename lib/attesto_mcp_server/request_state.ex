@@ -41,7 +41,8 @@ defmodule AttestoMCP.Server.RequestState do
     end
   end
 
-  @doc "Verifies state and returns its claims for the modern retry protocol."
+  @doc "Ensures that the process-local fallback replay table exists and returns it."
+  @spec ensure_table() :: :ets.tid()
   def ensure_table, do: state_table()
 
   def verify_payload(state, principal, tenant, version, method, params, opts \\ [])

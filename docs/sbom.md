@@ -1,9 +1,9 @@
 # Historical production dependency inventory (2.3.0 evidence)
 
 This document is frozen evidence for the 2.3.0 release. It is not the current
-2.6.0 dependency inventory or an evergreen SBOM. The declared ranges in
+2.7.0 dependency inventory or an evergreen SBOM. The declared ranges in
 `mix.exs`, the release package metadata, and the consumer's resolved dependency
-graph are authoritative for 2.6.0.
+graph are authoritative for 2.7.0.
 
 This inventory records the public-Hex resolution observed locally on 2026-10-03,
 before the coordinated releases, using `mix deps.get` and
@@ -80,5 +80,5 @@ passed on Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.1.1. CI independently
 declares strict lanes for Elixir 1.18.3/OTP 27.3 and Elixir 1.20.4/OTP 29.0.5.
 License and version claims above are tied to this resolution date. Dependency
 constraints have changed since 2.3.0, so this evidence must not be used as a
-current 2.6.0 inventory. Release and deployment tooling should generate an SBOM
+current 2.7.0 inventory. Release and deployment tooling should generate an SBOM
 from the dependency graph resolved for that build.

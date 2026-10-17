@@ -135,7 +135,9 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       ])
 
     assert accepted.issues == []
-    assert Igniter.Test.diff(accepted) =~ ~s(base_url: "http://127.0.0.1:4000")
+    accepted_diff = Igniter.Test.diff(accepted)
+    assert accepted_diff =~ ~s(base_url: "http://127.0.0.1:4000")
+    assert accepted_diff =~ "allow_http: true"
   end
 
   test "canonicalizes valid HTTPS DNS and IPv6 origins" do
@@ -150,7 +152,9 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       ])
 
     assert dns.issues == []
-    assert Igniter.Test.diff(dns) =~ ~s(base_url: "https://mcp.example.com")
+    dns_diff = Igniter.Test.diff(dns)
+    assert dns_diff =~ ~s(base_url: "https://mcp.example.com")
+    refute dns_diff =~ "allow_http: true"
 
     ipv6 =
       false

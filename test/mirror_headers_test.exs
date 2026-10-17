@@ -147,6 +147,98 @@ defmodule AttestoMCP.Server.MirrorHeadersTest do
     assert Jason.decode!(invalid_padding.resp_body)["error"]["code"] == -32020
   end
 
+  test "wire-name aliases retain their registered argument mirrors", %{
+    server: server,
+    config: config
+  } do
+    assert :ok =
+             Server.register_tool(server, "internal-secure", %{
+               name: "public-secure",
+               description: "aliased mirror header fixture",
+               input_schema: %{
+                 "type" => "object",
+                 "properties" => %{
+                   "account" => %{"type" => "string", "x-mcp-header" => "account"}
+                 }
+               },
+               handler: fn _, _ -> {:ok, "accepted"} end
+             })
+
+    token = token(config)
+
+    assert call(
+             server,
+             config,
+             token,
+             "public-secure",
+             %{"account" => "acct-42"},
+             "public-secure",
+             [{"mcp-param-account", "acct-42"}]
+           ).status == 200
+
+    assert call(
+             server,
+             config,
+             token,
+             "public-secure",
+             %{"account" => "acct-42"},
+             "public-secure",
+             []
+           ).status == 400
+  end
+
+  test "wire-name mirrors use the definition selected for the caller", %{
+    server: server,
+    config: config
+  } do
+    assert :ok =
+             Server.register_tool(server, "a-hidden", %{
+               name: "shared-tool",
+               input_schema: %{
+                 "type" => "object",
+                 "properties" => %{
+                   "hidden" => %{"type" => "string", "x-mcp-header" => "hidden"}
+                 }
+               },
+               authorize: fn _context -> false end,
+               handler: fn _, _ -> {:ok, "unreachable"} end
+             })
+
+    assert :ok =
+             Server.register_tool(server, "b-visible", %{
+               name: "shared-tool",
+               input_schema: %{
+                 "type" => "object",
+                 "properties" => %{
+                   "visible" => %{"type" => "string", "x-mcp-header" => "visible"}
+                 }
+               },
+               handler: fn _, _ -> {:ok, "accepted"} end
+             })
+
+    token = token(config)
+
+    assert call(
+             server,
+             config,
+             token,
+             "shared-tool",
+             %{"visible" => "yes"},
+             "shared-tool",
+             [{"mcp-param-visible", "yes"}]
+           ).status == 200
+
+    assert call(
+             server,
+             config,
+             token,
+             "shared-tool",
+             %{"visible" => "yes"},
+             "shared-tool",
+             [{"mcp-param-hidden", "yes"}]
+           ).status == 400
+  end
+
   test "missing sentinel delimiters are compared literally", %{server: server, config: config} do
     register_tool(server, "literal", %{
       "type" => "object",

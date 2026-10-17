@@ -191,6 +191,12 @@ defmodule AttestoMCP.Server.Telemetry do
 
   def protocol_method(_method), do: :unknown
 
+  @doc false
+  @spec correlation(term()) :: String.t() | nil
+  def correlation(id) when is_binary(id), do: "string:" <> id
+  def correlation(id) when is_integer(id), do: "integer:" <> Integer.to_string(id)
+  def correlation(_id), do: nil
+
   defp safe_metadata(metadata) when is_map(metadata) do
     safe =
       metadata

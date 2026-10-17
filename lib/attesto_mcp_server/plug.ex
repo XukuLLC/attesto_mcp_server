@@ -46,8 +46,11 @@ defmodule AttestoMCP.Server.Plug do
     HeaderName,
     HostCallback,
     JSONRPC,
+    LegacySession,
+    Protocol,
     Schema,
     ScopeMap,
+    ScopePolicy,
     Session,
     Telemetry
   }
@@ -64,6 +67,7 @@ defmodule AttestoMCP.Server.Plug do
   @max_request_header_bytes 65_536
   @default_max_body_bytes 2_000_000
   @default_max_message_bytes 1_000_000
+  @legacy_session_private :attesto_mcp_server_legacy_session
   @static_path_pattern ~r/\A\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\z/
   @resolver_assign_keys %{
     claims_key: :attesto_mcp_claims,
@@ -74,15 +78,6 @@ defmodule AttestoMCP.Server.Plug do
   }
   @principal_binding_assign_key :attesto_mcp_principal_binding
   @handler_context_private_key :attesto_mcp_handler_context
-  @visible_definition_methods [
-    "tools/list",
-    "resources/list",
-    "resources/templates/list"
-  ]
-  @selected_definition_methods [
-    "tools/call",
-    "resources/read"
-  ]
   @allowed_plug_option_keys [
     :server,
     :path,
@@ -98,6 +93,7 @@ defmodule AttestoMCP.Server.Plug do
     :subscription_scopes,
     :max_body_bytes,
     :max_message_bytes,
+    :allow_http,
     :allow_dynamic_origin,
     :origin,
     :base_url,
@@ -145,6 +141,7 @@ defmodule AttestoMCP.Server.Plug do
           | {:subscription_scopes, [String.t()]}
           | {:max_body_bytes, pos_integer()}
           | {:max_message_bytes, pos_integer()}
+          | {:allow_http, boolean()}
           | {:allow_dynamic_origin, boolean()}
           | {:origin, String.t()}
           | {:base_url, String.t()}
@@ -192,10 +189,13 @@ defmodule AttestoMCP.Server.Plug do
     scope_map = Keyword.get(opts, :scope_map)
     scope_policy = Keyword.get(opts, :scope_policy)
 
+    deferred_scope_policy_validation? =
+      is_map(scope_policy) and not server_available_at_init?(server)
+
     if Keyword.has_key?(opts, :scope_map),
       do: validate_scope_map_option!(scope_map)
 
-    validate_scope_policy_option!(scope_policy)
+    ScopePolicy.validate!(scope_policy)
     validate_effective_scope_policy_overlap!(server, opts, scope_policy)
     validate_scope_list_option!(opts, :default_scopes, allow_empty: false)
     validate_scope_list_option!(opts, :scopes_supported, allow_empty: false)
@@ -206,12 +206,17 @@ defmodule AttestoMCP.Server.Plug do
       server: server,
       path: path,
       auth_opts: auth_opts,
+      scope_opts: Keyword.merge(auth_opts || [], opts),
       auth_boundary: auth_boundary,
       auth_resolver: auth_resolver,
       auth_source_opts: opts,
+      deferred_scope_policy_validation?: deferred_scope_policy_validation?,
       opts: opts
     }
   end
+
+  defp server_available_at_init?(server) when is_pid(server), do: Process.alive?(server)
+  defp server_available_at_init?(server) when is_atom(server), do: is_pid(Process.whereis(server))
 
   defp validate_plug_options!(opts) do
     unknown = Keyword.keys(opts) -- @allowed_plug_option_keys
@@ -233,42 +238,6 @@ defmodule AttestoMCP.Server.Plug do
 
   defp validate_scope_map_option!(scope_map), do: ScopeMap.validate!(scope_map)
 
-  defp validate_scope_policy_option!(nil), do: :ok
-
-  defp validate_scope_policy_option!(scope_policy) when is_map(scope_policy) do
-    valid? =
-      Enum.all?(scope_policy, fn
-        {method, :visible_definitions} -> method in @visible_definition_methods
-        {method, :selected_definition} -> method in @selected_definition_methods
-        _ -> false
-      end)
-
-    if valid? do
-      :ok
-    else
-      raise ArgumentError,
-            ":scope_policy must map supported string methods to :visible_definitions or :selected_definition"
-    end
-  end
-
-  defp validate_scope_policy_option!(_),
-    do: raise(ArgumentError, ":scope_policy must be a map")
-
-  defp validate_scope_policy_overlap!(scope_map, scope_policy)
-       when is_map(scope_map) and is_map(scope_policy) do
-    overlap =
-      Map.keys(scope_map)
-      |> MapSet.new()
-      |> MapSet.intersection(MapSet.new(Map.keys(scope_policy)))
-
-    if MapSet.size(overlap) > 0 do
-      raise ArgumentError,
-            ":scope_policy cannot overlap :scope_map; choose one policy for each method"
-    end
-  end
-
-  defp validate_scope_policy_overlap!(_scope_map, _scope_policy), do: :ok
-
   defp validate_effective_scope_policy_overlap!(_server, _opts, nil), do: :ok
 
   defp validate_effective_scope_policy_overlap!(server, opts, scope_policy)
@@ -280,7 +249,7 @@ defmodule AttestoMCP.Server.Plug do
         server_scope_map_at_init!(server)
       end
 
-    validate_scope_policy_overlap!(effective_scope_map, scope_policy)
+    ScopePolicy.validate_overlap!(effective_scope_map, scope_policy)
   end
 
   defp server_scope_map_at_init!(server) when is_pid(server) do
@@ -420,6 +389,7 @@ defmodule AttestoMCP.Server.Plug do
       :resource_audience,
       :base_url,
       :origin,
+      :allow_http,
       :allow_dynamic_origin,
       :scopes_supported
     ]
@@ -534,12 +504,14 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_resolver_static_resource_options!(opts, path) do
     top =
       [resource_path: path]
-      |> Keyword.merge(Keyword.take(opts, [:resource, :resource_audience, :base_url, :origin]))
+      |> Keyword.merge(
+        Keyword.take(opts, [:resource, :resource_audience, :base_url, :origin, :allow_http])
+      )
 
     validate_resource_configuration!(top)
   end
 
-  defp resolve_authentication!(%{auth_resolver: nil} = state), do: state
+  defp resolve_authentication!(%{auth_resolver: nil} = state), do: put_scope_opts(state)
 
   defp resolve_authentication!(%{auth_resolver: resolver} = state) do
     nested = invoke_auth_resolver(resolver)
@@ -552,7 +524,11 @@ defmodule AttestoMCP.Server.Plug do
       | auth_opts: auth_opts,
         auth_boundary: prepare_protect_resource(auth_opts)
     }
+    |> put_scope_opts()
   end
+
+  defp put_scope_opts(state),
+    do: Map.put(state, :scope_opts, Keyword.merge(state.auth_opts || [], state.opts))
 
   defp invoke_auth_resolver(resolver) when is_function(resolver, 0), do: resolver.()
 
@@ -620,10 +596,12 @@ defmodule AttestoMCP.Server.Plug do
           true ->
             case resolve_server_state(state) do
               {:ok, state} ->
-                validate_scope_policy_overlap!(
-                  state.opts[:scope_map],
-                  state.opts[:scope_policy]
-                )
+                if state.deferred_scope_policy_validation? do
+                  ScopePolicy.validate_overlap!(
+                    state.opts[:scope_map],
+                    state.opts[:scope_policy]
+                  )
+                end
 
                 cond do
                   request_headers_over_budget?(conn) ->
@@ -705,25 +683,34 @@ defmodule AttestoMCP.Server.Plug do
     # Authenticate every protected leg before reading a POST body. POST scope
     # requirements still depend on the decoded MCP method/filter and are
     # enforced later by process_post/3 without repeating authentication.
-    case protect_resource(conn, state, :authenticate_only) do
-      {:ok, authenticated_conn} ->
-        case authorize_mount(authenticated_conn, state) do
-          {:ok, authorized_conn} ->
-            protocol(authorized_conn, state)
+    case reserve_auth_check(conn, state) do
+      {:ok, prechecked_conn, reservation_key} ->
+        case protect_resource(prechecked_conn, state, :authenticate_only) do
+          {:ok, authenticated_conn} ->
+            :ok = Server.refund_rate(state.server, reservation_key, :auth_checks)
+
+            case authorize_mount(authenticated_conn, state) do
+              {:ok, authorized_conn} ->
+                protocol(authorized_conn, state)
+
+              {:error, %Error{} = error} ->
+                error_response(authenticated_conn, nil, error, state.auth_opts)
+
+              :denied ->
+                mount_forbidden(authenticated_conn)
+            end
+
+          {:halt, auth_conn} ->
+            auth_refusal(:invalid_credentials)
+            record_auth_failure(prechecked_conn, auth_conn, state, reservation_key)
 
           {:error, %Error{} = error} ->
-            error_response(authenticated_conn, nil, error, state.auth_opts)
-
-          :denied ->
-            mount_forbidden(authenticated_conn)
+            :ok = Server.refund_rate(state.server, reservation_key, :auth_checks)
+            error_response(prechecked_conn, nil, error, state.auth_opts)
         end
 
-      {:halt, auth_conn} ->
-        auth_refusal(:invalid_credentials)
-        auth_refusal_response(conn, auth_conn, state)
-
-      {:error, %Error{} = error} ->
-        error_response(conn, nil, error, state.auth_opts)
+      :rate_limited ->
+        auth_rate_limited(conn)
     end
   end
 
@@ -835,7 +822,7 @@ defmodule AttestoMCP.Server.Plug do
                   error_response(scope_conn, Map.get(request, :id), error, state.auth_opts)
 
                 {:auth_halt, auth_conn} ->
-                  auth_refusal_response(conn, auth_conn, state)
+                  auth_failure_response(conn, auth_conn, state)
 
                 result ->
                   result
@@ -868,29 +855,37 @@ defmodule AttestoMCP.Server.Plug do
            ),
          {:ok, conn} <- result,
          :ok <- reject_client_response(request, era),
-         :ok <- validate_content_type(conn),
          :ok <- accept_header(conn),
          :ok <- rate_limit_request(conn, state, request),
          :ok <- validate_modern_headers(conn, request, era, state),
-         :ok <- validate_legacy_session(request, conn, state, era),
+         {:ok, conn} <- validate_legacy_session(request, conn, state, era),
          {:ok, conn, session_id} <- maybe_initialize_session(conn, request, state, era),
          {:ok, session_context} <-
            session_context_for_post(state, session_id, conn, request, era),
-         {:ok, base_context} <- handler_context(conn, state) do
-      context =
-        base_context
-        |> Map.put(:session_id, session_id)
-        |> Map.put(:scope_map, dispatch_scope_map(state, request))
-        |> Map.put(:default_scopes, state.opts[:default_scopes])
-        |> Map.put(:http_scope_policy_resolved, true)
-        |> Map.put(
-          :definition_scope_policy,
-          scope_policy_for(request, state) in [:visible_definitions, :selected_definition]
-        )
-        |> Map.merge(session_context)
-        |> maybe_subscription_authorizer(request, conn, state)
-        |> Map.put(:owner, request_owner(era, session_id))
-
+         {:ok, base_context} <- handler_context(conn, state),
+         context =
+           base_context
+           |> Map.put(:session_id, session_id)
+           |> Map.put(:scope_map, dispatch_scope_map(state, request))
+           |> Map.put(:default_scopes, state.opts[:default_scopes])
+           |> Map.put(:http_scope_policy_resolved, true)
+           |> Map.put(
+             :definition_scope_policy,
+             ScopePolicy.definition_mode?(scope_policy_for(request, state))
+           )
+           |> Map.merge(session_context)
+           |> maybe_subscription_authorizer(request, conn, state)
+           |> Map.put(:owner, request_owner(era, session_id)),
+         definition_authorizer = definition_scope_authorizer(conn, state, request),
+         :ok <-
+           maybe_validate_declared_headers(
+             era,
+             conn,
+             request,
+             state,
+             context,
+             definition_authorizer
+           ) do
       cond do
         request.kind == :request and
           request.method == "subscriptions/listen" and
@@ -913,7 +908,7 @@ defmodule AttestoMCP.Server.Plug do
             era,
             conn,
             session_id,
-            definition_scope_authorizer(conn, state, request)
+            definition_authorizer
           )
 
         true ->
@@ -925,7 +920,7 @@ defmodule AttestoMCP.Server.Plug do
             era,
             streaming_request?(request, state),
             session_id,
-            definition_scope_authorizer(conn, state, request)
+            definition_authorizer
           )
       end
     else
@@ -944,41 +939,32 @@ defmodule AttestoMCP.Server.Plug do
   # selected method. The core still receives the remaining configured scope
   # map, while its method-level authorization sees no synthetic policy atom.
   defp http_required_scopes_for(state, request) do
-    case scope_policy_for(request, state) do
-      mode when mode in [:visible_definitions, :selected_definition] -> []
-      _ -> required_scopes_for(request, Keyword.merge(state.auth_opts, state.opts))
-    end
+    if ScopePolicy.definition_mode?(scope_policy_for(request, state)),
+      do: [],
+      else: required_scopes_for(request, state.scope_opts)
   end
 
   defp dispatch_scope_map(state, request) do
     scope_map = state.opts[:scope_map] || %{}
 
-    case scope_policy_for(request, state) do
-      mode when mode in [:visible_definitions, :selected_definition] ->
-        Map.delete(scope_map, request.method)
+    if ScopePolicy.definition_mode?(scope_policy_for(request, state)) do
+      Map.delete(scope_map, request.method)
+    else
+      case http_required_scopes_for(state, request) do
+        scopes when is_list(scopes) and scopes != [] ->
+          Map.put(scope_map, request.method, scopes)
 
-      _ ->
-        case http_required_scopes_for(state, request) do
-          scopes when is_list(scopes) and scopes != [] ->
-            Map.put(scope_map, request.method, scopes)
-
-          _ ->
-            scope_map
-        end
+        _ ->
+          scope_map
+      end
     end
   end
 
-  defp scope_policy_for(%{method: method}, state) when is_binary(method) do
-    case state.opts[:scope_policy] do
-      policy when is_map(policy) -> Map.get(policy, method)
-      _ -> nil
-    end
-  end
-
-  defp scope_policy_for(_request, _state), do: nil
+  defp scope_policy_for(request, state),
+    do: ScopePolicy.mode(request, state.opts[:scope_policy])
 
   defp definition_scope_authorizer(conn, state, request) do
-    if scope_policy_for(request, state) in [:visible_definitions, :selected_definition] do
+    if ScopePolicy.definition_mode?(scope_policy_for(request, state)) do
       fn required_scopes ->
         try do
           checked =
@@ -1158,28 +1144,37 @@ defmodule AttestoMCP.Server.Plug do
       end
 
     auth_opts
+    |> maybe_configure_dynamic_origin()
     |> maybe_pin_resource_origin(canonical_resource)
     |> Keyword.delete(:scopes)
     |> Keyword.delete(:allow_dynamic_origin)
     |> Keyword.delete(:resource)
     |> Keyword.delete(:resource_audience)
-    |> Keyword.put(:resource, endpoint_path)
+    |> Keyword.put(:resource_path, endpoint_path)
     |> maybe_put_public_audience(audience)
     |> Keyword.put(:send_error, &__MODULE__.attesto_send_error/3)
     |> AttestoMCP.Plug.ProtectResource.prepare()
+  end
+
+  # Preserve the package's explicitly local legacy mode while translating it
+  # to AttestoMCP's pinned-origin contract. The callback is escape-safe and
+  # resolves the request origin only after the host opted into this mode.
+  defp maybe_configure_dynamic_origin(opts) do
+    if opts[:allow_dynamic_origin] == true and not Keyword.has_key?(opts, :base_url) and
+         not Keyword.has_key?(opts, :origin) do
+      opts
+      |> Keyword.put(:base_url, {AttestoMCP.Metadata, :resolve_origin, [[]]})
+      |> Keyword.put(:allow_http, true)
+    else
+      opts
+    end
   end
 
   defp maybe_pin_resource_origin(opts, resource) when is_binary(resource) do
     if absolute_origin?(opts[:base_url] || opts[:origin]) do
       opts
     else
-      %URI{scheme: scheme, host: host, port: port} = URI.parse(resource)
-
-      Keyword.put(
-        opts,
-        :base_url,
-        "#{scheme}://#{format_host(host)}#{origin_port_suffix(scheme, port)}"
-      )
+      Keyword.put(opts, :base_url, canonical_origin(resource))
     end
   end
 
@@ -1251,27 +1246,48 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp auth_refusal_response(conn, auth_conn, state) do
-    # Consume the auth-failure bucket before rendering the refusal. This keeps
-    # each attempt to one response and allows the first exhausted request to
-    # become a clean 429 instead of trying to overwrite a sent 401.
-    case auth_failure_rate_decision(conn, state) do
-      :rate_limited ->
+  defp auth_rate_limited(conn) do
+    conn
+    |> put_resp_header("cache-control", "private, no-store")
+    |> put_resp_header("vary", "authorization")
+    |> put_resp_content_type("application/json")
+    |> send_resp(429, Jason.encode!(%{"error" => "rate_limited"}))
+  end
+
+  defp record_auth_failure(conn, auth_conn, state, reservation_key) do
+    :ok = Server.refund_rate(state.server, reservation_key, :auth_checks)
+
+    case Server.allow_rate(state.server, reservation_key, :auth_failures) do
+      :ok ->
+        auth_failure_response(conn, auth_conn, state)
+
+      {:error, :rate_limited} ->
         cond do
           conn.state in [:sent, :chunked] -> conn
           auth_conn.state in [:sent, :chunked] -> auth_conn
-          true -> send_resp(conn, 429, Jason.encode!(%{"error" => "rate_limited"}))
+          true -> auth_rate_limited(conn)
         end
-
-      :ok ->
-        auth_failure_response(conn, auth_conn, state)
     end
+  rescue
+    _ -> auth_rate_limited(conn)
+  catch
+    _, _ -> auth_rate_limited(conn)
   end
 
-  defp auth_failure_rate_decision(conn, state) do
+  defp reserve_auth_check(conn, state) do
     case client_ip(conn, state) do
-      {:ok, ip} -> consume_auth_failure(state.server, ip)
-      :error -> :rate_limited
+      {:ok, ip} ->
+        key = {:ip, ip}
+
+        with :ok <- Server.rate_available?(state.server, key, :auth_failures),
+             :ok <- Server.allow_rate(state.server, key, :auth_checks) do
+          {:ok, assign(conn, :attesto_mcp_client_ip, ip), key}
+        else
+          {:error, :rate_limited} -> :rate_limited
+        end
+
+      :error ->
+        :rate_limited
     end
   rescue
     _ -> :rate_limited
@@ -1280,6 +1296,16 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp client_ip(conn, state) do
+    case Map.fetch(conn.assigns, :attesto_mcp_client_ip) do
+      {:ok, ip} ->
+        {:ok, ip}
+
+      :error ->
+        resolve_client_ip(conn, state)
+    end
+  end
+
+  defp resolve_client_ip(conn, state) do
     case state.opts[:client_ip] do
       nil ->
         # Preserve the pre-option behavior exactly. Bandit can expose a
@@ -1323,17 +1349,6 @@ defmodule AttestoMCP.Server.Plug do
     :inet.is_ip_address(ip)
   end
 
-  defp consume_auth_failure(server, client_ip) do
-    case Server.allow_rate(server, {:ip, client_ip}, :auth_failures) do
-      :ok -> :ok
-      {:error, :rate_limited} -> :rate_limited
-    end
-  rescue
-    _ -> :rate_limited
-  catch
-    _, _ -> :rate_limited
-  end
-
   defp dispatch_notification(
          conn_server,
          request,
@@ -1364,26 +1379,17 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp session_context(_state, nil, _conn, _request), do: {:ok, %{}}
+  defp session_context(nil, _conn), do: {:ok, %{}}
 
-  defp session_context(state, session_id, conn, request) do
-    case legacy_session_lookup(
-           state.server,
-           session_id,
-           principal_binding(conn),
-           tenant(conn),
-           request
-         ) do
-      {:ok, session} ->
+  defp session_context(_session_id, conn) do
+    case conn.private[@legacy_session_private] do
+      %Session{} = session ->
         {:ok,
          %{
            client_capabilities: session.client_capabilities,
            protocol_version: session.version,
            logging_level: session.logging_level
          }}
-
-      {:error, :session_store_unavailable} ->
-        {:error, Error.session_store_unavailable()}
 
       _ ->
         {:error, Error.invalid_request(%{"reason" => "legacy_session_unavailable"})}
@@ -1395,7 +1401,7 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp session_context_for_post(state, session_id, conn, request, era) do
-    case session_context(state, session_id, conn, request) do
+    case session_context(session_id, conn) do
       {:ok, _context} = result ->
         result
 
@@ -1869,7 +1875,8 @@ defmodule AttestoMCP.Server.Plug do
            principal_binding(conn),
            tenant(conn),
            self(),
-           legacy_stream_authorizer(conn, state)
+           legacy_stream_authorizer(conn, state),
+           conn.assigns[:attesto_mcp_scopes] || []
          ) do
       {:ok, stream_ref} ->
         Telemetry.execute([:stream, :open], %{count: 1}, %{transport: :http, method: "legacy"})
@@ -1899,6 +1906,9 @@ defmodule AttestoMCP.Server.Plug do
 
       {:error, :session_store_unavailable} ->
         send_resp(conn, 503, "service unavailable")
+
+      {:error, :stream_limit} ->
+        send_resp(conn, 429, "stream limit reached")
 
       _ ->
         send_resp(conn, 404, "session not found")
@@ -2017,7 +2027,7 @@ defmodule AttestoMCP.Server.Plug do
        when request.kind == :request and request.method == "initialize" do
     case AttestoMCP.Server.new_session(state.server, principal_binding(conn), tenant(conn)) do
       {:ok, session} ->
-        {:ok, conn, session.id}
+        {:ok, put_private(conn, @legacy_session_private, session), session.id}
 
       {:error, reason}
       when reason in [:nonportable_binding, :binding_too_large, :record_too_large] ->
@@ -2025,6 +2035,9 @@ defmodule AttestoMCP.Server.Plug do
 
       {:error, :session_store_unavailable} ->
         {:error, Error.session_store_unavailable()}
+
+      {:error, :session_limit} ->
+        {:error, Error.rate_limited()}
 
       _ ->
         {:error, Error.internal(%{"reason" => "session_create_failed"})}
@@ -2039,14 +2052,14 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_legacy_session(_request, conn, _state, @modern) do
     if is_binary(session_header(conn)),
       do: {:error, Error.invalid_header(%{"reason" => "modern_session_forbidden"})},
-      else: :ok
+      else: {:ok, conn}
   end
 
   defp validate_legacy_session(request, conn, state, @legacy) do
     if request.kind == :request and request.method == "initialize" do
       with :ok <- validate_legacy_initialize_header(conn, state),
            {:error, :missing_session} <- header_session(conn) do
-        :ok
+        {:ok, conn}
       else
         {:ok, _id} ->
           {:error, Error.invalid_request(%{"reason" => "initialize_session_forbidden"})}
@@ -2057,7 +2070,7 @@ defmodule AttestoMCP.Server.Plug do
     else
       if Map.get(request, :method) == "ping" and
            header_session(conn) == {:error, :missing_session} do
-        :ok
+        {:ok, conn}
       else
         validate_legacy_session_bound(request, conn, state)
       end
@@ -2082,12 +2095,13 @@ defmodule AttestoMCP.Server.Plug do
 
   defp validate_legacy_session_bound(request, conn, state) do
     with {:ok, id} <- header_session(conn) do
-      case legacy_session_lookup(
+      case LegacySession.lookup(
              state.server,
              id,
              principal_binding(conn),
              tenant(conn),
-             request
+             request,
+             touch: not streaming_request?(request, state)
            ) do
         {:ok, session} ->
           with :ok <- validate_legacy_version(conn, session),
@@ -2100,7 +2114,7 @@ defmodule AttestoMCP.Server.Plug do
                    principal_binding(conn),
                    tenant(conn)
                  ) do
-            :ok
+            {:ok, put_private(conn, @legacy_session_private, session)}
           end
 
         {:error, :not_found} ->
@@ -2113,13 +2127,6 @@ defmodule AttestoMCP.Server.Plug do
       _ -> {:error, Error.invalid_request(%{"reason" => "legacy_session_required"})}
     end
   end
-
-  defp legacy_session_lookup(server, id, principal, tenant, %{method: method})
-       when method in ["resources/subscribe", "resources/unsubscribe"],
-       do: AttestoMCP.Server.peek_session(server, id, principal, tenant)
-
-  defp legacy_session_lookup(server, id, principal, tenant, _request),
-    do: AttestoMCP.Server.get_session(server, id, principal, tenant)
 
   defp validate_legacy_initialized(request, session, state, id, principal, tenant) do
     if session.initialized or Map.get(request, :method) in ["notifications/initialized", "ping"] do
@@ -2184,7 +2191,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp validate_modern_headers(_conn, _request, @legacy, _state), do: :ok
 
-  defp validate_modern_headers(conn, request, @modern, state) do
+  defp validate_modern_headers(conn, request, @modern, _state) do
     meta = if is_map(request.params), do: Map.get(request.params, "_meta"), else: nil
 
     cond do
@@ -2204,8 +2211,7 @@ defmodule AttestoMCP.Server.Plug do
              true <- version == body_version,
              {:ok, method} <- required_header(conn, "mcp-method"),
              true <- method == request.method,
-             :ok <- maybe_header_match(conn, "mcp-name", request_name(request)),
-             :ok <- validate_declared_headers(conn, request, state) do
+             :ok <- maybe_header_match(conn, "mcp-name", request_name(request)) do
           :ok
         else
           _ -> {:error, Error.invalid_header(%{"reason" => "body_header_mismatch"})}
@@ -2228,8 +2234,38 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp validate_declared_headers(conn, request, state) do
-    declarations = registered_header_declarations(state.server, request)
+  defp maybe_validate_declared_headers(
+         @modern,
+         conn,
+         request,
+         state,
+         context,
+         definition_authorizer
+       ) do
+    case validate_declared_headers(conn, request, state, context, definition_authorizer) do
+      :ok -> :ok
+      _ -> {:error, Error.invalid_header(%{"reason" => "body_header_mismatch"})}
+    end
+  end
+
+  defp maybe_validate_declared_headers(
+         _era,
+         _conn,
+         _request,
+         _state,
+         _context,
+         _definition_authorizer
+       ),
+       do: :ok
+
+  defp validate_declared_headers(conn, request, state, context, definition_authorizer) do
+    declarations =
+      registered_header_declarations(
+        state.server,
+        request,
+        context,
+        definition_authorizer
+      )
 
     declared_names =
       MapSet.new(Enum.map(declarations, fn {name, _key} -> String.downcase(name) end))
@@ -2279,12 +2315,21 @@ defmodule AttestoMCP.Server.Plug do
     end)
   end
 
-  defp registered_header_declarations(server, %{method: "tools/call", params: params}) do
+  defp registered_header_declarations(
+         server,
+         %{method: "tools/call", params: params},
+         context,
+         definition_authorizer
+       ) do
     tool_name = params["name"]
 
-    with snapshot when is_map(snapshot) <- AttestoMCP.Server.snapshot(server),
-         tools when is_map(tools) <- snapshot[:tool] || snapshot["tool"],
-         tool when is_map(tool) <- tools[tool_name],
+    with {:ok, tool} <-
+           AttestoMCP.Server.selected_tool_definition(
+             server,
+             tool_name,
+             context,
+             definition_authorizer
+           ),
          schema when is_map(schema) <- tool[:input_schema] || tool["inputSchema"] do
       collect_runtime_header_declarations(schema, [])
     else
@@ -2294,7 +2339,8 @@ defmodule AttestoMCP.Server.Plug do
     _ -> []
   end
 
-  defp registered_header_declarations(_server, _request), do: []
+  defp registered_header_declarations(_server, _request, _context, _definition_authorizer),
+    do: []
 
   defp collect_runtime_header_declarations(schema, path) when is_map(schema) do
     properties = Map.get(schema, "properties", Map.get(schema, :properties, %{}))
@@ -2319,7 +2365,7 @@ defmodule AttestoMCP.Server.Plug do
        when is_map(property_schema) and is_list(path) do
     annotation = property_schema["x-mcp-header"] || property_schema[:"x-mcp-header"]
 
-    if is_binary(annotation) and valid_header_suffix?(annotation) and
+    if is_binary(annotation) and HeaderName.valid_suffix?(annotation) and
          property_primitive?(property_schema) do
       [{"mcp-param-" <> annotation, path}]
     else
@@ -2352,8 +2398,6 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp trim_ows(value), do: value
-
-  defp valid_header_suffix?(suffix), do: HeaderName.valid_suffix?(suffix)
 
   defp property_primitive?(schema) when is_map(schema) do
     Map.get(schema, "type") in ["string", "integer", "boolean"] and
@@ -2568,41 +2612,12 @@ defmodule AttestoMCP.Server.Plug do
 
   defp reject_client_response(_request, _era), do: :ok
 
-  defp era_for(%{method: "initialize", params: params}, conn) do
-    header = get_req_header(conn, "mcp-protocol-version")
-    body = metadata_value(params, "io.modelcontextprotocol/protocolVersion")
-
-    cond do
-      @modern in header or body == @modern -> @modern
-      Enum.any?(@legacy_versions, &(&1 in header or body == &1)) -> @legacy
-      true -> @legacy
-    end
-  end
-
-  defp era_for(%{method: method} = request, conn)
-       when method in ["ping", "notifications/initialized"] do
-    headers = get_req_header(conn, "mcp-protocol-version")
-
-    if @modern in headers or modern_body?(request),
-      do: @modern,
-      else: @legacy
-  end
-
   defp era_for(request, conn) do
-    headers = get_req_header(conn, "mcp-protocol-version")
-
-    cond do
-      @modern in headers or modern_body?(request) -> @modern
-      match?([version] when version in @legacy_versions, headers) -> @legacy
-      session_header(conn) -> @legacy
-      true -> @modern
-    end
+    Protocol.era(request,
+      headers: get_req_header(conn, "mcp-protocol-version"),
+      session?: is_binary(session_header(conn))
+    )
   end
-
-  defp modern_body?(%{params: params}),
-    do: metadata_value(params, "io.modelcontextprotocol/protocolVersion") == @modern
-
-  defp modern_body?(_request), do: false
 
   defp modern_request_header?(conn), do: get_req_header(conn, "mcp-protocol-version") == [@modern]
 
@@ -2641,21 +2656,14 @@ defmodule AttestoMCP.Server.Plug do
 
   defp streaming_request?(%{method: method, params: params}, _state)
        when method in ["resources/read", "prompts/get", "completion/complete"],
-       do: metadata_value(params, "progressToken") != nil or params["stream"] == true
+       do: Protocol.metadata_value(params, "progressToken") != nil or params["stream"] == true
 
   defp streaming_request?(_request, _state), do: false
 
   defp streaming_request?(%{params: params}),
-    do: metadata_value(params, "progressToken") != nil or params["stream"] == true
+    do: Protocol.metadata_value(params, "progressToken") != nil or params["stream"] == true
 
   defp streaming_request?(_request), do: false
-
-  defp metadata_value(params, key) do
-    case Map.get(params, "_meta") do
-      metadata when is_map(metadata) -> Map.get(metadata, key)
-      _ -> nil
-    end
-  end
 
   defp request_owner(@legacy, session_id) when is_binary(session_id),
     do: {:legacy_session, session_id}
@@ -2948,15 +2956,21 @@ defmodule AttestoMCP.Server.Plug do
 
   defp metadata_url(conn, opts) do
     resource = canonical_resource(conn, opts)
-    %URI{scheme: scheme, host: host, port: port, path: resource_path} = URI.parse(resource)
-    port_suffix = origin_port_suffix(scheme, port)
+    %URI{path: resource_path} = URI.parse(resource)
 
     path =
       if is_binary(resource_path) and resource_path != "",
         do: resource_path,
         else: opts[:resource_path] || "/mcp"
 
-    "#{scheme}://#{format_host(host)}#{port_suffix}/.well-known/oauth-protected-resource#{path}"
+    AttestoMCP.Metadata.protected_resource_url(canonical_origin(resource), path)
+  end
+
+  defp canonical_origin(resource) do
+    resource
+    |> URI.parse()
+    |> Map.merge(%{path: nil, query: nil, fragment: nil})
+    |> URI.to_string()
   end
 
   defp absolute_resource?(value) when is_binary(value) do
@@ -3017,19 +3031,11 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp invalid_origin?(conn, state) do
-    expected_origin =
-      case URI.parse(canonical_resource(conn, state.auth_opts)) do
-        %URI{scheme: scheme, host: host, port: port} when is_binary(host) ->
-          port_suffix = origin_port_suffix(scheme, port)
-          "#{scheme}://#{format_host(host)}#{port_suffix}"
-
-        _ ->
-          nil
-      end
+    expected_origin = canonical_resource(conn, state.auth_opts) |> canonical_origin()
 
     case get_req_header(conn, "origin") do
       [] -> false
-      [origin] -> is_nil(expected_origin) or origin != expected_origin
+      [origin] -> origin != expected_origin
       _ -> true
     end
   rescue
@@ -3051,17 +3057,6 @@ defmodule AttestoMCP.Server.Plug do
   rescue
     _ -> true
   end
-
-  defp format_host(host) when is_binary(host) do
-    if String.contains?(host, ":") and not String.starts_with?(host, "["),
-      do: "[" <> host <> "]",
-      else: host
-  end
-
-  defp origin_port_suffix(_scheme, nil), do: ""
-  defp origin_port_suffix("http", 80), do: ""
-  defp origin_port_suffix("https", 443), do: ""
-  defp origin_port_suffix(_scheme, port) when is_integer(port), do: ":#{port}"
 
   defp auth_context(conn) do
     Map.merge(conn.assigns[:attesto_context] || %{}, %{
@@ -3170,7 +3165,7 @@ defmodule AttestoMCP.Server.Plug do
          conn,
          state
        ) do
-    required = required_scopes_for(request, Keyword.merge(state.auth_opts, state.opts))
+    required = required_scopes_for(request, state.scope_opts)
     token = access_token(conn)
     config = auth_config(state.auth_opts)
     canonical = canonical_resource(conn, state.auth_opts)
@@ -3227,7 +3222,7 @@ defmodule AttestoMCP.Server.Plug do
          :ok <- reauthorize_principal(auth_opts, current_claims, sender),
          true <- context_principal_binding(initial_context) == owner_value(owner, :principal),
          true <- current_tenant == owner_value(owner, :tenant),
-         true <- scope_sets_grant?(required_scope_sets, current_scopes) do
+         true <- ScopePolicy.scope_sets_grant?(required_scope_sets, current_scopes) do
       true
     else
       _ -> false
@@ -3341,23 +3336,6 @@ defmodule AttestoMCP.Server.Plug do
     )
   end
 
-  defp scopes_grant?([], _granted), do: true
-
-  defp scopes_grant?(required, granted) when is_list(required) and is_list(granted) do
-    catalog = Attesto.Scope.new_catalog(required)
-    Attesto.Scope.grants_all?(catalog, granted, required)
-  rescue
-    _ -> false
-  end
-
-  defp scopes_grant?(_, _), do: false
-
-  defp scope_sets_grant?(scope_sets, granted)
-       when is_list(scope_sets) and scope_sets != [] and is_list(granted),
-       do: Enum.any?(scope_sets, &scopes_grant?(&1, granted))
-
-  defp scope_sets_grant?(_scope_sets, _granted), do: false
-
   defp auth_config(auth_opts) do
     case Keyword.get(auth_opts, :config) do
       config when is_function(config, 0) ->
@@ -3390,7 +3368,7 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp token_scopes(%{"scope" => value}) when is_binary(value),
-    do: String.split(value, ~r/\s+/, trim: true)
+    do: Attesto.Scope.parse(value, whitespace: :ascii_whitespace)
 
   defp token_scopes(_), do: []
 
@@ -3521,7 +3499,7 @@ defmodule AttestoMCP.Server.Plug do
     Telemetry.execute([:protocol, :error], %{count: 1}, %{
       status: error.http_status,
       outcome: error.code,
-      correlation_id: telemetry_correlation(id)
+      correlation_id: Telemetry.correlation(id)
     })
 
     conn =
@@ -3573,10 +3551,6 @@ defmodule AttestoMCP.Server.Plug do
   defp error_status(%{"error" => %{"code" => -32603}}, _era), do: 500
   defp error_status(%{"error" => _}, _era), do: 200
   defp error_status(_, _era), do: 200
-
-  defp telemetry_correlation(id) when is_binary(id), do: "string:" <> id
-  defp telemetry_correlation(id) when is_integer(id), do: "integer:" <> Integer.to_string(id)
-  defp telemetry_correlation(_id), do: nil
 
   defp sse_event(message),
     do:

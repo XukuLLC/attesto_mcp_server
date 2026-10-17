@@ -416,16 +416,19 @@ defmodule MyAppWeb.Router do
     attesto_mcp_protected_resource_metadata "/mcp/catalog",
       scopes: ["catalog.mcp"],
       base_url: "https://mcp.example.com",
+      issuer: "https://auth.example.com",
       root: false
 
     attesto_mcp_protected_resource_metadata "/mcp/operations",
       scopes: ["operations.mcp"],
       base_url: "https://mcp.example.com",
+      issuer: "https://auth.example.com",
       root: false
 
     attesto_mcp_protected_resource_metadata "/mcp/preview",
       scopes: ["preview.mcp"],
       base_url: "https://mcp.example.com",
+      issuer: "https://auth.example.com",
       root: false
   end
 
@@ -476,7 +479,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 2.6"},
+    {:attesto_mcp_server, "~> 2.7"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -1049,8 +1052,14 @@ updates.
 ### Limits and scope policy
 
 `max_concurrency`, `per_principal_concurrency`, `request_timeout`,
-`max_request_timeout`, `max_queue`, `stream_keepalive_ms`, and
-`stream_queue_size` are the bounded server limits. `subscription_queue_size`
+`max_request_timeout`, `max_queue`, `stream_keepalive_ms`,
+`stream_queue_size`, `max_sessions_per_principal`, and
+`max_legacy_streams_per_session` are the bounded server limits. The two
+session-bound defaults are 128 active sessions per principal and eight live
+streams per session and server process. A principal is the authenticated
+subject or, when absent, the client identifier. Hosts where one client identity
+fronts many users should raise `max_sessions_per_principal` to match expected
+concurrency. `subscription_queue_size`
 may override `max_queue` for modern subscriptions; otherwise all stream and
 subscription queues use `max_queue`. A Plug option overrides the corresponding
 server option for that adapter. The server `scope_map` is the default policy;
@@ -1060,7 +1069,8 @@ There is no second implicit scope source. Non-empty entries override method
 defaults; absent or empty entries use `default_scopes` when configured and
 otherwise retain the fail-closed HTTP defaults. For
 `completion/complete`, one explicit method entry governs both prompt and
-resource references; without it, each reference uses its category read scope.
+resource references; without it, `default_scopes` applies when configured and
+otherwise each reference uses its category read scope.
 The map accepts only the request methods implemented by this release:
 `server/discover`, `initialize`, `ping`, `logging/setLevel`, `tools/list`,
 `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`,
@@ -1136,11 +1146,14 @@ occurrence of each URI. Invalid or over-limit session-bound changes do not refre
 the session idle deadline.
 
 `rate_limits` is an optional map of bounded token buckets for `calls`,
-`completion`, `subscriptions`, and `auth_failures`; each entry is
+`completion`, `subscriptions`, `auth_checks`, and `auth_failures`; each entry is
 `%{burst: positive_integer, window_ms: positive_integer}`. Defaults are
-600/60s, 300/60s, 100/60s, and 120/60s respectively. A category can be set to
-`false` only when the host explicitly accepts unlimited traffic for that
-category; malformed settings fail closed. Rejections use HTTP 429 and
+600/60s, 300/60s, 100/60s, 1,024/60s, and 120/60s respectively.
+`auth_checks` is a refundable concurrent-verification bound: its token is
+returned after either success or failure. `auth_failures` records only failed
+authentication and is checked before signature verification. A category can
+be set to `false` only when the host explicitly accepts unlimited traffic for
+that category; malformed settings fail closed. Rejections use HTTP 429 and
 JSON-RPC `-33029` (outside the reserved protocol range), and are isolated by principal plus client address. If
 `client_ip` is omitted, the Plug uses `conn.remote_ip` verbatim, including a
 non-IP local-peer term. An explicit `client_ip` callback, configured as a
@@ -1151,6 +1164,17 @@ failures fail closed and emit neutral `client_ip/exception` telemetry. Do not
 trust a raw client-supplied
 `X-Forwarded-For` entry; use only connection state normalized by a correctly
 configured trusted-proxy component.
+
+Authentication-failure buckets group IPv6 addresses by `/64`, preventing
+interface-identifier rotation from consuming the complete 10,000-bucket
+table. Each authentication attempt checks existing failure capacity before
+signature verification and atomically reserves `auth_checks` capacity. The
+concurrent-check reservation is refunded after either result, and only a
+failure consumes `auth_failures` capacity. Fully refunded check buckets are
+removed immediately. A new source at the 10,000-bucket cap triggers one
+bounded-table prune; if every entry remains live, the server reclaims the
+oldest bucket from the most populous traffic category before admitting it.
+Periodic server cleanup also removes expired buckets.
 
 ### Atomic startup, telemetry, and durable sessions
 
@@ -1221,6 +1245,11 @@ mix attesto_mcp_server.gen.migration --repo MyApp.Repo
 mix ecto.migrate
 ```
 
+Existing Ecto installations upgrading to this release should run the generator
+again. It adds a concurrent expression-index migration for the encoded
+principal and expiry columns; the generator skips migration files already
+present and writes only the missing index migration.
+
 The adapter supports PostgreSQL and uses row locks for atomic updates. Its
 required namespace is bound into the store handle, so key operations and
 indexed listing/cleanup cannot cross server namespaces. Several named MCP
@@ -1231,7 +1260,9 @@ mirrors for bounded listing and cleanup. Record-bearing listings return the
 first eight active rows ordered by expiry and session ID; they are bounded
 snapshots rather than a pagination API, and concurrent row locks may cause
 `list_active` to omit otherwise active rows. Session counts use a separate SQL
-aggregate. Cleanup trusts the indexed expiry column, selects only keys, and
+aggregate. Per-principal admission and activity updates share a PostgreSQL
+advisory lock, and the generated expression index keeps the admission count
+bounded to that principal's live rows. Cleanup trusts the indexed expiry column, selects only keys, and
 claims at most 1,000 rows, so periodic passes drain larger backlogs without
 loading their record payloads. Direct loads and record-bearing listings verify
 the complete record against its expiry mirrors. Malformed rows detected there
@@ -1261,8 +1292,18 @@ specific session must be inspected or closed. The method applies to the
 session-bound revisions; the 2026 stateless transport has no server-side
 session IDs to list.
 
-Custom session-store adapters may implement the optional `list_active_keys/4`
-callback from `AttestoMCP.Server.SessionStore` to support this view. It must
+Custom session-store adapters may implement the namespace-aware
+`count_active/2` callback for exact server statistics and
+`count_active_for_principal/3` for durable per-principal admission checks.
+Shared adapters should implement `save_below_principal_limit/4` as an atomic
+count-and-save operation so simultaneous admission on multiple server
+processes cannot exceed the configured limit. The bundled adapters implement
+all three callbacks. Older adapters remain compatible, but their pre-existing
+durable sessions are counted by materializing `list_active/1`, and their
+fallback count-then-save admission is only serialized within one server
+process. Adapters may also implement
+the optional `list_active_keys/4` callback from
+`AttestoMCP.Server.SessionStore` to support this view. It must
 return only `{namespace, session_id}` keys and a cursor, never record payloads
 or principal bindings. Adapters that do not implement it return
 `{:error, :unsupported}`; malformed pages and adapter failures are converted to
@@ -1489,7 +1530,9 @@ request ID is the subscription ID. The stream begins with
 `notifications/subscriptions/acknowledged`; each later notification keeps its
 actual MCP method and carries the ID under
 `params._meta["io.modelcontextprotocol/subscriptionId"]`. Delivery is bounded,
-filtered, and reauthorized for the subscription owner. Protected HTTP opens
+filtered, and checked against the scopes captured when the subscription opens
+on HTTP, stdio, and custom transports. Optional host reauthorizers run only
+after that scope check. Protected HTTP opens
 require configured `default_scopes` plus additive `subscription_scopes` when no
 non-empty method entry exists. Without host defaults, the requested generic
 category scopes are used instead. A non-empty
@@ -1498,6 +1541,13 @@ category scopes plus the method entry and `subscription_scopes`. Modern
 delivery rechecks that opening union plus its notification requirements;
 resource updates also require `resources_read` and any matched definition
 scopes.
+
+Stdio hosts supply granted scopes through `Stdio.run/2`'s `:scopes` option or
+the context map. Custom transports put the granted scope list in the dispatch
+context. Direct callers of `Subscriptions.open/9` and
+`Server.open_legacy_stream/7` pass the same list in the final argument. The
+older compatibility arities capture an empty list and consequently receive
+only notifications with no scope requirement.
 
 Modern tool, resource, and prompt handlers may return `{:input_required,
 requests}` containing real `elicitation/create`, `sampling/createMessage`, or
@@ -1978,8 +2028,8 @@ is 64,000 bytes; larger limits must be explicit. A host may instead call
 server-request, and EOF controls too; it removes those controls before starting
 the owned server so core unknown-option validation stays strict. `run/2` returns
 one of these startup error tuples: `{:error, :session_store_unavailable}`,
-`{:error, :nonportable_binding}`, `{:error, :binding_too_large}`, or
-`{:error, :record_too_large}`. `main/1` stops its owned server after the
+`{:error, :nonportable_binding}`, `{:error, :binding_too_large}`,
+`{:error, :record_too_large}`, or `{:error, :session_limit}`. `main/1` stops its owned server after the
 adapter exits and raises for a startup failure so an executable wrapper cannot
 silently report a successful exit.
 

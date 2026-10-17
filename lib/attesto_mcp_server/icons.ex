@@ -26,9 +26,11 @@ defmodule AttestoMCP.Server.Icons do
   @data_pattern ~r/\Adata:(image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126});base64,([A-Za-z0-9+\/]+={0,2})\z/
 
   @doc false
+  @spec max_icons() :: pos_integer()
   def max_icons, do: @max_icons
 
   @doc false
+  @spec max_total_bytes() :: pos_integer()
   def max_total_bytes, do: @max_total_bytes
 
   @doc "Checks the 2.3.x component icon fields used by registered definitions."

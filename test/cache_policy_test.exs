@@ -2,14 +2,13 @@ defmodule AttestoMCP.Server.CachePolicyTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 0, start_server: 1]
   alias AttestoMCP.Server.Test, as: ServerTest
 
   @modern "2026-07-28"
   @legacy "2025-11-25"
   @max_safe 9_007_199_254_740_991
-
-  defp start_server(opts \\ []),
-    do: start_supervised!(Supervisor.child_spec({Server, opts}, id: make_ref()))
 
   defp hints(%{"result" => result}), do: Map.take(result, ["ttlMs", "cacheScope"])
 

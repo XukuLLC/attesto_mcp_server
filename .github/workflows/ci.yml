@@ -11,8 +11,8 @@ jobs:
   jsv-024-compatibility:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.18.3"
           otp-version: "27.3"
@@ -40,8 +40,8 @@ jobs:
   attesto-mcp-minimum:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.18.3"
           otp-version: "27.3"
@@ -63,8 +63,8 @@ jobs:
   installer-compat:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.18.3"
           otp-version: "27.3"
@@ -87,12 +87,12 @@ jobs:
   coordinated-source:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: validate lowercase immutable coordinated refs
         env:
-          ATTESTO_REF: c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee
-          ATTESTO_PHOENIX_REF: 742f7d6aec4ed57cbd4b619aed12be80929cfb8a
-          ATTESTO_MCP_REF: 3f5aba19b270b6abcb6a85925679148282231fe7
+          ATTESTO_REF: 6c60786d59cf80eb96d3739caf9d9286ab8af0c4
+          ATTESTO_PHOENIX_REF: fd8f90c83edc8e214f1c071aac57beb58a112264
+          ATTESTO_MCP_REF: ff6d301075726d50e23fe0fc177908c6f1c726a3
         run: |
           for ref in "$ATTESTO_REF" "$ATTESTO_PHOENIX_REF" "$ATTESTO_MCP_REF"; do
             if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -100,34 +100,34 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto
-          ref: c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee
+          ref: 6c60786d59cf80eb96d3739caf9d9286ab8af0c4
           path: coordinated/attesto
           persist-credentials: false
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_phoenix
-          ref: 742f7d6aec4ed57cbd4b619aed12be80929cfb8a
+          ref: fd8f90c83edc8e214f1c071aac57beb58a112264
           path: coordinated/attesto_phoenix
           persist-credentials: false
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 3f5aba19b270b6abcb6a85925679148282231fe7
+          ref: ff6d301075726d50e23fe0fc177908c6f1c726a3
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated checkout commits
         env:
-          ATTESTO_REF: c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee
-          ATTESTO_PHOENIX_REF: 742f7d6aec4ed57cbd4b619aed12be80929cfb8a
-          ATTESTO_MCP_REF: 3f5aba19b270b6abcb6a85925679148282231fe7
+          ATTESTO_REF: 6c60786d59cf80eb96d3739caf9d9286ab8af0c4
+          ATTESTO_PHOENIX_REF: fd8f90c83edc8e214f1c071aac57beb58a112264
+          ATTESTO_MCP_REF: ff6d301075726d50e23fe0fc177908c6f1c726a3
         run: |
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "$ATTESTO_REF"
           test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "$ATTESTO_PHOENIX_REF"
           test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "$ATTESTO_MCP_REF"
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.4"
           otp-version: "29.0.5"
@@ -138,9 +138,9 @@ jobs:
           ATTESTO_MCP_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_mcp
           ATTESTO_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto
           ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
-          ATTESTO_REF: c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee
-          ATTESTO_PHOENIX_REF: 742f7d6aec4ed57cbd4b619aed12be80929cfb8a
-          ATTESTO_MCP_REF: 3f5aba19b270b6abcb6a85925679148282231fe7
+          ATTESTO_REF: 6c60786d59cf80eb96d3739caf9d9286ab8af0c4
+          ATTESTO_PHOENIX_REF: fd8f90c83edc8e214f1c071aac57beb58a112264
+          ATTESTO_MCP_REF: ff6d301075726d50e23fe0fc177908c6f1c726a3
         run: scripts/check_installer_coordinated.sh
 
   verify:
@@ -168,12 +168,14 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: scan source for generic package hygiene violations
         run: scripts/check_source_hygiene.sh .
       - name: verify conformance evidence fingerprint
         run: scripts/check_conformance_evidence.sh
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
@@ -263,7 +265,7 @@ jobs:
       CONFORMANCE_COMMIT: c37eec888e1c6ff140af79987a40008548b7cc5f
       CONFORMANCE_SHA256: a890632d5d8c2576652cfd1fdccb11b2595a2e635e3a335c14e1a224b175548b
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: configure temporary paths
         run: |
           {
@@ -274,15 +276,15 @@ jobs:
             echo "npm_config_cache=$RUNNER_TEMP/npm-cache"
             echo "PIP_CACHE_DIR=$RUNNER_TEMP/pip-cache"
           } >> "$GITHUB_ENV"
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.4"
           otp-version: "29.0.5"
           version-type: strict
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.20.0"
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - run: mix deps.get
@@ -336,49 +338,49 @@ jobs:
       CONFORMANCE_COMMIT: c37eec888e1c6ff140af79987a40008548b7cc5f
       CONFORMANCE_SHA256: a890632d5d8c2576652cfd1fdccb11b2595a2e635e3a335c14e1a224b175548b
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: configure temporary OAuth runner paths
         run: |
           {
             echo "CONFORMANCE_DIR=$RUNNER_TEMP/mcp-oauth-conformance"
             echo "CONFORMANCE_ARCHIVE=$RUNNER_TEMP/mcp-oauth-conformance.tar.gz"
           } >> "$GITHUB_ENV"
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto
-          ref: c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee
+          ref: 6c60786d59cf80eb96d3739caf9d9286ab8af0c4
           path: coordinated/attesto
           persist-credentials: false
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_client
-          ref: e18453b8cfdd8e342935a3240f1a36aa3e74003d
+          ref: 53f55b89b0afb8561330010e6f9de973d1a42647
           path: coordinated/attesto_client
           persist-credentials: false
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_phoenix
-          ref: 742f7d6aec4ed57cbd4b619aed12be80929cfb8a
+          ref: fd8f90c83edc8e214f1c071aac57beb58a112264
           path: coordinated/attesto_phoenix
           persist-credentials: false
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 3f5aba19b270b6abcb6a85925679148282231fe7
+          ref: ff6d301075726d50e23fe0fc177908c6f1c726a3
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated OAuth source commits
         run: |
-          test "$(git -C coordinated/attesto rev-parse HEAD)" = "c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee"
-          test "$(git -C coordinated/attesto_client rev-parse HEAD)" = "e18453b8cfdd8e342935a3240f1a36aa3e74003d"
-          test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "742f7d6aec4ed57cbd4b619aed12be80929cfb8a"
-          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "3f5aba19b270b6abcb6a85925679148282231fe7"
-      - uses: erlef/setup-beam@v1.24.1
+          test "$(git -C coordinated/attesto rev-parse HEAD)" = "6c60786d59cf80eb96d3739caf9d9286ab8af0c4"
+          test "$(git -C coordinated/attesto_client rev-parse HEAD)" = "53f55b89b0afb8561330010e6f9de973d1a42647"
+          test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "fd8f90c83edc8e214f1c071aac57beb58a112264"
+          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "ff6d301075726d50e23fe0fc177908c6f1c726a3"
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.4"
           otp-version: "29.0.5"
           version-type: strict
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.20.0"
       - name: full OAuth client acquisition and authenticated MCP
@@ -403,14 +405,14 @@ jobs:
   json-schema-conformance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: json-schema-org/JSON-Schema-Test-Suite
           ref: 5b0ee1613e45fcc2bddac00e07c19cd49b00d8a8
           path: json-schema-corpus
           persist-credentials: false
-      - uses: erlef/setup-beam@v1.24.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.18.3"
           otp-version: "27.3"

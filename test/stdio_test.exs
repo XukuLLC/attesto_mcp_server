@@ -90,6 +90,14 @@ defmodule AttestoMCP.Server.StdioTest do
              Stdio.run(server, input: fn -> :eof end)
   end
 
+  test "stdio startup reports the configured per-principal session limit" do
+    {:ok, server} = Server.start_link(max_sessions_per_principal: 1)
+    assert {:ok, _session} = Server.new_session(server, "bounded-principal")
+
+    assert {:error, :session_limit} =
+             Stdio.run(server, principal: "bounded-principal", input: fn -> :eof end)
+  end
+
   test "legacy stdio accepts a structured principal" do
     {:ok, server} = Server.start_link([])
 
@@ -593,7 +601,11 @@ defmodule AttestoMCP.Server.StdioTest do
       spawn(fn ->
         output =
           capture_io(fn ->
-            Stdio.run(server, principal: "stdio-catalog", input: input)
+            Stdio.run(server,
+              principal: "stdio-catalog",
+              scopes: [AttestoMCP.Scopes.tools_read()],
+              input: input
+            )
           end)
 
         send(parent, {:stdio_catalog_output, output})
@@ -643,7 +655,10 @@ defmodule AttestoMCP.Server.StdioTest do
              Server.dispatch(
                server,
                %{kind: :request, id: 88, method: "subscriptions/listen", params: params},
-               %{principal: "subscription-owner"},
+               %{
+                 principal: "subscription-owner",
+                 scopes: [AttestoMCP.Scopes.tools_read()]
+               },
                version: "2026-07-28",
                on_event: fn event -> send(parent, {:owned_subscription_event, event}) end
              )

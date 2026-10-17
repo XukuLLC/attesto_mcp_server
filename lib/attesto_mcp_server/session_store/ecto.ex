@@ -170,21 +170,38 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     import Ecto.Query, only: [from: 2]
 
+    import AttestoMCP.Server.EctoAdapter,
+      only: [
+        command_opts: 0,
+        contains_nul?: 1,
+        query_opts: 1,
+        safely: 1,
+        transaction: 2,
+        valid_key_part?: 1
+      ]
+
+    alias AttestoMCP.Server.EctoAdapter
     alias AttestoMCP.Server.SessionStore.Ecto.Session
     alias AttestoMCP.Server.Telemetry
 
-    @max_key_bytes 256
     @max_record_bytes 1_000_000
     @max_db_integer 9_223_372_036_854_775_807
     @max_session_timeout_ms AttestoMCP.Server.Session.max_timeout_ms()
-    @max_schema_prefix_bytes 63
     @max_list 8
     @max_key_page 1_000
     @max_cleanup 1_000
-    @query_timeout_ms 1_500
-    @lock_timeout_ms 1_000
-    @transaction_timeout_ms 3_000
     @option_keys [:repo, :schema_prefix, :namespace]
+    @required_repo_functions [
+      transaction: 2,
+      one: 2,
+      all: 2,
+      insert: 2,
+      update: 2,
+      delete_all: 2,
+      rollback: 1,
+      query: 3,
+      in_transaction?: 0
+    ]
 
     @type store :: %{
             repo: module(),
@@ -231,34 +248,61 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
     def save(store, key, record) when is_map(record) do
       with {:ok, %{repo: repo, namespace: namespace} = config} <- checked_store(store),
            {:ok, attrs} <- record_attrs(key, record, namespace) do
-        safely(fn ->
-          changeset = Session.changeset(%Session{}, attrs)
-
-          insert_opts =
-            [
-              on_conflict:
-                {:replace,
-                 [
-                   :record,
-                   :created_at_ms,
-                   :last_seen_ms,
-                   :absolute_timeout_ms,
-                   :idle_timeout_ms,
-                   :expires_at_ms,
-                   :updated_at
-                 ]},
-              conflict_target: [:namespace, :session_id]
-            ] ++ query_opts(config)
-
-          case repo.insert(changeset, insert_opts) do
-            {:ok, _row} -> :ok
-            {:error, _changeset} -> {:error, :write_failed}
-          end
-        end)
+        safely(fn -> insert_attrs(repo, config, attrs) end)
       end
     end
 
     def save(_store, _key, _record), do: {:error, :invalid_record}
+
+    @impl true
+    @spec save_below_principal_limit(
+            store(),
+            AttestoMCP.Server.SessionStore.key(),
+            map(),
+            pos_integer()
+          ) :: :ok | :limit_reached | {:error, term()}
+    def save_below_principal_limit(store, key, record, limit)
+        when is_map(record) and is_integer(limit) and limit > 0 do
+      with {:ok, %{repo: repo, namespace: namespace} = config} <- checked_store(store),
+           {:ok, attrs} <- record_attrs(key, record, namespace),
+           {:ok, principal} <- record_principal(record) do
+        safely(fn ->
+          transaction(repo, fn ->
+            with {:ok, _result} <-
+                   repo.query(
+                     "SELECT pg_advisory_xact_lock($1::bigint)",
+                     [principal_lock_key(namespace, principal)],
+                     command_opts()
+                   ) do
+              now = System.system_time(:millisecond)
+
+              query =
+                from(s in Session,
+                  where: s.namespace == ^namespace and s.expires_at_ms >= ^now,
+                  where: fragment("? ->> 'principal' = ?", s.record, ^principal),
+                  select: count(s.session_id)
+                )
+
+              case repo.one(query, query_opts(config)) do
+                count when is_integer(count) and count < limit ->
+                  insert_attrs(repo, config, attrs)
+
+                count when is_integer(count) and count >= limit ->
+                  :limit_reached
+
+                _other ->
+                  {:error, :store_unavailable}
+              end
+            else
+              {:error, _reason} -> {:error, :store_unavailable}
+            end
+          end)
+        end)
+      end
+    end
+
+    def save_below_principal_limit(_store, _key, _record, _limit),
+      do: {:error, :invalid_record}
 
     @impl true
     @spec load(store(), AttestoMCP.Server.SessionStore.key()) ::
@@ -353,7 +397,38 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     @impl true
     @spec count_active(store()) :: {:ok, non_neg_integer()} | {:error, term()}
-    def count_active(store) do
+    def count_active(store), do: count_active_matching(store, :all)
+
+    @impl true
+    @spec count_active(store(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+    def count_active(store, namespace) do
+      with {:ok, %{namespace: expected_namespace}} <- checked_store(store),
+           :ok <- ensure_namespace(expected_namespace, namespace) do
+        count_active(store)
+      end
+    end
+
+    @impl true
+    @spec count_active_for_principal(store(), term()) ::
+            {:ok, non_neg_integer()} | {:error, term()}
+    def count_active_for_principal(store, principal) do
+      with {:ok, encoded_principal} <-
+             AttestoMCP.Server.Session.encode_binding_for_store(principal) do
+        count_active_matching(store, encoded_principal)
+      end
+    end
+
+    @impl true
+    @spec count_active_for_principal(store(), String.t(), term()) ::
+            {:ok, non_neg_integer()} | {:error, term()}
+    def count_active_for_principal(store, namespace, principal) do
+      with {:ok, %{namespace: expected_namespace}} <- checked_store(store),
+           :ok <- ensure_namespace(expected_namespace, namespace) do
+        count_active_for_principal(store, principal)
+      end
+    end
+
+    defp count_active_matching(store, principal) do
       with {:ok, %{repo: repo, namespace: namespace} = config} <- checked_store(store) do
         safely(fn ->
           now = System.system_time(:millisecond)
@@ -363,6 +438,14 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
               where: s.namespace == ^namespace and s.expires_at_ms >= ^now,
               select: count(s.session_id)
             )
+
+          query =
+            if principal == :all,
+              do: query,
+              else:
+                from(s in query,
+                  where: fragment("? ->> 'principal' = ?", s.record, ^principal)
+                )
 
           case repo.one(query, query_opts(config)) do
             count when is_integer(count) and count >= 0 -> {:ok, count}
@@ -422,11 +505,14 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
            :ok <- ensure_namespace(expected_namespace, namespace) do
         safely(fn ->
           transaction(repo, fn ->
-            case repo.one(locked_key_query(namespace, session_id), query_opts(config)) do
-              nil ->
+            case locked_session_for_update(repo, config, namespace, session_id) do
+              :not_found ->
                 :not_found
 
-              %Session{} = row ->
+              {:error, reason} ->
+                repo.rollback({:error, reason})
+
+              {:ok, %Session{} = row} ->
                 cond do
                   unknown_record_version?(row.record) ->
                     # Preserve an opaque record written by a newer node and
@@ -484,11 +570,14 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
            :ok <- ensure_namespace(expected_namespace, namespace) do
         safely(fn ->
           transaction(repo, fn ->
-            case repo.one(locked_key_query(namespace, session_id), query_opts(config)) do
-              nil ->
+            case locked_session_for_update(repo, config, namespace, session_id) do
+              :not_found ->
                 :not_found
 
-              %Session{} = row ->
+              {:error, reason} ->
+                repo.rollback({:error, reason})
+
+              {:ok, %Session{} = row} ->
                 cond do
                   unknown_record_version?(row.record) ->
                     # Preserve an opaque record written by a newer node and
@@ -562,52 +651,12 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     # ----- internal -----
 
-    defp checked_store(%{repo: repo, namespace: namespace, schema_prefix: prefix} = store)
-         when is_atom(repo) and is_binary(namespace) and (is_nil(prefix) or is_binary(prefix)),
-         do:
-           if(valid_repo?(repo) and valid_key_part?(namespace) and valid_prefix?(prefix),
-             do: {:ok, store},
-             else: {:error, :invalid_store}
-           )
+    defp checked_store(store),
+      do: EctoAdapter.checked_store(store, @required_repo_functions)
 
-    defp checked_store(_store), do: {:error, :invalid_store}
-
-    defp valid_options?(opts) do
-      Keyword.keyword?(opts) and
-        Enum.all?(Keyword.keys(opts), &(&1 in @option_keys)) and
-        length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts)))
-    end
-
-    defp valid_repo?(repo) when is_atom(repo) and not is_nil(repo) do
-      Code.ensure_loaded?(repo) and function_exported?(repo, :transaction, 2) and
-        function_exported?(repo, :one, 2) and function_exported?(repo, :all, 2) and
-        function_exported?(repo, :insert, 2) and function_exported?(repo, :update, 2) and
-        function_exported?(repo, :delete_all, 2) and function_exported?(repo, :rollback, 1) and
-        function_exported?(repo, :query, 3) and function_exported?(repo, :in_transaction?, 0) and
-        function_exported?(repo, :__adapter__, 0) and postgres_repo?(repo)
-    end
-
-    defp valid_repo?(_repo), do: false
-
-    defp postgres_repo?(repo) do
-      repo.__adapter__() == Ecto.Adapters.Postgres
-    rescue
-      _exception -> false
-    catch
-      _kind, _reason -> false
-    end
-
-    defp valid_prefix?(nil), do: true
-
-    defp valid_prefix?(prefix) when is_binary(prefix) do
-      byte_size(prefix) in 1..@max_schema_prefix_bytes and
-        String.valid?(prefix) and
-        prefix != "information_schema" and
-        not String.starts_with?(prefix, "pg_") and
-        Regex.match?(~r/\A[a-z_][a-z0-9_]*\z/, prefix)
-    end
-
-    defp valid_prefix?(_prefix), do: false
+    defp valid_options?(opts), do: EctoAdapter.valid_options?(opts, @option_keys)
+    defp valid_repo?(repo), do: EctoAdapter.valid_repo?(repo, @required_repo_functions)
+    defp valid_prefix?(prefix), do: EctoAdapter.valid_prefix?(prefix)
 
     defp valid_key({namespace, session_id}) do
       if valid_key_part?(namespace) and valid_key_part?(session_id),
@@ -626,11 +675,6 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
         {:ok, valid} -> {:ok, valid}
         {:error, :invalid_key} -> :not_found
       end
-    end
-
-    defp valid_key_part?(value) do
-      is_binary(value) and byte_size(value) in 1..@max_key_bytes and String.valid?(value) and
-        not contains_nul?(value)
     end
 
     defp ensure_namespace(namespace, namespace), do: :ok
@@ -819,23 +863,6 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     defp valid_json_native?(_value), do: false
 
-    defp contains_nul?(value) when is_binary(value),
-      do: :binary.match(value, <<0>>) != :nomatch
-
-    defp contains_nul?(value) when is_atom(value),
-      do: value |> Atom.to_string() |> contains_nul?()
-
-    defp contains_nul?(value) when is_map(value),
-      do: Enum.any?(value, fn {key, item} -> contains_nul?(key) or contains_nul?(item) end)
-
-    defp contains_nul?([]), do: false
-    defp contains_nul?([head | tail]), do: contains_nul?(head) or contains_nul?(tail)
-
-    defp contains_nul?(value) when is_tuple(value),
-      do: value |> Tuple.to_list() |> contains_nul?()
-
-    defp contains_nul?(_value), do: false
-
     defp key_query(namespace, session_id) do
       from(s in Session,
         where: s.namespace == ^namespace and s.session_id == ^session_id
@@ -896,9 +923,13 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
       case result do
         {:ok, updated} when is_map(updated) ->
-          case update_row(repo, config, row, updated) do
-            {:ok, _row} -> {:ok, updated}
-            {:error, reason} -> repo.rollback({:error, reason})
+          if record_principal(updated) == record_principal(record) do
+            case update_row(repo, config, row, updated) do
+              {:ok, _row} -> {:ok, updated}
+              {:error, reason} -> repo.rollback({:error, reason})
+            end
+          else
+            repo.rollback({:error, :invalid_record})
           end
 
         :delete ->
@@ -913,38 +944,84 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
       end
     end
 
-    defp query_opts(%{schema_prefix: prefix}),
-      do: [prefix: prefix, timeout: @query_timeout_ms, log: false, telemetry_event: nil]
+    defp insert_attrs(repo, config, attrs) do
+      changeset = Session.changeset(%Session{}, attrs)
 
-    defp transaction(repo, fun) do
-      if function_exported?(repo, :in_transaction?, 0) and repo.in_transaction?() do
-        {:error, :nested_transaction_unsupported}
-      else
-        wrapped = fn ->
-          case repo.query(
-                 "SET LOCAL lock_timeout = '#{@lock_timeout_ms}ms'",
-                 [],
-                 command_opts()
-               ) do
-            {:ok, _result} -> fun.()
-            {:error, _reason} -> repo.rollback({:error, :store_unavailable})
-          end
-        end
+      insert_opts =
+        [
+          on_conflict:
+            {:replace,
+             [
+               :record,
+               :created_at_ms,
+               :last_seen_ms,
+               :absolute_timeout_ms,
+               :idle_timeout_ms,
+               :expires_at_ms,
+               :updated_at
+             ]},
+          conflict_target: [:namespace, :session_id]
+        ] ++ query_opts(config)
 
-        case repo.transaction(wrapped,
-               timeout: @transaction_timeout_ms,
-               log: false,
-               telemetry_event: nil
-             ) do
-          {:ok, result} -> result
-          {:error, {:error, reason}} -> {:error, reason}
-          {:error, reason} -> {:error, reason}
-        end
+      case repo.insert(changeset, insert_opts) do
+        {:ok, _row} -> :ok
+        {:error, _changeset} -> {:error, :write_failed}
       end
     end
 
-    defp command_opts,
-      do: [timeout: @query_timeout_ms, log: false, telemetry_event: nil]
+    # Admission and activity updates both change whether a principal occupies
+    # one of its bounded live-session slots. Read the immutable principal,
+    # acquire the same advisory lock used by admission, and only then lock the
+    # row. Recheck after the row lock so a direct concurrent replacement cannot
+    # move the record between principal limits behind either operation.
+    defp locked_session_for_update(repo, config, namespace, session_id) do
+      case repo.one(key_query(namespace, session_id), query_opts(config)) do
+        nil ->
+          :not_found
+
+        %Session{} = snapshot ->
+          principal = record_principal(snapshot.record)
+
+          with :ok <- acquire_principal_lock(repo, namespace, principal) do
+            case repo.one(locked_key_query(namespace, session_id), query_opts(config)) do
+              nil ->
+                :not_found
+
+              %Session{} = row ->
+                if record_principal(row.record) == principal,
+                  do: {:ok, row},
+                  else: {:error, :store_unavailable}
+            end
+          end
+      end
+    end
+
+    defp acquire_principal_lock(repo, namespace, {:ok, principal}) do
+      case repo.query(
+             "SELECT pg_advisory_xact_lock($1::bigint)",
+             [principal_lock_key(namespace, principal)],
+             command_opts()
+           ) do
+        {:ok, _result} -> :ok
+        {:error, _reason} -> {:error, :store_unavailable}
+      end
+    end
+
+    # A current record without a binary encoded principal is corrupt and will
+    # be deleted by the caller. It cannot participate in a principal count.
+    defp acquire_principal_lock(_repo, _namespace, {:error, :invalid_record}), do: :ok
+
+    defp principal_lock_key(namespace, principal) do
+      <<lock_key::signed-64, _rest::binary>> =
+        :crypto.hash(:sha256, namespace <> <<0>> <> principal)
+
+      lock_key
+    end
+
+    defp record_principal(%{"principal" => principal}) when is_binary(principal),
+      do: {:ok, principal}
+
+    defp record_principal(_record), do: {:error, :invalid_record}
 
     defp report_corrupt_rows(_source, 0), do: :ok
 
@@ -954,16 +1031,6 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
         %{count: count},
         %{source: source, outcome: :corrupt_discarded}
       )
-    end
-
-    defp safely(fun) do
-      try do
-        fun.()
-      rescue
-        _exception -> {:error, :store_unavailable}
-      catch
-        _kind, _reason -> {:error, :store_unavailable}
-      end
     end
   end
 end

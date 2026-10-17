@@ -170,6 +170,14 @@ subscriptions, and neutral authorization failures. Application code supplies
 the useful part: registered tools, resources, prompts, completion handlers, and
 business-policy callbacks.
 
+Session-bound transports default to 128 active sessions per principal and
+eight live streams per session and server process. Notification delivery on
+every transport is bound to the scopes captured when the stream or
+subscription opens. The session limit groups by the authenticated subject or,
+when there is no subject, the client identifier; deployments where one client
+identity fronts many users should set `max_sessions_per_principal` for their
+expected concurrency.
+
 Registrations can be installed atomically at startup or through `register_all/2`.
 The public API supports:
 
@@ -395,13 +403,13 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 2.6"}]
+  [{:attesto_mcp_server, "~> 2.7"}]
 end
 ```
 
 Supervise `AttestoMCP.Server`, register definitions through
 `AttestoMCP.Server.API`, and mount `AttestoMCP.Server.Plug` directly. The
-[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.6.0/examples/bandit.exs) program demonstrates direct server
+[`examples/bandit.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.7.0/examples/bandit.exs) program demonstrates direct server
 startup, registration, and the protected Plug; the [usage guide](docs/usage.md)
 documents the transport and authentication options. Router and supervision
 wiring remain specific to the host. It also includes a
@@ -412,7 +420,7 @@ The production library depends on Plug rather than a particular HTTP server.
 Bandit is the documented development/test adapter. The loopback example returns
 401 until given a valid credential. The stdio adapter is available through
 `AttestoMCP.Server.Stdio.run/2` and
-[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.6.0/examples/stdio.exs).
+[`examples/stdio.exs`](https://github.com/XukuLLC/attesto_mcp_server/blob/v2.7.0/examples/stdio.exs).
 
 ## Add features as needed
 

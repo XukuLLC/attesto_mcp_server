@@ -7,6 +7,7 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Result
   alias AttestoMCP.Server.Subscriptions
+  alias AttestoMCP.Server.TestSupport.Async
 
   @modern "2026-07-28"
   @resource "https://mcp.example.com/mcp"
@@ -447,7 +448,12 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
                },
                self(),
                :catalog,
-               nil
+               nil,
+               [
+                 AttestoMCP.Scopes.tools_read(),
+                 AttestoMCP.Scopes.prompts_read(),
+                 AttestoMCP.Scopes.resources_read()
+               ]
              )
 
     assert_receive {:mcp_subscription, :catalog, "catalog", _ack}
@@ -485,7 +491,7 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
 
     registry = GenServer.call(server, :registry)
     Process.exit(registry, :kill)
-    assert eventually(fn -> Server.snapshot(server) == before end)
+    assert Async.eventually(fn -> Server.snapshot(server) == before end, catch_exit: true)
 
     startup = [
       {:tool, "startup", %{handler: fn _, _ -> {:ok, "ready"} end}}
@@ -584,7 +590,8 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
                %{"toolsListChanged" => true},
                self(),
                :slow,
-               authorize
+               authorize,
+               [AttestoMCP.Scopes.tools_read()]
              )
 
     assert_receive {:mcp_subscription, :slow, "slow", _ack}
@@ -621,10 +628,13 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
     previous = GenServer.call(server, :subscriptions)
     Process.exit(previous, :kill)
 
-    assert eventually(fn ->
-             current = GenServer.call(server, :subscriptions)
-             current != previous and Process.alive?(current)
-           end)
+    assert Async.eventually(
+             fn ->
+               current = GenServer.call(server, :subscriptions)
+               current != previous and Process.alive?(current)
+             end,
+             catch_exit: true
+           )
 
     recovered = GenServer.call(server, :subscriptions)
 
@@ -708,22 +718,6 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
       "io.modelcontextprotocol/protocolVersion" => @modern,
       "io.modelcontextprotocol/clientCapabilities" => %{}
     })
-  end
-
-  defp eventually(fun, attempts \\ 100)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
-  catch
-    :exit, _ ->
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
   end
 
   defp assert_invalid_start(opts, expected) do

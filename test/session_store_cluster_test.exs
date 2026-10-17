@@ -535,7 +535,15 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert :ok = Server.mark_initialized(server, session.id)
 
     assert {:ok, stream} =
-             Server.open_legacy_stream(server, session.id, "alice", "tenant-a", self())
+             Server.open_legacy_stream(
+               server,
+               session.id,
+               "alice",
+               "tenant-a",
+               self(),
+               nil,
+               [AttestoMCP.Scopes.tools_read()]
+             )
 
     Agent.update(gate, fn _ -> true end)
     assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
@@ -766,7 +774,15 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert restored.initialized
 
     assert {:ok, legacy_stream} =
-             Server.open_legacy_stream(second, session.id, "alice", "tenant-a", self())
+             Server.open_legacy_stream(
+               second,
+               session.id,
+               "alice",
+               "tenant-a",
+               self(),
+               nil,
+               [AttestoMCP.Scopes.tools_read()]
+             )
 
     subscriptions = GenServer.call(second, :subscriptions)
 
@@ -779,7 +795,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                %{"toolsListChanged" => true},
                self(),
                :peer,
-               nil
+               nil,
+               [AttestoMCP.Scopes.tools_read()]
              )
 
     assert_receive {:mcp_subscription, :peer, "modern",
@@ -1101,6 +1118,16 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     end)
 
     uris = Enum.map(cases, &elem(&1, 1))
+
+    delivery_scopes =
+      [
+        @resources_read
+        | Enum.flat_map(cases, fn {_name, _uri, _publisher_kind, _recipient_kind, publisher_scope,
+                                   recipient_scope} ->
+            Enum.reject([publisher_scope, recipient_scope], &is_nil/1)
+          end)
+      ]
+
     subscriptions = GenServer.call(recipient, :subscriptions)
 
     assert {:ok, subscription_id} =
@@ -1119,7 +1146,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                  )
 
                  true
-               end
+               end,
+               delivery_scopes
              )
 
     assert_receive {:mcp_subscription, :cluster, "cluster-scopes", _ack}, 1_000
@@ -1146,7 +1174,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                  )
 
                  true
-               end
+               end,
+               delivery_scopes
              )
 
     Enum.each(Enum.with_index(cases), fn {{_name, uri, _publisher_kind, _recipient_kind,
@@ -1211,7 +1240,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                  )
 
                  true
-               end
+               end,
+               [@tools_read, @resources_read, "publisher.read", "recipient.read"]
              )
 
     assert_receive {:mcp_subscription, :alternative_clauses, "alternative-clauses", _ack},
@@ -1237,7 +1267,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                  )
 
                  true
-               end
+               end,
+               [@tools_read, @resources_read, "publisher.read", "recipient.read"]
              )
 
     assert :ok = Server.publish(publisher, %{"type" => "resourceUpdated", "uri" => uri})
@@ -1298,7 +1329,13 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                %{"toolsListChanged" => true, "resourceSubscriptions" => [uri]},
                self(),
                :legacy,
-               nil
+               nil,
+               [
+                 AttestoMCP.Scopes.tools_read(),
+                 @resources_read,
+                 "publisher.read",
+                 "recipient.read"
+               ]
              )
 
     assert_receive {:mcp_subscription, :legacy, "legacy-resource", _ack}, 1_000
@@ -1311,7 +1348,20 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert :ok = Server.mark_initialized(recipient, session.id)
 
     assert {:ok, legacy_stream} =
-             Server.open_legacy_stream(recipient, session.id, "alice", "tenant-a", self())
+             Server.open_legacy_stream(
+               recipient,
+               session.id,
+               "alice",
+               "tenant-a",
+               self(),
+               nil,
+               [
+                 AttestoMCP.Scopes.tools_read(),
+                 @resources_read,
+                 "publisher.read",
+                 "recipient.read"
+               ]
+             )
 
     GenServer.cast(
       recipient,
@@ -1350,7 +1400,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                %{"resourceSubscriptions" => [uri]},
                self(),
                :envelope,
-               nil
+               nil,
+               [@resources_read]
              )
 
     assert_receive {:mcp_subscription, :envelope, "envelope", _ack}, 1_000
@@ -1364,7 +1415,15 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert :ok = Server.subscribe_resource(recipient, session.id, "alice", "tenant-a", uri)
 
     assert {:ok, legacy_stream} =
-             Server.open_legacy_stream(recipient, session.id, "alice", "tenant-a", self())
+             Server.open_legacy_stream(
+               recipient,
+               session.id,
+               "alice",
+               "tenant-a",
+               self(),
+               nil,
+               [@resources_read]
+             )
 
     valid_notification = %{"type" => "resourceUpdated", "uri" => uri}
     valid_scopes = [@resources_read]
@@ -1551,7 +1610,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                  )
 
                  true
-               end
+               end,
+               [@resources_read, "a.read"]
              )
 
     assert_receive {:mcp_subscription, :resolution, "resolution", _ack}, 1_000
@@ -1579,7 +1639,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                  )
 
                  true
-               end
+               end,
+               [@resources_read, "a.read"]
              )
 
     assert :ok = Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri})
@@ -1627,7 +1688,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
                %{"toolsListChanged" => true, "resourceSubscriptions" => [uri]},
                self(),
                :caller,
-               nil
+               nil,
+               [@tools_read, @resources_read, "publisher.read", "recipient.read"]
              )
 
     assert_receive {:mcp_subscription, :caller, "caller-authorizer", _ack}, 1_000
@@ -1641,7 +1703,15 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert :ok = Server.subscribe_resource(recipient, session.id, "alice", "tenant-a", uri)
 
     assert {:ok, legacy_stream} =
-             Server.open_legacy_stream(recipient, session.id, "alice", "tenant-a", self())
+             Server.open_legacy_stream(
+               recipient,
+               session.id,
+               "alice",
+               "tenant-a",
+               self(),
+               nil,
+               [@tools_read, @resources_read, "publisher.read", "recipient.read"]
+             )
 
     assert :ok =
              Server.publish(publisher, %{"type" => "resourceUpdated", "uri" => uri},
@@ -1737,7 +1807,7 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
     assert :ok = Server.close_legacy_stream(recipient, legacy_stream)
   end
 
-  test "cluster publisher keeps over-limit resource delivery local and removes duplicates" do
+  test "over-limit cluster resource scopes remain local and fail captured-scope delivery" do
     {server, recipient} = clustered_servers()
     parent = self()
     uri = "urn:cluster/many-scopes"
@@ -1783,11 +1853,9 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
 
     assert_receive {:mcp_subscription, :many_recipient, "many-scopes-recipient", _ack}, 1_000
     assert :ok = Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri})
-    assert_receive {:many_scopes, required}, 1_000
-    assert required == [@resources_read | scopes]
-    assert_receive {:mcp_subscription, :many, "many-scopes", _event}, 1_000
+    refute_receive {:many_scopes, _required}, 200
+    refute_receive {:mcp_subscription, :many, "many-scopes", _event}, 200
     refute_receive {:mcp_subscription, :many_recipient, "many-scopes-recipient", _event}, 200
-    refute_receive {:mcp_subscription, :many, "many-scopes", _duplicate}, 200
 
     {:ok, session} = Server.new_session(server, "alice", "tenant-a")
     assert :ok = Server.negotiate_session(server, session.id, "alice", "tenant-a", @legacy, %{})
@@ -1808,8 +1876,8 @@ defmodule AttestoMCP.Server.SessionStoreClusterTest do
              )
 
     assert :ok = Server.publish(server, %{"type" => "resourceUpdated", "uri" => uri})
-    assert_receive {:many_legacy_scopes, [@resources_read | ^scopes]}, 1_000
-    assert_receive {:mcp_legacy_event, ^legacy_stream, _, _legacy_event}, 1_000
+    refute_receive {:many_legacy_scopes, _required}, 200
+    refute_receive {:mcp_legacy_event, ^legacy_stream, _, _legacy_event}, 200
     refute_receive {:mcp_subscription, :many_recipient, "many-scopes-recipient", _event}, 200
 
     assert :ok = Subscriptions.close(subscriptions, subscription_id, self())

@@ -83,6 +83,15 @@ defmodule AttestoMCP.Server.SessionStoreObservabilityTest do
     refute inspect(metadata) =~ "private"
     refute_receive {:session_store_failure, ^event, _, _}, 50
 
+    assert {:error, :session_store_unavailable} =
+             Server.session_capabilities(server, "session-id", "principal", "tenant")
+
+    assert_receive {:session_store_failure, ^event, %{count: 1}, capabilities_metadata}, 1_000
+    assert capabilities_metadata.source == :load
+    assert capabilities_metadata.outcome == :unavailable
+    refute inspect(capabilities_metadata) =~ "private"
+    refute_receive {:session_store_failure, ^event, _, _}, 50
+
     assert {:error, :session_store_unavailable} = Server.touch_session(server, "session-id")
     assert_receive {:session_store_failure, ^event, %{count: 1}, touch_metadata}, 1_000
     assert touch_metadata.source == :update_ttl

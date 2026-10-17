@@ -2,6 +2,8 @@ defmodule AttestoMCP.Server.ServerIconsTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
   alias AttestoMCP.Server.Test, as: ServerTest
 
   @modern "2026-07-28"
@@ -10,10 +12,6 @@ defmodule AttestoMCP.Server.ServerIconsTest do
   @server_info "io.modelcontextprotocol/serverInfo"
   @png_icon %{"src" => "https://example.com/icons/server.png", "mimeType" => "image/png"}
   @tiny_png "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-
-  defp start_server(opts) do
-    start_supervised!({Server, opts}, id: make_ref())
-  end
 
   defp initialize(server, version) do
     {1, response} =

@@ -84,6 +84,8 @@ defmodule AttestoMCP.Server.API do
           | {:legacy_initialized_grace_ms, non_neg_integer()}
           | {:session_idle_timeout, pos_integer()}
           | {:session_absolute_timeout, pos_integer()}
+          | {:max_sessions_per_principal, pos_integer()}
+          | {:max_legacy_streams_per_session, pos_integer()}
           | {:max_json_bytes, pos_integer()}
           | {:output_canonicalization, :strict | :json | :jason}
           | {:tool_argument_keys, :strings | :atoms}

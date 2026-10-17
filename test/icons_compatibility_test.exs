@@ -2,15 +2,13 @@ defmodule AttestoMCP.Server.IconsCompatibilityTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
   alias AttestoMCP.Server.{Icons, Implementation}
   alias AttestoMCP.Server.Test, as: ServerTest
 
   @identity "io.modelcontextprotocol/serverInfo"
   @icon %{"src" => "https://example.com/icon.png"}
-
-  defp start_server(opts) do
-    start_supervised!(Supervisor.child_spec({Server, opts}, id: make_ref()))
-  end
 
   defp authored_response(server, name, authored) do
     assert :ok =

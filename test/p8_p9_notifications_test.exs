@@ -342,7 +342,15 @@ defmodule AttestoMCP.Server.P8P9NotificationsTest do
     assert :ok = Server.mark_initialized(server, session.id)
 
     assert {:ok, stream} =
-             Server.open_legacy_stream(server, session.id, "legacy-register", "tenant", self())
+             Server.open_legacy_stream(
+               server,
+               session.id,
+               "legacy-register",
+               "tenant",
+               self(),
+               nil,
+               [AttestoMCP.Scopes.tools_read()]
+             )
 
     assert :ok =
              Server.register_tool(server, "registered_after_stream", %{

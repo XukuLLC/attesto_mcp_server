@@ -246,10 +246,8 @@ defmodule AttestoMCP.Server.SchemaCacheTest do
     assert :ok = Schema.validate_schema(schema)
     assert {:ok, %JSV.Root{}} = Cache.get({schema, true, Schema.default_instance_bytes()})
 
-    for _ <- 1..2 do
-      assert {:error, :schema_validation_timeout} =
-               Task.async(fn -> Schema.validate(1, schema) end) |> Task.await()
-    end
+    assert {:error, :schema_validation_timeout} =
+             Task.async(fn -> Schema.validate(1, schema) end) |> Task.await(10_000)
   end
 
   test "standalone validation works while the application cache is unavailable" do

@@ -2,7 +2,7 @@ defmodule AttestoMCP.Server.Stdio do
   @moduledoc "Line-delimited stdio adapter over the shared protocol core."
 
   alias AttestoMCP.Server
-  alias AttestoMCP.Server.{Error, JSONRPC, Schema, Telemetry}
+  alias AttestoMCP.Server.{Error, JSONRPC, Protocol, Schema, Telemetry}
 
   @legacy "2025-11-25"
   @legacy_versions [@legacy, "2025-06-18"]
@@ -80,7 +80,12 @@ defmodule AttestoMCP.Server.Stdio do
         {:error, :session_store_unavailable}
 
       {:error, reason}
-      when reason in [:nonportable_binding, :binding_too_large, :record_too_large] ->
+      when reason in [
+             :nonportable_binding,
+             :binding_too_large,
+             :record_too_large,
+             :session_limit
+           ] ->
         Telemetry.execute([:stdio, :stop], %{count: 1}, %{
           transport: :stdio,
           outcome: :rejected
@@ -316,8 +321,8 @@ defmodule AttestoMCP.Server.Stdio do
     id = Map.get(request, :id)
     key = if is_nil(id), do: {:notification, work_ref}, else: id
 
-    case legacy_not_ready?(server, context, request) do
-      true ->
+    case request_context(server, context, request) do
+      {:error, :not_ready} ->
         if not is_nil(id),
           do:
             write(
@@ -329,16 +334,7 @@ defmodule AttestoMCP.Server.Stdio do
 
         pending
 
-      readiness when readiness in [false, :session_store_unavailable] ->
-        # Keep a readiness outage attached to this request even if the
-        # request-context lookup below happens to recover. The core dispatch
-        # still performs validation and authorization before returning its
-        # neutral store-unavailable response; it must never reach a handler.
-        context =
-          if readiness == :session_store_unavailable,
-            do: Map.put(context, :session_store_unavailable, true),
-            else: context
-
+      {:ok, request_context} ->
         case allow_rate(server, context, request) do
           :ok ->
             if not is_nil(id) and Map.has_key?(pending, key) do
@@ -350,7 +346,7 @@ defmodule AttestoMCP.Server.Stdio do
             else
               start_worker_process(
                 server,
-                context,
+                request_context,
                 opts,
                 request,
                 pending,
@@ -390,7 +386,6 @@ defmodule AttestoMCP.Server.Stdio do
   end
 
   defp start_worker_process(server, context, opts, request, pending, id, key, parent, work_ref) do
-    request_context = request_context(server, context, request)
     # Lets legacy initialize check its reply against this frame bound before
     # the session is negotiated.
     frame_bytes = Process.get(:attesto_mcp_stdio_json_budget)
@@ -400,9 +395,9 @@ defmodule AttestoMCP.Server.Stdio do
         on_event = fn event -> send(parent, {:stdio_event, work_ref, event}) end
 
         result =
-          AttestoMCP.Server.dispatch(server, request, request_context,
+          AttestoMCP.Server.dispatch(server, request, context,
             transport: :stdio,
-            version: dispatch_version_for(request, request_context),
+            version: dispatch_version_for(request, context),
             owner: self(),
             on_event: on_event,
             request_ref: work_ref,
@@ -527,7 +522,7 @@ defmodule AttestoMCP.Server.Stdio do
       session_id = context[:legacy_session_id]
       tenant = Map.get(context, :tenant) || Map.get(context, "tenant")
 
-      case legacy_session_lookup(
+      case AttestoMCP.Server.LegacySession.lookup(
              server,
              session_id,
              context_principal(context),
@@ -535,31 +530,39 @@ defmodule AttestoMCP.Server.Stdio do
              request
            ) do
         {:ok, session} ->
-          context
-          |> Map.put(:session_id, session_id)
-          |> Map.put(:protocol_version, session.version)
-          |> Map.put(
-            :legacy_session_state,
-            if(is_nil(session.version), do: :unnegotiated, else: :negotiated)
-          )
-          |> Map.put(:logging_level, session.logging_level)
+          context =
+            context
+            |> Map.put(:session_id, session_id)
+            |> Map.put(:protocol_version, session.version)
+            |> Map.put(
+              :legacy_session_state,
+              if(is_nil(session.version), do: :unnegotiated, else: :negotiated)
+            )
+            |> Map.put(:logging_level, session.logging_level)
+
+          if legacy_initialization_required?(request, session),
+            do: {:error, :not_ready},
+            else: {:ok, context}
 
         {:error, :session_store_unavailable} ->
-          context
-          |> Map.put(:session_id, session_id)
-          |> Map.put(:protocol_version, nil)
-          |> Map.put(:legacy_session_state, :unavailable)
-          |> Map.put(:session_store_unavailable, true)
+          {:ok,
+           context
+           |> Map.put(:session_id, session_id)
+           |> Map.put(:protocol_version, nil)
+           |> Map.put(:legacy_session_state, :unavailable)
+           |> Map.put(:session_store_unavailable, true)}
 
         _ ->
-          context
-          |> Map.put(:session_id, session_id)
-          |> Map.put(:protocol_version, nil)
-          |> Map.put(:legacy_session_state, :unavailable)
+          {:error, :not_ready}
       end
     else
-      Map.delete(context, :session_id)
+      {:ok, Map.delete(context, :session_id)}
     end
+  end
+
+  defp legacy_initialization_required?(request, session) do
+    request.method not in ["initialize", "ping", "notifications/initialized"] and
+      not session.initialized
   end
 
   defp mark_legacy_initialized(server, context) do
@@ -588,7 +591,9 @@ defmodule AttestoMCP.Server.Stdio do
                 session_id,
                 context_principal(context),
                 Map.get(context, :tenant) || Map.get(context, "tenant"),
-                self()
+                self(),
+                nil,
+                Map.get(context, :scopes, Map.get(context, "scopes", [])) || []
               )
 
             true
@@ -649,34 +654,6 @@ defmodule AttestoMCP.Server.Stdio do
 
     :ok
   end
-
-  defp legacy_not_ready?(server, context, request) do
-    if legacy_version?(version_for(request)) and
-         request.method not in ["initialize", "ping", "notifications/initialized"] do
-      case legacy_session_lookup(
-             server,
-             context[:legacy_session_id],
-             context_principal(context),
-             Map.get(context, :tenant) || Map.get(context, "tenant"),
-             request
-           ) do
-        {:ok, session} -> not session.initialized
-        # A backing-store outage must not create a transient window in which
-        # a legacy request can run before request_context/3 checks the store.
-        {:error, :session_store_unavailable} -> :session_store_unavailable
-        _ -> true
-      end
-    else
-      false
-    end
-  end
-
-  defp legacy_session_lookup(server, id, principal, tenant, %{method: method})
-       when method in ["resources/subscribe", "resources/unsubscribe"],
-       do: AttestoMCP.Server.peek_session(server, id, principal, tenant)
-
-  defp legacy_session_lookup(server, id, principal, tenant, _request),
-    do: AttestoMCP.Server.get_session(server, id, principal, tenant)
 
   defp take_ref(pending, ref) do
     case Enum.find(pending, fn {_id, entry} -> entry.ref == ref end) do
@@ -823,23 +800,7 @@ defmodule AttestoMCP.Server.Stdio do
 
   defp safe_server_request_callback(_callback, _event), do: :ok
 
-  defp version_for(%{method: "initialize", params: params}) when is_map(params) do
-    modern = metadata_value(params, "io.modelcontextprotocol/protocolVersion")
-    requested = params["protocolVersion"]
-
-    cond do
-      is_binary(modern) -> "2026-07-28"
-      requested in @legacy_versions -> requested
-      true -> @legacy
-    end
-  end
-
-  defp version_for(%{method: "initialize"}), do: @legacy
-  defp version_for(%{method: "notifications/initialized"}), do: @legacy
-
-  defp version_for(%{params: params}) do
-    metadata_value(params, "io.modelcontextprotocol/protocolVersion") || @legacy
-  end
+  defp version_for(request), do: Protocol.version(request, default: @legacy)
 
   defp dispatch_version_for(%{method: "initialize"} = request, _context),
     do: version_for(request)
@@ -857,13 +818,6 @@ defmodule AttestoMCP.Server.Stdio do
   end
 
   defp legacy_version?(version), do: version in @legacy_versions
-
-  defp metadata_value(params, key) do
-    case Map.get(params, "_meta") do
-      metadata when is_map(metadata) -> Map.get(metadata, key)
-      _ -> nil
-    end
-  end
 
   defp stdio_context(opts) do
     %{

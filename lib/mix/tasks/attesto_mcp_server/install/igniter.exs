@@ -5598,7 +5598,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
       auth: [
         config: &#{server_module}.attesto_config/0,
         resource: #{inspect(path)},
-        base_url: #{inspect(base_url)}
+        #{forward_base_url_options(base_url, 8)}
       ]
     """
     |> String.trim()
@@ -5621,9 +5621,19 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
       path: #{inspect(path)},
       auth: {Elixir.AttestoMCP.Server.Phoenix, :protected_resource_options, [#{inspect(app)}]},
       resource: #{inspect(path)},
-      base_url: #{inspect(base_url)}
+      #{forward_base_url_options(base_url, 6)}
     """
     |> String.trim()
+  end
+
+  defp forward_base_url_options(base_url, indentation) do
+    rendered = "base_url: #{inspect(base_url)}"
+
+    if String.starts_with?(base_url, "http://") do
+      rendered <> ",\n" <> String.duplicate(" ", indentation) <> "allow_http: true"
+    else
+      rendered
+    end
   end
 
   defp legacy_phoenix_forward_statement(

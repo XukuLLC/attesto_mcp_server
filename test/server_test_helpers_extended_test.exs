@@ -2,12 +2,12 @@ defmodule AttestoMCP.Server.TestHelpersExtendedTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 0, start_server: 1]
   alias AttestoMCP.Server.Test, as: ServerTest
 
   @modern "2026-07-28"
   @legacy "2025-11-25"
-
-  defp start_server(opts \\ []), do: start_supervised!({Server, opts})
 
   defp form_request(message) do
     %{

@@ -13,6 +13,10 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
   def save(store, key, record), do: GenServer.call(store, {:save, key, record})
 
   @impl true
+  def save_below_principal_limit(store, key, record, limit),
+    do: GenServer.call(store, {:save_below_principal_limit, key, record, limit})
+
+  @impl true
   def load(store, key), do: GenServer.call(store, {:load, key})
 
   @impl true
@@ -20,6 +24,21 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
 
   @impl true
   def list_active(store), do: GenServer.call(store, :list_active)
+
+  @impl true
+  def count_active(store), do: GenServer.call(store, :count_active)
+
+  @impl true
+  def count_active(store, namespace),
+    do: GenServer.call(store, {:count_active, namespace})
+
+  @impl true
+  def count_active_for_principal(store, principal),
+    do: GenServer.call(store, {:count_active_for_principal, principal})
+
+  @impl true
+  def count_active_for_principal(store, namespace, principal),
+    do: GenServer.call(store, {:count_active_for_principal, namespace, principal})
 
   @impl true
   def list_active_keys(store, namespace, cursor, limit) do
@@ -49,6 +68,40 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
     state = enqueue_new_key(state, key)
     {:reply, :ok, put_in(state, [:records, key], record)}
   end
+
+  def handle_call(
+        {:save_below_principal_limit, {namespace, _id} = key, record, limit},
+        _from,
+        state
+      )
+      when is_binary(namespace) and is_map(record) and is_integer(limit) and limit > 0 do
+    now = System.system_time(:millisecond)
+    principal = record["principal"]
+
+    count =
+      Enum.count(state.records, fn
+        {{^namespace, _existing_id}, existing} ->
+          existing["principal"] == principal and not expired?(existing, now)
+
+        _entry ->
+          false
+      end)
+
+    cond do
+      not is_binary(principal) ->
+        {:reply, {:error, :invalid_record}, state}
+
+      count >= limit ->
+        {:reply, :limit_reached, state}
+
+      true ->
+        state = enqueue_new_key(state, key)
+        {:reply, :ok, put_in(state, [:records, key], record)}
+    end
+  end
+
+  def handle_call({:save_below_principal_limit, _key, _record, _limit}, _from, state),
+    do: {:reply, {:error, :invalid_record}, state}
 
   def handle_call({:load, key}, _from, state) do
     reply =
@@ -96,6 +149,42 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
       |> Enum.reject(fn {_key, record} -> expired?(record, now) end)
 
     {:reply, {:ok, records}, state}
+  end
+
+  def handle_call(:count_active, _from, state) do
+    now = System.system_time(:millisecond)
+    count = count_active_records(state.records, :all, :all, now)
+    {:reply, {:ok, count}, state}
+  end
+
+  def handle_call({:count_active, namespace}, _from, state) do
+    now = System.system_time(:millisecond)
+    count = count_active_records(state.records, namespace, :all, now)
+    {:reply, {:ok, count}, state}
+  end
+
+  def handle_call({:count_active_for_principal, principal}, _from, state) do
+    case Session.encode_binding_for_store(principal) do
+      {:ok, encoded_principal} ->
+        now = System.system_time(:millisecond)
+        count = count_active_records(state.records, :all, encoded_principal, now)
+        {:reply, {:ok, count}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:count_active_for_principal, namespace, principal}, _from, state) do
+    case Session.encode_binding_for_store(principal) do
+      {:ok, encoded_principal} ->
+        now = System.system_time(:millisecond)
+        count = count_active_records(state.records, namespace, encoded_principal, now)
+        {:reply, {:ok, count}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:list_active_keys, namespace, cursor, limit}, _from, state) do
@@ -163,6 +252,20 @@ defmodule AttestoMCP.Server.SessionStore.ETS do
     {expired, state} = cleanup_records(state, now, @max_list, [])
     {:reply, {:ok, Enum.reverse(expired)}, state}
   end
+
+  defp count_active_records(records, namespace, principal, now) do
+    Enum.count(records, fn {key, record} ->
+      namespace_matches?(key, namespace) and principal_matches?(record, principal) and
+        not expired?(record, now)
+    end)
+  end
+
+  defp namespace_matches?(_key, :all), do: true
+  defp namespace_matches?({namespace, _id}, namespace), do: true
+  defp namespace_matches?(_key, _namespace), do: false
+
+  defp principal_matches?(_record, :all), do: true
+  defp principal_matches?(record, principal), do: record["principal"] == principal
 
   defp enqueue_new_key(state, key) do
     if MapSet.member?(state.queued, key) do

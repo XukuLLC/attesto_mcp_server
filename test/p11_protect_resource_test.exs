@@ -5,6 +5,7 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
   import Plug.Test
 
   alias AttestoMCP.Server
+  alias AttestoMCP.Server.TestSupport.Async
 
   @concurrent_fallback_timeout_ms 30_000
 
@@ -38,6 +39,7 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
 
     boundary = state.auth_boundary
     assert get_in(boundary, [:authenticate, :resource_path]) == "/mcp"
+    refute Keyword.has_key?(boundary.authenticate, :resource)
     assert get_in(boundary, [:authenticate, :base_url]) == "https://mcp.example.com"
     assert get_in(boundary, [:authenticate, :resource_audience]) == :resource
     refute get_in(boundary, [:authenticate, :allow_dynamic_origin])
@@ -56,6 +58,7 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
 
     boundary = state.auth_boundary
     assert get_in(boundary, [:authenticate, :resource_path]) == "/mcp"
+    refute Keyword.has_key?(boundary.authenticate, :resource)
 
     assert get_in(boundary, [:authenticate, :resource_audience]) ==
              "https://mcp.example.com/mcp"
@@ -71,6 +74,11 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
 
     boundary = state.auth_boundary
     refute get_in(boundary, [:authenticate, :allow_dynamic_origin])
+
+    assert get_in(boundary, [:authenticate, :base_url]) ==
+             {AttestoMCP.Metadata, :resolve_origin, [[]]}
+
+    assert get_in(boundary, [:authenticate, :allow_http]) == true
     assert get_in(boundary, [:authenticate, :resource_audience]) == :resource
   end
 
@@ -410,8 +418,8 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
 
     Process.exit(caller, :kill)
 
-    assert eventually(fn -> Server.stats(server).client_requests == 0 end)
-    assert eventually(fn -> Server.stats(server).active_requests == 0 end)
+    assert Async.eventually(fn -> Server.stats(server).client_requests == 0 end, attempts: 50)
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 0 end, attempts: 50)
   end
 
   test "rate buckets retain each category's own window and stay capped" do
@@ -432,23 +440,14 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
     assert :ok = Server.allow_rate(server, {:ip, {127, 0, 0, 1}}, :auth_failures)
     assert {:error, :rate_limited} = Server.allow_rate(server, {:principal, "long"}, :calls)
 
-    for index <- 1..10_050 do
-      assert :ok = Server.allow_rate(server, {:principal, index}, :calls)
-    end
+    decisions =
+      Enum.map(1..10_050, fn index ->
+        Server.allow_rate(server, {:principal, index}, :calls)
+      end)
 
-    assert Server.stats(server).rate_buckets <= 10_000
-  end
-
-  defp eventually(fun, attempts \\ 50)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
+    assert Enum.count(decisions, &(&1 == :ok)) == 10_050
+    assert Enum.count(decisions, &(&1 == {:error, :rate_limited})) == 0
+    assert Server.stats(server).rate_buckets == 10_000
   end
 
   defp await_task_barrier!(tasks, barrier, deadline) do

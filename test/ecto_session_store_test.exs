@@ -68,6 +68,11 @@ defmodule AttestoMCP.Server.SessionStore.EctoTestMigration do
     end
 
     create(index(:attesto_mcp_sessions, [:namespace, :expires_at_ms, :session_id]))
+
+    execute(
+      "CREATE INDEX attesto_mcp_sessions_namespace_principal_expires_at_ms_index " <>
+        "ON attesto_mcp_sessions (namespace, (record ->> 'principal'), expires_at_ms)"
+    )
   end
 end
 
@@ -1067,6 +1072,103 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
     assert :not_found = Store.load(store, key)
   end
 
+  test "principal-limited admission is atomic", %{store: store} do
+    first = AttestoMCP.Server.Session.new("atomic-principal", nil)
+    second = AttestoMCP.Server.Session.new("atomic-principal", nil)
+    {:ok, first_record} = AttestoMCP.Server.Session.to_record(first)
+    {:ok, second_record} = AttestoMCP.Server.Session.to_record(second)
+
+    tasks = [
+      Task.async(fn ->
+        Store.save_below_principal_limit(
+          store,
+          {"default", first.id},
+          first_record,
+          1
+        )
+      end),
+      Task.async(fn ->
+        Store.save_below_principal_limit(
+          store,
+          {"default", second.id},
+          second_record,
+          1
+        )
+      end)
+    ]
+
+    results = Enum.map(tasks, &Task.await/1)
+    assert Enum.count(results, &(&1 == :ok)) == 1
+    assert Enum.count(results, &(&1 == :limit_reached)) == 1
+    assert {:ok, 1} = Store.count_active_for_principal(store, "atomic-principal")
+  end
+
+  test "principal admission waits for an in-flight update that extends expiry" do
+    namespace = "admission-update-race-#{unique_id()}"
+    {:ok, direct_store} = Store.new(repo: EctoTestDirectRepo, namespace: namespace)
+    principal = "expiring-principal"
+    existing = AttestoMCP.Server.Session.new(principal, nil, idle_timeout: 1_500)
+    {:ok, existing_record} = AttestoMCP.Server.Session.to_record(existing)
+    existing_key = {namespace, existing.id}
+    assert :ok = Store.save(direct_store, existing_key, existing_record)
+
+    parent = self()
+
+    updater =
+      Task.async(fn ->
+        Store.update(direct_store, existing_key, fn current ->
+          send(parent, {:session_update_locked, self()})
+
+          receive do
+            :release_session_update ->
+              {:ok, Map.put(current, "last_seen_ms", System.system_time(:millisecond))}
+          end
+        end)
+      end)
+
+    updater_pid = updater.pid
+    assert_receive {:session_update_locked, ^updater_pid}, 1_000
+
+    wait_ms =
+      max(existing.last_seen + existing.idle_timeout - System.system_time(:millisecond) + 1, 1)
+
+    Process.sleep(wait_ms)
+
+    candidate = AttestoMCP.Server.Session.new(principal, nil)
+    {:ok, candidate_record} = AttestoMCP.Server.Session.to_record(candidate)
+
+    admission =
+      Task.async(fn ->
+        Store.save_below_principal_limit(
+          direct_store,
+          {namespace, candidate.id},
+          candidate_record,
+          1
+        )
+      end)
+
+    assert Task.yield(admission, 100) == nil
+    send(updater.pid, :release_session_update)
+
+    assert {:ok, %{"last_seen_ms" => refreshed_at}} = Task.await(updater, 2_000)
+    assert refreshed_at > existing.last_seen
+    assert :limit_reached = Task.await(admission, 2_000)
+    assert {:ok, 1} = Store.count_active_for_principal(direct_store, principal)
+  end
+
+  test "updates cannot move a live session between principal limits", %{store: store} do
+    key = {"default", unique_id()}
+    saved = record()
+    assert :ok = Store.save(store, key, saved)
+
+    assert {:error, :invalid_record} =
+             Store.update(store, key, fn current ->
+               {:ok, Map.put(current, "principal", "different-principal")}
+             end)
+
+    assert {:ok, ^saved} = Store.load(store, key)
+  end
+
   test "a server session survives a process restart with binding and negotiated state", %{
     store: _store
   } do
@@ -1325,7 +1427,7 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
         "attesto-mcp-generated-migration-#{System.unique_integer([:positive])}"
       )
 
-    version = System.unique_integer([:positive, :monotonic]) + 10_000
+    version = System.system_time(:microsecond)
 
     on_exit(fn ->
       EctoTestDirectRepo.query!(~s|DROP SCHEMA IF EXISTS "#{prefix}" CASCADE|, [],
@@ -1348,10 +1450,25 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
     assert [file] =
              Path.wildcard(Path.join(migration_path, "*_create_attesto_mcp_sessions.exs"))
 
+    assert [principal_index_file] =
+             Path.wildcard(
+               Path.join(migration_path, "*_add_attesto_mcp_sessions_principal_index.exs")
+             )
+
     assert [{migration_module, _bytecode}] = Code.compile_file(file)
+
+    assert [{principal_index_module, _bytecode}] = Code.compile_file(principal_index_file)
 
     assert :ok =
              Ecto.Migrator.up(EctoTestDirectRepo, version, migration_module, log: false)
+
+    assert :ok =
+             Ecto.Migrator.up(
+               EctoTestDirectRepo,
+               version + 1,
+               principal_index_module,
+               log: false
+             )
 
     {:ok, generated_store} =
       Store.new(
@@ -1376,6 +1493,28 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
              )
 
     assert index_definition =~ "(namespace, expires_at_ms, session_id)"
+
+    assert %{rows: [[principal_index_definition]]} =
+             EctoTestDirectRepo.query!(
+               "SELECT indexdef FROM pg_indexes " <>
+                 "WHERE schemaname = $1 AND tablename = 'attesto_mcp_sessions' " <>
+                 "AND indexname = 'attesto_mcp_sessions_namespace_principal_expires_at_ms_index'",
+               [prefix],
+               log: false,
+               telemetry_event: nil
+             )
+
+    assert principal_index_definition =~ "namespace"
+    assert principal_index_definition =~ "record ->> 'principal'::text"
+    assert principal_index_definition =~ "expires_at_ms"
+
+    assert :ok =
+             Ecto.Migrator.down(
+               EctoTestDirectRepo,
+               version + 1,
+               principal_index_module,
+               log: false
+             )
 
     assert :ok =
              Ecto.Migrator.down(EctoTestDirectRepo, version, migration_module, log: false)
@@ -1402,6 +1541,10 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
 
     Repo.query!(
       ~s|CREATE INDEX "#{prefix}_attesto_mcp_sessions_namespace_expires_at_ms_session_id_index" ON "#{prefix}"."attesto_mcp_sessions" (namespace, expires_at_ms, session_id)|
+    )
+
+    Repo.query!(
+      ~s|CREATE INDEX "attesto_mcp_sessions_namespace_principal_expires_at_ms_index" ON "#{prefix}"."attesto_mcp_sessions" (namespace, (record ->> 'principal'), expires_at_ms)|
     )
   end
 
@@ -1570,5 +1713,8 @@ defmodule AttestoMCP.Server.SessionStore.EctoTest do
     )
   end
 
-  defp unique_id, do: "session-#{System.unique_integer([:positive])}"
+  defp unique_id do
+    suffix = :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)
+    "session-#{suffix}"
+  end
 end

@@ -172,10 +172,10 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     plug = plug(server, config)
     session_id = initialize_session(plug, token)
 
-    # Context construction and request validation each perform an ordinary
-    # touch. Fail the following mark-initialized update to exercise the
+    # Validation performs one touch and shares that session with context
+    # construction. Fail the following mark-initialized update to exercise the
     # post-preflight outage window.
-    :ok = Agent.update(gate, fn _state -> {:allow, 2} end)
+    :ok = Agent.update(gate, fn _state -> {:allow, 1} end)
 
     response =
       call(
@@ -210,10 +210,10 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     plug = plug(server, config)
     session_id = initialize_session(plug, token)
 
-    # Validation and context lookup consume two updates before the initialized
-    # notification marks the session. The mark itself must be reported as a
-    # plain transport outage rather than exposing the adapter's error.
-    :ok = Agent.update(gate, fn _state -> {:allow, 2} end)
+    # Validation performs one update before the initialized notification marks
+    # the session. The mark itself must be reported as a plain transport outage
+    # rather than exposing the adapter's error.
+    :ok = Agent.update(gate, fn _state -> {:allow, 1} end)
 
     cases = [
       {:notification,
@@ -225,7 +225,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
            %{"jsonrpc" => "2.0", "method" => "notifications/initialized", "params" => %{}},
            session_id: session_id
          )
-       end, 2, 503, "service unavailable"},
+       end, 1, 503, "service unavailable"},
       {:post,
        fn ->
          call(
@@ -369,7 +369,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
     assert response.status == 200
     assert_receive :counted_stream_handler_ran, 1_000
-    assert Agent.get(counter, & &1) == 2
+    assert Agent.get(counter, & &1) == 1
   end
 
   test "authenticated HTTP session negotiates and enforces 2025-06-18" do

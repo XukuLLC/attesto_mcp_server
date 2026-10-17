@@ -176,6 +176,18 @@ defmodule AttestoMCP.Server.ScopeMapTest do
              )
   end
 
+  test "completion honors a configured default scope floor" do
+    params = %{"ref" => %{"type" => "ref/resource", "uri" => "file:///catalog"}}
+
+    assert ScopeMap.required_http_scopes(
+             "completion/complete",
+             params,
+             %{},
+             ["mcp:admin"],
+             []
+           ) == ["mcp:admin"]
+  end
+
   test "stdio still enforces explicitly configured server scopes" do
     server = start_supervised!({Server, scope_map: %{"tools/list" => ["stdio:tools:read"]}})
 

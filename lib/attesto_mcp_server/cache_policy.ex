@@ -95,10 +95,11 @@ defmodule AttestoMCP.Server.CachePolicy do
   @type policy :: %{ttl_ms: non_neg_integer() | nil, scope: String.t() | nil}
 
   @doc false
-  def cacheable_methods, do: @cacheable_methods
+  def max_safe_integer, do: @max_safe_integer
 
   @doc false
-  def max_safe_integer, do: @max_safe_integer
+  @spec cacheable_methods() :: [String.t()]
+  def cacheable_methods, do: @cacheable_methods
 
   @doc false
   @spec normalize_config!(term()) :: map() | nil

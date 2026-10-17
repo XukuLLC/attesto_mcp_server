@@ -10,14 +10,11 @@ defmodule AttestoMCP.Server.Registry do
   @type registration :: {primitive(), String.t(), map() | keyword()}
   use GenServer
 
-  alias AttestoMCP.Server.{CachePolicy, HeaderName, Icons, Schema}
+  alias AttestoMCP.Server.{CachePolicy, HeaderName, Icons, Schema, UriTemplate}
 
   @types [:tool, :resource, :template, :prompt, :completion]
   @max_identity_bytes 256
   @max_name_bytes 64
-  @max_template_expressions 16
-  @max_template_variables 32
-  @max_template_expression_bytes 128
   @max_definition_depth 64
   @max_catalog_size 1_000
   @max_batch_size @max_catalog_size
@@ -134,6 +131,20 @@ defmodule AttestoMCP.Server.Registry do
   @spec list(pid(), primitive()) :: [definition()]
   def list(pid, type) when type in @types, do: GenServer.call(pid, {:list, type})
 
+  @doc "Returns one normalized definition without copying the complete catalog."
+  @spec fetch(pid(), primitive(), term()) :: {:ok, definition()} | :error
+  def fetch(pid, type, identity) when type in @types,
+    do: GenServer.call(pid, {:fetch, type, identity})
+
+  def fetch(_pid, _type, _identity), do: :error
+
+  @doc "Returns definitions matching one wire-level tool name or exact resource URI."
+  @spec candidates(pid(), :tool | :resource, String.t()) :: [definition()]
+  def candidates(pid, type, selector) when type in [:tool, :resource] and is_binary(selector),
+    do: GenServer.call(pid, {:candidates, type, selector})
+
+  def candidates(_pid, _type, _selector), do: []
+
   @doc false
   @spec scope_sets(definition()) :: [[String.t()]]
   def scope_sets(definition) when is_map(definition) do
@@ -162,6 +173,7 @@ defmodule AttestoMCP.Server.Registry do
     {:ok,
      %{
        items: Map.new(@types, &{&1, %{}}),
+       selectors: %{tool: %{}, resource: %{}},
        revision: 0,
        opts: opts,
        max_json_bytes: max_bytes
@@ -172,7 +184,13 @@ defmodule AttestoMCP.Server.Registry do
   def handle_call({:register, type, identity, definition}, _from, state) do
     case put_registration(state.items, {type, identity, definition}) do
       {:ok, items} ->
-        {:reply, :ok, %{state | items: items, revision: state.revision + 1}}
+        {:reply, :ok,
+         %{
+           state
+           | items: items,
+             selectors: build_selector_indexes(items),
+             revision: state.revision + 1
+         }}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -194,6 +212,7 @@ defmodule AttestoMCP.Server.Registry do
          %{
            state
            | items: items,
+             selectors: build_selector_indexes(items),
              revision: state.revision + length(registrations)
          }}
 
@@ -210,7 +229,13 @@ defmodule AttestoMCP.Server.Registry do
         if affected == [] do
           {:reply, {:ok, state.items, []}, state}
         else
-          {:reply, {:ok, items, affected}, %{state | items: items, revision: state.revision + 1}}
+          {:reply, {:ok, items, affected},
+           %{
+             state
+             | items: items,
+               selectors: build_selector_indexes(items),
+               revision: state.revision + 1
+           }}
         end
 
       {:error, reason} ->
@@ -223,8 +248,17 @@ defmodule AttestoMCP.Server.Registry do
 
     if state.items == empty and state.revision == 0 do
       case build_catalog(registrations) do
-        {:ok, items} -> {:reply, :ok, %{state | items: items, revision: revision}}
-        {:error, reason} -> {:reply, {:error, reason}, state}
+        {:ok, items} ->
+          {:reply, :ok,
+           %{
+             state
+             | items: items,
+               selectors: build_selector_indexes(items),
+               revision: revision
+           }}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
       end
     else
       {:reply, {:error, :registry_not_empty}, state}
@@ -237,6 +271,33 @@ defmodule AttestoMCP.Server.Registry do
 
   def handle_call({:list, type}, _from, state) do
     {:reply, state.items[type] |> Map.values() |> Enum.sort_by(& &1.identity), state}
+  end
+
+  def handle_call({:fetch, type, identity}, _from, state) when type in @types do
+    {:reply, Map.fetch(state.items[type], identity), state}
+  end
+
+  def handle_call({:candidates, type, selector}, _from, state)
+      when type in [:tool, :resource] do
+    {:reply, get_in(state.selectors, [type, selector]) || [], state}
+  end
+
+  defp build_selector_indexes(items) do
+    Map.new([:tool, :resource], fn type ->
+      selector_key = if type == :tool, do: :name, else: :uri
+
+      index =
+        items
+        |> Map.fetch!(type)
+        |> Map.values()
+        |> Enum.sort_by(& &1.identity)
+        |> Enum.reduce(%{}, fn definition, acc ->
+          Map.update(acc, definition[selector_key], [definition], &[definition | &1])
+        end)
+        |> Map.new(fn {selector, definitions} -> {selector, Enum.reverse(definitions)} end)
+
+      {type, index}
+    end)
   end
 
   defp normalize_registrations(registrations, max_bytes) do
@@ -832,14 +893,12 @@ defmodule AttestoMCP.Server.Registry do
   end
 
   defp header_names(suffix) when is_binary(suffix) do
-    if valid_header_suffix?(suffix),
+    if HeaderName.valid_suffix?(suffix),
       do: {:ok, ["mcp-param-" <> suffix]},
       else: {:error, :x_mcp_header}
   end
 
   defp header_names(_), do: {:error, :x_mcp_header}
-
-  defp valid_header_suffix?(suffix), do: HeaderName.valid_suffix?(suffix)
 
   defp header_annotation_outside_properties?(schema, allow_direct)
        when is_map(schema) and is_boolean(allow_direct) do
@@ -1021,130 +1080,7 @@ defmodule AttestoMCP.Server.Registry do
   defp bool_ok(true, _), do: :ok
   defp bool_ok(false, field), do: {:error, {:invalid_definition, field}}
 
-  defp valid_template(template) when is_binary(template) do
-    placeholders = Regex.scan(~r/\{([^{}]*)\}/, template, capture: :all_but_first)
-    expressions = Enum.map(placeholders, &hd/1)
-
-    valid_uri(template) == :ok and balanced_braces?(template) and placeholders != [] and
-      not String.contains?(Regex.replace(~r/\{[^{}]*\}/, template, ""), ["{", "}"]) and
-      length(expressions) <= @max_template_expressions and
-      Enum.all?(expressions, &(byte_size(&1) <= @max_template_expression_bytes)) and
-      Enum.all?(placeholders, fn [expression] -> valid_template_expression?(expression) end) and
-      unique_template_variables?(expressions) and
-      supported_template_layout?(template, placeholders)
-  end
-
-  defp valid_template(_), do: false
-
-  # Reverse matching is deliberately bounded and deterministic. Multiple
-  # path expressions are supported when each has one variable and a literal
-  # separator; adjacent expressions would require guessing a split point.
-  defp supported_template_layout?(template, [[expression]]) do
-    marker = "{" <> expression <> "}"
-
-    case String.split(template, marker, parts: 2) do
-      [prefix, suffix] ->
-        {operator, variables} = template_operator(expression)
-
-        operator in [nil, ?+, ??] and
-          (operator != ?? or suffix == "") and
-          variables != "" and
-          String.valid?(prefix) and String.valid?(suffix)
-
-      _ ->
-        false
-    end
-  end
-
-  defp supported_template_layout?(template, placeholders) when length(placeholders) > 1 do
-    expressions = Enum.map(placeholders, &hd/1)
-    literals = Regex.split(~r/\{[^{}]*\}/, template, trim: false)
-
-    length(expressions) <= @max_template_expressions and
-      length(expressions) <= @max_template_variables and
-      length(literals) == length(expressions) + 1 and
-      multi_path_expressions?(expressions) and
-      no_adjacent_template_expressions?(literals)
-  end
-
-  defp supported_template_layout?(_template, _placeholders), do: false
-
-  defp multi_path_expressions?(expressions) do
-    Enum.all?(expressions, fn expression ->
-      {operator, variables} = template_operator(expression)
-
-      operator in [nil, ?+] and length(String.split(variables, ",", trim: false)) == 1
-    end)
-  end
-
-  defp no_adjacent_template_expressions?(literals) do
-    literals
-    |> Enum.with_index()
-    |> Enum.all?(fn
-      {_literal, 0} -> true
-      {_literal, index} when index == length(literals) - 1 -> true
-      {literal, _index} -> literal != ""
-    end)
-  end
-
-  defp unique_template_variables?(expressions) do
-    names =
-      Enum.flat_map(expressions, fn expression ->
-        {_operator, variables} = template_operator(expression)
-
-        Enum.map(String.split(variables, ",", trim: false), fn variable ->
-          variable
-          |> String.trim_trailing("*")
-          |> String.split(":", parts: 2)
-          |> hd()
-        end)
-      end)
-
-    length(names) <= @max_template_variables and length(names) == length(Enum.uniq(names))
-  end
-
-  defp template_operator(expression) when is_binary(expression) do
-    case expression do
-      <<operator, rest::binary>> when operator in [?+, ?#, ?., ?/, ?;, ??, ?&] ->
-        {operator, rest}
-
-      _ ->
-        {nil, expression}
-    end
-  end
-
-  defp balanced_braces?(value),
-    do:
-      count_char(value, ?{) == count_char(value, ?}) and not String.contains?(value, ["{{", "}}"])
-
-  defp valid_template_expression?(expression) when is_binary(expression) do
-    {operator, variables} =
-      case expression do
-        <<operator, rest::binary>> when operator in [?+, ?#, ?., ?/, ?;, ??, ?&] ->
-          {operator, rest}
-
-        _ ->
-          {nil, expression}
-      end
-
-    operator in [nil, ?+, ?#, ?., ?/, ?;, ??, ?&] and variables != "" and
-      variables
-      |> String.split(",", trim: false)
-      |> Enum.uniq()
-      |> length() == length(String.split(variables, ",", trim: false)) and
-      Enum.all?(String.split(variables, ",", trim: false), &valid_template_varspec?/1)
-  end
-
-  defp valid_template_expression?(_), do: false
-
-  defp valid_template_varspec?(value) when is_binary(value) do
-    Regex.match?(~r/^[A-Za-z][A-Za-z0-9_.]*(?::[1-9][0-9]{0,3})?\*?$/, value)
-  end
-
-  defp valid_template_varspec?(_), do: false
-
-  defp count_char(value, codepoint),
-    do: value |> String.to_charlist() |> Enum.count(&(&1 == codepoint))
+  defp valid_template(template), do: UriTemplate.valid?(template, &valid_uri/1)
 
   defp valid_arguments(arguments) when is_list(arguments) do
     if Enum.all?(arguments, &valid_argument?/1),

@@ -17,7 +17,8 @@ defmodule AttestoMCP.Server.Schema do
   @default_json_bytes 2_000_000
   @max_json_bytes 64_000_000
   @max_default_applications 500
-  @operation_timeout_ms 1_000
+  @operation_timeout_ms 5_000
+  @compilation_timeout_ms 5_000
   @initialization_timeout_ms 10_000
   @default_dialect "https://json-schema.org/draft/2020-12/schema"
   @supported_dialects [
@@ -216,34 +217,37 @@ defmodule AttestoMCP.Server.Schema do
          {:ok, prepared} <- prepare_schema(schema) do
       dialect = Map.get(prepared, "$schema", @default_dialect)
 
-      run_bounded(fn ->
-        # Fetch the shared immutable meta-root inside the worker. Capturing it
-        # in the closure copies the entire compiled meta-schema into every task.
-        meta = meta_root(dialect)
+      run_bounded(
+        fn ->
+          # Fetch the shared immutable meta-root inside the worker. Capturing it
+          # in the closure copies the entire compiled meta-schema into every task.
+          meta = meta_root(dialect)
 
-        case JSV.validate(normalize_numbers(schema), meta, cast: false, cast_formats: false) do
-          {:ok, _} ->
-            case JSV.build(normalize_numbers(compilation_schema(prepared)),
-                   resolver: [],
-                   atoms: false,
-                   formats: format_validators(opts),
-                   vocabularies: draft7_vocabularies(),
-                   warnings: :silence
-                 ) do
-              {:ok, root} ->
-                with :ok <- compiled_pattern_budget(root), do: {:ok, root}
+          case JSV.validate(normalize_numbers(schema), meta, cast: false, cast_formats: false) do
+            {:ok, _} ->
+              case JSV.build(normalize_numbers(compilation_schema(prepared)),
+                     resolver: [],
+                     atoms: false,
+                     formats: format_validators(opts),
+                     vocabularies: draft7_vocabularies(),
+                     warnings: :silence
+                   ) do
+                {:ok, root} ->
+                  with :ok <- compiled_pattern_budget(root), do: {:ok, root}
 
-              {:error, %JSV.BuildError{reason: {:resolver_error, _}}} ->
-                {:error, :remote_ref_disabled}
+                {:error, %JSV.BuildError{reason: {:resolver_error, _}}} ->
+                  {:error, :remote_ref_disabled}
 
-              {:error, _} ->
-                {:error, :invalid_schema}
-            end
+                {:error, _} ->
+                  {:error, :invalid_schema}
+              end
 
-          {:error, error} ->
-            {:error, schema_reason(error)}
-        end
-      end)
+            {:error, error} ->
+              {:error, schema_reason(error)}
+          end
+        end,
+        @compilation_timeout_ms
+      )
     end
   end
 
@@ -1140,7 +1144,8 @@ defmodule AttestoMCP.Server.Schema do
     end)
   end
 
-  defp configured_max_bytes(opts) when is_list(opts) do
+  @doc false
+  def configured_max_bytes(opts) when is_list(opts) do
     max_bytes = Keyword.get(opts, :max_bytes, @default_json_bytes)
 
     if is_integer(max_bytes) and max_bytes >= @min_json_bytes and
@@ -1149,5 +1154,5 @@ defmodule AttestoMCP.Server.Schema do
        else: 0
   end
 
-  defp configured_max_bytes(_opts), do: 0
+  def configured_max_bytes(_opts), do: 0
 end

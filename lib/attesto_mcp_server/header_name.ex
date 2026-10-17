@@ -3,15 +3,12 @@ defmodule AttestoMCP.Server.HeaderName do
 
   @max_name_bytes 256
   @max_suffix_bytes 128
-  @reserved ~w(authorization cookie host content-length transfer-encoding connection upgrade)
 
   @doc false
   @spec valid?(term()) :: boolean()
   def valid?(name)
       when is_binary(name) and byte_size(name) in 1..@max_name_bytes do
-    String.valid?(name) and
-      token?(name) and
-      String.downcase(name) not in @reserved
+    String.valid?(name) and token?(name)
   end
 
   def valid?(_name), do: false

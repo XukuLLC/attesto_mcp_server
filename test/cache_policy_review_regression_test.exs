@@ -3,11 +3,10 @@ defmodule AttestoMCP.Server.CachePolicyReviewRegressionTest do
 
   alias AttestoMCP.Server
 
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
+
   @modern "2026-07-28"
   @server_info "io.modelcontextprotocol/serverInfo"
-
-  defp start_server(opts),
-    do: start_supervised!(Supervisor.child_spec({Server, opts}, id: make_ref()))
 
   defp request(server, method, params \\ %{}, context \\ %{}) do
     id = System.unique_integer([:positive])

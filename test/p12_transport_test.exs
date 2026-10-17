@@ -8,6 +8,18 @@ defmodule AttestoMCP.Server.P12TransportTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.JSONRPC
   alias AttestoMCP.Server.Stdio
+  alias AttestoMCP.Server.TestSupport.Async
+  alias AttestoMCP.Server.TestSupport.HTTPClient
+
+  import AttestoMCP.Server.TestSupport.HTTPClient,
+    only: [
+      connect: 1,
+      parse_headers: 1,
+      recv_body: 3,
+      recv_headers: 1,
+      request: 5,
+      send_request: 5
+    ]
 
   @modern "2026-07-28"
   @legacy "2025-11-25"
@@ -81,13 +93,18 @@ defmodule AttestoMCP.Server.P12TransportTest do
     assert_receive {:legacy_started, "a"}, 1_000
     assert_receive {:legacy_started, "b"}, 1_000
     :ok = :gen_tcp.close(socket_a)
-    {body_b, _rest_b} = recv_until(socket_b, initial_b, ~s("id":102))
+    {body_b, _rest_b} = HTTPClient.recv_until(socket_b, ~s("id":102), initial_b, 2_000)
     assert body_b =~ "progress-b"
     refute body_b =~ "progress-a"
     assert body_b =~ ~s("tag":"b")
     assert_receive {:legacy_finished, "a"}, 1_000
     :ok = :gen_tcp.close(socket_b)
-    assert eventually(fn -> Server.stats(server).active_requests == 0 end)
+
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 0 end,
+             attempts: 100,
+             final_check: true
+           )
+
     assert Server.stats(server).active == 0
   end
 
@@ -120,18 +137,33 @@ defmodule AttestoMCP.Server.P12TransportTest do
     stale = spawn(fn -> legacy_stream_relay(parent, :stale_event) end)
 
     assert {:ok, stale_ref} =
-             Server.open_legacy_stream(server, session.id, "usr_123", nil, stale, fn _ -> true end)
+             Server.open_legacy_stream(
+               server,
+               session.id,
+               "usr_123",
+               nil,
+               stale,
+               fn _ -> true end,
+               [AttestoMCP.Scopes.resources_read(), "mcp:resource:secret"]
+             )
 
     replacement = spawn(fn -> legacy_stream_relay(parent, :replacement_event) end)
 
     assert {:ok, replacement_ref} =
-             Server.open_legacy_stream(server, session.id, "usr_123", nil, replacement, fn %{
-                                                                                             required_scopes:
-                                                                                               scopes
-                                                                                           } ->
-               send(parent, {:resource_event_scopes, scopes})
-               true
-             end)
+             Server.open_legacy_stream(
+               server,
+               session.id,
+               "usr_123",
+               nil,
+               replacement,
+               fn %{
+                    required_scopes: scopes
+                  } ->
+                 send(parent, {:resource_event_scopes, scopes})
+                 true
+               end,
+               [AttestoMCP.Scopes.resources_read(), "mcp:resource:secret"]
+             )
 
     sampling =
       Task.async(fn ->
@@ -169,7 +201,12 @@ defmodule AttestoMCP.Server.P12TransportTest do
     assert {:ok, %{"model" => "test-model"}} = Task.await(sampling, 1_000)
 
     Process.exit(stale, :kill)
-    assert eventually(fn -> Server.stats(server).legacy_streams == 1 end)
+
+    assert Async.eventually(fn -> Server.stats(server).legacy_streams == 1 end,
+             attempts: 100,
+             final_check: true
+           )
+
     assert :ok = Server.publish(server, %{"type" => "resourceUpdated", "uri" => "test://scoped"})
     assert_receive {:resource_event_scopes, scopes}, 1_000
     assert "mcp:resources:read" in scopes
@@ -641,8 +678,15 @@ defmodule AttestoMCP.Server.P12TransportTest do
     Enum.each(jobs, &send(&1.pid, gate))
     assert Enum.all?(Task.await_many(jobs, 5_000), &(&1 == :notification))
 
-    assert eventually(fn -> Server.stats(server).active_requests == 0 end)
-    assert eventually(fn -> Server.stats(server).active == 0 end)
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 0 end,
+             attempts: 100,
+             final_check: true
+           )
+
+    assert Async.eventually(fn -> Server.stats(server).active == 0 end,
+             attempts: 100,
+             final_check: true
+           )
   end
 
   test "many modern nil-ID notifications tolerate response-owner deaths" do
@@ -670,8 +714,15 @@ defmodule AttestoMCP.Server.P12TransportTest do
       assert_receive {:DOWN, ^monitor, :process, _owner, _reason}, 1_000
     end)
 
-    assert eventually(fn -> Server.stats(server).active_requests == 0 end)
-    assert eventually(fn -> Server.stats(server).active == 0 end)
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 0 end,
+             attempts: 100,
+             final_check: true
+           )
+
+    assert Async.eventually(fn -> Server.stats(server).active == 0 end,
+             attempts: 100,
+             final_check: true
+           )
   end
 
   test "fast detached legacy requests retain exact terminal telemetry" do
@@ -743,7 +794,12 @@ defmodule AttestoMCP.Server.P12TransportTest do
       end)
 
     assert terminal_correlations == start_correlations
-    assert eventually(fn -> Server.stats(server).active_requests == 0 end)
+
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 0 end,
+             attempts: 100,
+             final_check: true
+           )
+
     assert Server.stats(server).active == 0
   end
 
@@ -798,7 +854,11 @@ defmodule AttestoMCP.Server.P12TransportTest do
 
     assert_receive :detached_started, 1_000
     Process.exit(owner, :kill)
-    assert eventually(fn -> Server.stats(server).active_requests == 1 end)
+
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 1 end,
+             attempts: 100,
+             final_check: true
+           )
 
     assert :ok =
              Server.cancel_request(
@@ -808,7 +868,11 @@ defmodule AttestoMCP.Server.P12TransportTest do
                {:legacy_session, "session-77"}
              )
 
-    assert eventually(fn -> Server.stats(server).active_requests == 0 end)
+    assert Async.eventually(fn -> Server.stats(server).active_requests == 0 end,
+             attempts: 100,
+             final_check: true
+           )
+
     assert Server.stats(server).active == 0
 
     assert_receive {:detached_telemetry, [:attesto_mcp_server, :request, :start], _,
@@ -952,97 +1016,4 @@ defmodule AttestoMCP.Server.P12TransportTest do
     conn = if session_id, do: put_req_header(conn, "mcp-session-id", session_id), else: conn
     Server.Plug.call(conn, plug)
   end
-
-  defp connect(port),
-    do:
-      (
-        {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
-        socket
-      )
-
-  defp send_request(socket, method, path, headers, body) do
-    headers = headers ++ [{"content-length", Integer.to_string(byte_size(body))}]
-
-    :gen_tcp.send(
-      socket,
-      IO.iodata_to_binary([
-        method,
-        " ",
-        path,
-        " HTTP/1.1\r\n",
-        Enum.map(headers, fn {name, value} -> [name, ": ", value, "\r\n"] end),
-        "\r\n",
-        body
-      ])
-    )
-  end
-
-  defp request(socket, method, path, headers, body) do
-    :ok = send_request(socket, method, path, headers, body)
-    {head, rest} = recv_headers(socket)
-    [status_line | header_lines] = String.split(head, "\r\n", trim: true)
-    [_, status] = Regex.run(~r/^HTTP\/\d\.\d (\d+)/, status_line)
-    headers = parse_headers(header_lines)
-    {body, _} = recv_body(socket, headers, rest)
-    {String.to_integer(status), headers, body}
-  end
-
-  defp recv_headers(socket, buffer \\ <<>>) do
-    case :binary.match(buffer, "\r\n\r\n") do
-      {offset, 4} ->
-        {binary_part(buffer, 0, offset),
-         binary_part(buffer, offset + 4, byte_size(buffer) - offset - 4)}
-
-      :nomatch ->
-        {:ok, chunk} = :gen_tcp.recv(socket, 0, 1_000)
-        recv_headers(socket, buffer <> chunk)
-    end
-  end
-
-  defp recv_until(socket, buffer, marker) do
-    if String.contains?(buffer, marker) do
-      {buffer, <<>>}
-    else
-      {:ok, chunk} = :gen_tcp.recv(socket, 0, 2_000)
-      recv_until(socket, buffer <> chunk, marker)
-    end
-  end
-
-  defp parse_headers(lines),
-    do:
-      Enum.group_by(
-        lines,
-        fn line -> line |> String.split(":", parts: 2) |> hd() |> String.downcase() end,
-        fn line -> line |> String.split(":", parts: 2) |> List.last() |> String.trim() end
-      )
-
-  defp recv_body(socket, headers, rest) do
-    case headers["content-length"] do
-      [length] -> recv_exact(socket, rest, String.to_integer(length))
-      _ -> {rest, <<>>}
-    end
-  end
-
-  defp recv_exact(_socket, buffer, needed) when byte_size(buffer) >= needed,
-    do: {binary_part(buffer, 0, needed), binary_part(buffer, needed, byte_size(buffer) - needed)}
-
-  defp recv_exact(socket, buffer, needed) do
-    {:ok, chunk} = :gen_tcp.recv(socket, 0, 1_000)
-    recv_exact(socket, buffer <> chunk, needed)
-  end
-
-  defp eventually(fun, attempts \\ 100),
-    do:
-      if(fun.(),
-        do: true,
-        else:
-          if(attempts == 0,
-            do: false,
-            else:
-              (
-                Process.sleep(10)
-                eventually(fun, attempts - 1)
-              )
-          )
-      )
 end

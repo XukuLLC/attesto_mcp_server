@@ -2,14 +2,12 @@ defmodule AttestoMCP.Server.SchemaDialectExportTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+
+  import AttestoMCP.Server.TestSupport.ServerCase, only: [start_server: 1]
   alias AttestoMCP.Server.Test, as: ServerTest
 
   @dialect_2020_12 "https://json-schema.org/draft/2020-12/schema"
   @draft_07 "http://json-schema.org/draft-07/schema#"
-
-  defp start_server(opts) do
-    start_supervised!({Server, opts}, id: make_ref())
-  end
 
   defp tools(server, opts \\ []) do
     server

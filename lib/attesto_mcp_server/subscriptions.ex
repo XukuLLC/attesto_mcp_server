@@ -2,7 +2,7 @@ defmodule AttestoMCP.Server.Subscriptions do
   @moduledoc "Bounded, principal/tenant-bound modern subscription registry."
   use GenServer
 
-  alias AttestoMCP.Server.Telemetry
+  alias AttestoMCP.Server.{ScopePolicy, Telemetry}
 
   @max_queue 128
   @max_resource_uri_bytes 4_096
@@ -21,10 +21,18 @@ defmodule AttestoMCP.Server.Subscriptions do
   @spec open(pid(), term(), term(), term(), pid(), term(), (map() -> boolean()) | nil) ::
           {:ok, term()} | {:error, term()}
   def open(pid, principal, tenant, filter, sink \\ self(), tag \\ nil, authorize \\ nil),
-    do: GenServer.call(pid, {:open, nil, principal, tenant, filter, sink, tag, authorize})
+    do: open(pid, principal, tenant, nil, filter, sink, tag, authorize, [])
 
   def open(pid, principal, tenant, id, filter, sink, tag, authorize),
-    do: GenServer.call(pid, {:open, id, principal, tenant, filter, sink, tag, authorize})
+    do: open(pid, principal, tenant, id, filter, sink, tag, authorize, [])
+
+  @doc false
+  def open(pid, principal, tenant, id, filter, sink, tag, authorize, scopes),
+    do:
+      GenServer.call(
+        pid,
+        {:open, id, principal, tenant, filter, sink, tag, authorize, scopes}
+      )
 
   @doc "Publishes a filtered notification with authorization rechecks."
   @spec publish(pid(), map(), keyword()) :: :ok
@@ -66,11 +74,12 @@ defmodule AttestoMCP.Server.Subscriptions do
 
   @impl true
   def handle_call(
-        {:open, requested_id, principal, tenant, filter, sink, tag, authorize},
+        {:open, requested_id, principal, tenant, filter, sink, tag, authorize, scopes},
         _from,
         state
       ) do
     with {:ok, filter} <- normalize_filter(filter),
+         {:ok, scopes} <- ScopePolicy.normalize_scopes(scopes),
          {:ok, id, state} <- choose_id(requested_id, sink, state),
          true <- is_pid(sink) do
       monitor = Process.monitor(sink)
@@ -83,6 +92,7 @@ defmodule AttestoMCP.Server.Subscriptions do
         sink: sink,
         tag: tag,
         authorize: authorize,
+        scopes: scopes,
         monitor: monitor,
         queue_size: 0,
         overflowed: false
@@ -312,6 +322,7 @@ defmodule AttestoMCP.Server.Subscriptions do
 
     allowed =
       matches?(subscription.filter, event) and
+        ScopePolicy.scope_sets_grant?(required_scope_sets, subscription.scopes) and
         Enum.all?(
           authorizers,
           &authorized?(&1, %{
