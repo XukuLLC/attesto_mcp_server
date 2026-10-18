@@ -57,6 +57,11 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
   in the path. An existing host that reruns the task therefore receives only the
   new file. Generated files are formatted and end with a newline, so they pass
   `mix format --check-formatted` unchanged.
+
+  The generated migrations are idempotent: tables and indexes are created only
+  when absent and dropped only when present, and the principal admission index
+  migration skips itself with a warning when the sessions table does not exist
+  yet, so the files can be applied in any order a host ends up with.
   """
 
   use Mix.Task
@@ -513,7 +518,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
       execute(~s|CREATE SCHEMA IF NOT EXISTS "\#{prefix}"|)
       <% end %>
 
-      create table(:<%= @table_name %>, primary_key: false, prefix: prefix) do
+      create_if_not_exists table(:<%= @table_name %>, primary_key: false, prefix: prefix) do
         # The namespace is part of the key: independent named MCP servers
         # may share this table without colliding on a session id.
         add :namespace, :string, size: <%= @key_size %>, primary_key: true, null: false
@@ -541,14 +546,14 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
       # List and cleanup operations stay inside one store-bound namespace.
       # Keep the namespace and expiration deadline together for those
       # bounded SQL-side scans. The primary key supports session lookup.
-      create index(:<%= @table_name %>, [:namespace, :expires_at_ms, :session_id],
+      create_if_not_exists index(:<%= @table_name %>, [:namespace, :expires_at_ms, :session_id],
                prefix: prefix
              )
     end
 
     def down do
       prefix = <%= inspect @prefix %>
-      drop table(:<%= @table_name %>, prefix: prefix)
+      drop_if_exists table(:<%= @table_name %>, prefix: prefix)
     end
   end
   """)
@@ -573,7 +578,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
       execute(~s|CREATE SCHEMA IF NOT EXISTS "\#{prefix}"|)
       <% end %>
 
-      create table(:<%= @table_name %>, primary_key: false, prefix: prefix) do
+      create_if_not_exists table(:<%= @table_name %>, primary_key: false, prefix: prefix) do
         add :namespace, :string, size: <%= @key_size %>, primary_key: true, null: false
         add :id, :string, size: <%= @key_size %>, primary_key: true, null: false
         add :subject_hash, :string, size: 64, null: false
@@ -586,12 +591,12 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
         timestamps(type: :utc_datetime_usec)
       end
 
-      create index(:<%= @table_name %>, [:namespace, :expires_at_ms, :consumed_at_ms], prefix: prefix)
+      create_if_not_exists index(:<%= @table_name %>, [:namespace, :expires_at_ms, :consumed_at_ms], prefix: prefix)
     end
 
     def down do
       prefix = <%= inspect @prefix %>
-      drop table(:<%= @table_name %>, prefix: prefix)
+      drop_if_exists table(:<%= @table_name %>, prefix: prefix)
     end
   end
   """)
@@ -607,16 +612,31 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
 
     use Ecto.Migration
 
+    require Logger
+
     @disable_ddl_transaction true
     @disable_migration_lock true
     def up do
-      execute(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS " <>
-          <%= inspect @index_name %> <>
-          " ON " <>
-          <%= inspect @qualified_table %> <>
-          " (namespace, (record ->> 'principal'), expires_at_ms)"
-      )
+      # The index belongs to the sessions table created by the
+      # create_attesto_mcp_sessions migration. A host that has not applied
+      # that migration (or applies it later) skips the index instead of
+      # failing; rerunning this migration after the table exists adds it.
+      case repo().query!("SELECT to_regclass($1)", [<%= inspect @qualified_table %>]).rows do
+        [[nil]] ->
+          Logger.warning(
+            "attesto_mcp_server: " <> <%= inspect @qualified_table %> <> " does not exist; " <>
+              "skipping the principal admission index until the sessions migration has run"
+          )
+
+        _exists ->
+          execute(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS " <>
+              <%= inspect @index_name %> <>
+              " ON " <>
+              <%= inspect @qualified_table %> <>
+              " (namespace, (record ->> 'principal'), expires_at_ms)"
+          )
+      end
     end
 
     def down do

@@ -9,6 +9,10 @@
   principal admission index, without the optional table coming back.
 - End generated migrations with a newline so they pass
   `mix format --check-formatted` unchanged.
+- Make the generated migrations idempotent: tables and indexes are created only
+  when absent and dropped only when present, and the principal admission index
+  migration skips itself with a warning when `attesto_mcp_sessions` does not
+  exist yet instead of failing.
 
 ## 2.7.0 - 2026-10-18
 

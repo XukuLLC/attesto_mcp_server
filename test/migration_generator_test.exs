@@ -89,7 +89,7 @@ if Code.ensure_loaded?(Mix.Ecto) do
       assert session_source =~ "use Ecto.Migration"
 
       assert session_source =~
-               "create table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)"
+               "create_if_not_exists table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)"
 
       assert session_source =~
                "add(:namespace, :string, size: 256, primary_key: true, null: false)"
@@ -113,6 +113,10 @@ if Code.ensure_loaded?(Mix.Ecto) do
 
       url_source = generated_migration(tmp_dir, "create_attesto_mcp_url_elicitations")
       assert url_source == (url_source |> Code.format_string!() |> IO.iodata_to_binary()) <> "\n"
+      assert url_source =~ "create_if_not_exists table(:attesto_mcp_url_elicitations"
+      assert url_source =~ "drop_if_exists(table(:attesto_mcp_url_elicitations"
+      assert session_source =~ "drop_if_exists(table(:attesto_mcp_sessions"
+      assert session_source =~ ~r/create_if_not_exists\(\s*index\(:attesto_mcp_sessions/
 
       assert url_source =~
                "defmodule Mix.Tasks.AttestoMcpServer.Gen.MigrationTest.TestRepo.Migrations.CreateAttestoMcpUrlElicitations"
@@ -120,7 +124,7 @@ if Code.ensure_loaded?(Mix.Ecto) do
       assert url_source =~ "use Ecto.Migration"
 
       assert url_source =~
-               "create table(:attesto_mcp_url_elicitations, primary_key: false, prefix: prefix)"
+               "create_if_not_exists table(:attesto_mcp_url_elicitations, primary_key: false, prefix: prefix)"
 
       assert url_source =~ "add(:namespace, :string, size: 256, primary_key: true, null: false)"
       assert url_source =~ "add(:id, :string, size: 256, primary_key: true, null: false)"
@@ -143,6 +147,11 @@ if Code.ensure_loaded?(Mix.Ecto) do
 
       assert principal_index_source ==
                (principal_index_source |> Code.format_string!() |> IO.iodata_to_binary()) <> "\n"
+
+      assert principal_index_source =~
+               ~s|repo().query!("SELECT to_regclass($1)", ["\\"attesto_mcp_sessions\\""])|
+
+      assert principal_index_source =~ "skipping the principal admission index"
 
       assert principal_index_source =~
                "AddAttestoMcpSessionsPrincipalIndex"
