@@ -824,7 +824,7 @@ mix phx.new "$generated_host_dir" \
   mix attesto_mcp_server.gen.migration --repo InstallerHost.Repo
   migration_file=$(find "$migration_path" -type f -name '*_create_attesto_mcp_sessions.exs' -print -quit)
   test -n "$migration_file"
-  grep -Fq 'create table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)' "$migration_file"
+  grep -Fq 'create_if_not_exists table(:attesto_mcp_sessions, primary_key: false, prefix: prefix)' "$migration_file"
   grep -Fq 'add(:namespace, :string, size: 256, primary_key: true, null: false)' "$migration_file"
   grep -Fq 'add(:session_id, :string, size: 256, primary_key: true, null: false)' "$migration_file"
   grep -Fq 'add(:record, :map, null: false)' "$migration_file"
