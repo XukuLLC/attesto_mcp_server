@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.7.0 - 2026-10-17
+## 2.7.0 - 2026-10-18
 
 - Keep request-path rate-limit decisions constant-time by storing buckets per
   traffic category, pruning expired buckets during periodic cleanup, and
