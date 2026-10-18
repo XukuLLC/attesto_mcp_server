@@ -59,9 +59,10 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
   `mix format --check-formatted` unchanged.
 
   The generated migrations are idempotent: tables and indexes are created only
-  when absent and dropped only when present, and the principal admission index
-  migration skips itself with a warning when the sessions table does not exist
-  yet, so the files can be applied in any order a host ends up with.
+  when absent and dropped only when present. The principal admission index
+  migration depends on the sessions table and fails before any DDL when that
+  table does not exist, so Ecto does not record it as applied and it runs again
+  once the sessions migration has been applied.
   """
 
   use Mix.Task
@@ -612,21 +613,19 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
 
     use Ecto.Migration
 
-    require Logger
-
     @disable_ddl_transaction true
     @disable_migration_lock true
     def up do
       # The index belongs to the sessions table created by the
-      # create_attesto_mcp_sessions migration. A host that has not applied
-      # that migration (or applies it later) skips the index instead of
-      # failing; rerunning this migration after the table exists adds it.
+      # create_attesto_mcp_sessions migration. Ecto records a migration as
+      # applied once up/0 returns, so a silent skip here would leave the index
+      # missing for good. Fail before any DDL instead; the version is then not
+      # recorded and the migration runs again once the table exists.
       case repo().query!("SELECT to_regclass($1)", [<%= inspect @qualified_table %>]).rows do
         [[nil]] ->
-          Logger.warning(
-            "attesto_mcp_server: " <> <%= inspect @qualified_table %> <> " does not exist; " <>
-              "skipping the principal admission index until the sessions migration has run"
-          )
+          raise "attesto_mcp_server: " <> <%= inspect @qualified_table %> <> " does not exist. " <>
+                  "Run the create_attesto_mcp_sessions migration before this principal " <>
+                  "admission index migration; nothing was recorded for this version."
 
         _exists ->
           execute(

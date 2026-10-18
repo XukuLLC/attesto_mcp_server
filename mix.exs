@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "2.7.1"
+  @version "2.7.2"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
   @bandit_security_ref "d88b21953c65061f21136ea76a89a4f95a2ac7a1"
 

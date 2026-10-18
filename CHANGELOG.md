@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.7.2 - 2026-10-18
+
+- Fail the generated principal admission index migration before any DDL when
+  `attesto_mcp_sessions` does not exist, instead of returning successfully.
+  Ecto records a migration as applied once it returns, so the 2.7.1 skip left
+  the index missing with no later run to add it. The version is not recorded on
+  failure and the migration runs again once the sessions migration has been
+  applied. A Postgres-backed regression test covers both outcomes.
+
 ## 2.7.1 - 2026-10-18
 
 - Accept `--help` in `mix attesto_mcp_server.gen.migration`; it prints the

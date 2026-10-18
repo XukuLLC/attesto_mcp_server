@@ -151,7 +151,10 @@ if Code.ensure_loaded?(Mix.Ecto) do
       assert principal_index_source =~
                ~s|repo().query!("SELECT to_regclass($1)", ["\\"attesto_mcp_sessions\\""])|
 
-      assert principal_index_source =~ "skipping the principal admission index"
+      assert principal_index_source =~
+               "Run the create_attesto_mcp_sessions migration before this principal"
+
+      refute principal_index_source =~ "skipping"
 
       assert principal_index_source =~
                "AddAttestoMcpSessionsPrincipalIndex"
