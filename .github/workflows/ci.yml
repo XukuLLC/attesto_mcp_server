@@ -91,8 +91,8 @@ jobs:
       - name: validate lowercase immutable coordinated refs
         env:
           ATTESTO_REF: 5df398e193a0db1e94b2f804beec596d41503669
-          ATTESTO_PHOENIX_REF: 0bf0b33a46a48afa5ae695edb689a32d76f276f3
-          ATTESTO_MCP_REF: 10967f210e94035b4641883a5ce4ec7ae24eaf79
+          ATTESTO_PHOENIX_REF: 8a2816a4f2d039c0bdff9f75b0ae9ad2c6bc3c83
+          ATTESTO_MCP_REF: 19fc0502b5cc3789f7184c36dc17d2f93ed70c07
         run: |
           for ref in "$ATTESTO_REF" "$ATTESTO_PHOENIX_REF" "$ATTESTO_MCP_REF"; do
             if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -109,20 +109,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_phoenix
-          ref: 0bf0b33a46a48afa5ae695edb689a32d76f276f3
+          ref: 8a2816a4f2d039c0bdff9f75b0ae9ad2c6bc3c83
           path: coordinated/attesto_phoenix
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 10967f210e94035b4641883a5ce4ec7ae24eaf79
+          ref: 19fc0502b5cc3789f7184c36dc17d2f93ed70c07
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated checkout commits
         env:
           ATTESTO_REF: 5df398e193a0db1e94b2f804beec596d41503669
-          ATTESTO_PHOENIX_REF: 0bf0b33a46a48afa5ae695edb689a32d76f276f3
-          ATTESTO_MCP_REF: 10967f210e94035b4641883a5ce4ec7ae24eaf79
+          ATTESTO_PHOENIX_REF: 8a2816a4f2d039c0bdff9f75b0ae9ad2c6bc3c83
+          ATTESTO_MCP_REF: 19fc0502b5cc3789f7184c36dc17d2f93ed70c07
         run: |
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "$ATTESTO_REF"
           test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "$ATTESTO_PHOENIX_REF"
@@ -139,8 +139,8 @@ jobs:
           ATTESTO_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto
           ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
           ATTESTO_REF: 5df398e193a0db1e94b2f804beec596d41503669
-          ATTESTO_PHOENIX_REF: 0bf0b33a46a48afa5ae695edb689a32d76f276f3
-          ATTESTO_MCP_REF: 10967f210e94035b4641883a5ce4ec7ae24eaf79
+          ATTESTO_PHOENIX_REF: 8a2816a4f2d039c0bdff9f75b0ae9ad2c6bc3c83
+          ATTESTO_MCP_REF: 19fc0502b5cc3789f7184c36dc17d2f93ed70c07
         run: scripts/check_installer_coordinated.sh
 
   verify:
@@ -354,27 +354,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_client
-          ref: e7664268688f38935fd77eb9260e4aa9711f2293
+          ref: d07f5c90d9bed76628d0b4d1e012fea08d43766e
           path: coordinated/attesto_client
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_phoenix
-          ref: 0bf0b33a46a48afa5ae695edb689a32d76f276f3
+          ref: 8a2816a4f2d039c0bdff9f75b0ae9ad2c6bc3c83
           path: coordinated/attesto_phoenix
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 10967f210e94035b4641883a5ce4ec7ae24eaf79
+          ref: 19fc0502b5cc3789f7184c36dc17d2f93ed70c07
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated OAuth source commits
         run: |
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "5df398e193a0db1e94b2f804beec596d41503669"
-          test "$(git -C coordinated/attesto_client rev-parse HEAD)" = "e7664268688f38935fd77eb9260e4aa9711f2293"
-          test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "0bf0b33a46a48afa5ae695edb689a32d76f276f3"
-          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "10967f210e94035b4641883a5ce4ec7ae24eaf79"
+          test "$(git -C coordinated/attesto_client rev-parse HEAD)" = "d07f5c90d9bed76628d0b4d1e012fea08d43766e"
+          test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "8a2816a4f2d039c0bdff9f75b0ae9ad2c6bc3c83"
+          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "19fc0502b5cc3789f7184c36dc17d2f93ed70c07"
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.4"
