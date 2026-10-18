@@ -234,6 +234,18 @@ digest_tree() {
         end)
       end
 
+      def insert_all(profile, _schema, [%{jti: jti}], opts) do
+        record_call(profile, :insert_all, opts)
+
+        Agent.get_and_update(__MODULE__, fn state ->
+          if jti == "named-replay-failure" or MapSet.member?(state.replay, jti) do
+            {{0, nil}, state}
+          else
+            {{1, nil}, %{state | replay: MapSet.put(state.replay, jti)}}
+          end
+        end)
+      end
+
       def exists?(profile, _query, opts) do
         record_call(profile, :exists, opts)
         Agent.get(__MODULE__, & &1.revoked)
@@ -261,6 +273,7 @@ digest_tree() {
     defmodule InstallerHost.AlphaRepo do
       @moduledoc false
       def insert(changeset, opts), do: InstallerHost.NamedProfileRepo.insert(:alpha, changeset, opts)
+      def insert_all(schema, rows, opts), do: InstallerHost.NamedProfileRepo.insert_all(:alpha, schema, rows, opts)
       def exists?(query, opts), do: InstallerHost.NamedProfileRepo.exists?(:alpha, query, opts)
       def one(query, opts), do: InstallerHost.NamedProfileRepo.one(:alpha, query, opts)
       def update_all(query, updates, opts), do: InstallerHost.NamedProfileRepo.update_all(:alpha, query, updates, opts)
@@ -270,6 +283,7 @@ digest_tree() {
     defmodule InstallerHost.BetaRepo do
       @moduledoc false
       def insert(changeset, opts), do: InstallerHost.NamedProfileRepo.insert(:beta, changeset, opts)
+      def insert_all(schema, rows, opts), do: InstallerHost.NamedProfileRepo.insert_all(:beta, schema, rows, opts)
       def exists?(query, opts), do: InstallerHost.NamedProfileRepo.exists?(:beta, query, opts)
       def one(query, opts), do: InstallerHost.NamedProfileRepo.one(:beta, query, opts)
       def update_all(query, updates, opts), do: InstallerHost.NamedProfileRepo.update_all(:beta, query, updates, opts)
@@ -547,19 +561,19 @@ digest_tree() {
         raise("named replay callback returned an unexpected result")
       end
 
-      await_repo_call.(String.to_atom(profile), :insert, profile)
+      await_repo_call.(String.to_atom(profile), :insert_all, profile)
 
       unless protected[:replay_check].("named-replay", 60) == {:error, :replay} do
         raise("named Ecto replay callback did not reject a repeated JTI")
       end
 
-      await_repo_call.(String.to_atom(profile), :insert, profile)
+      await_repo_call.(String.to_atom(profile), :insert_all, profile)
 
       unless protected[:replay_check].("named-replay-failure", 60) == {:error, :replay} do
         raise("named replay failure behavior was not preserved")
       end
 
-      await_repo_call.(String.to_atom(profile), :insert, profile)
+      await_repo_call.(String.to_atom(profile), :insert_all, profile)
 
       unless protected[:nonce_issue].() == "named-nonce" do
         raise("named nonce-issue callback returned an unexpected result")
