@@ -33,6 +33,8 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
 
   ## Options
 
+    * `--help` - print usage and the accepted options, then exit without
+      generating a migration.
     * `--repo` - the Ecto repo the migrations are generated for. It may be
       supplied more than once when several repos intentionally share the
       same application package. When omitted, configured Ecto repos are
@@ -46,10 +48,15 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
       defaults to the repo's `priv/<repo>/migrations` directory. An explicit
       path may only be used with one repo so generation cannot partially
       write competing migrations into the same directory.
+    * `--skip-url-elicitations` - do not generate the optional
+      `attesto_mcp_url_elicitations` table. A host that does not use URL
+      elicitation can rerun the task for later additions, such as the
+      principal admission index, without that table coming back.
 
   Each migration file is skipped when a file with that base name already exists
   in the path. An existing host that reruns the task therefore receives only the
-  new file.
+  new file. Generated files are formatted and end with a newline, so they pass
+  `mix format --check-formatted` unchanged.
   """
 
   use Mix.Task
@@ -65,16 +72,39 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
   @max_key_bytes 256
 
   @switches [
+    help: :boolean,
     repo: [:keep],
     schema_prefix: :string,
-    migrations_path: :string
+    migrations_path: :string,
+    skip_url_elicitations: :boolean
   ]
+
+  @help """
+  Usage:
+    mix attesto_mcp_server.gen.migration [options]
+
+  Options:
+    --help                    Print this help and exit
+    --repo MODULE             Target Ecto repo; may be repeated
+    --schema-prefix PREFIX    PostgreSQL schema prefix
+    --migrations-path PATH    Migration output directory
+    --skip-url-elicitations   Do not generate the optional URL elicitation table
+  """
 
   @impl Mix.Task
   def run(args) do
-    ensure_ecto!()
-
     {opts, positional, invalid} = OptionParser.parse(args, strict: @switches)
+
+    if Keyword.get(opts, :help, false) do
+      reject_invalid_args!(positional, invalid)
+      Mix.shell().info(@help)
+    else
+      run_generator(args, opts, positional, invalid)
+    end
+  end
+
+  defp run_generator(args, opts, positional, invalid) do
+    ensure_ecto!()
     reject_empty_repo_args!(args)
     reject_invalid_args!(positional, invalid)
     reject_duplicate_options!(args)
@@ -260,10 +290,12 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
     principal_index_exists? =
       Path.wildcard(Path.join(path, "*_#{@sessions_principal_index_base_name}.exs")) != []
 
+    skip_url_elicitations? = Keyword.get(opts, :skip_url_elicitations, false)
+
     items =
       [
         if(not sessions_exists?, do: :sessions),
-        if(not url_elicitations_exists?, do: :url_elicitations),
+        if(not url_elicitations_exists? and not skip_url_elicitations?, do: :url_elicitations),
         if(not principal_index_exists?, do: :principal_index)
       ]
       |> Enum.reject(&is_nil/1)
@@ -285,6 +317,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
           |> migration_template()
           |> Code.format_string!()
           |> IO.iodata_to_binary()
+          |> Kernel.<>("\n")
 
         %{path: path, file: file, source: source}
 
@@ -303,6 +336,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
           |> url_elicitation_migration_template()
           |> Code.format_string!()
           |> IO.iodata_to_binary()
+          |> Kernel.<>("\n")
 
         %{path: path, file: file, source: source}
 
@@ -326,6 +360,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.Migration do
           |> principal_index_migration_template()
           |> Code.format_string!()
           |> IO.iodata_to_binary()
+          |> Kernel.<>("\n")
 
         %{path: path, file: file, source: source}
     end)

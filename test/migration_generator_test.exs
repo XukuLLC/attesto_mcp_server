@@ -79,7 +79,9 @@ if Code.ensure_loaded?(Mix.Ecto) do
       run!([], tmp_dir)
 
       session_source = generated_migration(tmp_dir, "create_attesto_mcp_sessions")
-      assert session_source == session_source |> Code.format_string!() |> IO.iodata_to_binary()
+
+      assert session_source ==
+               (session_source |> Code.format_string!() |> IO.iodata_to_binary()) <> "\n"
 
       assert session_source =~
                "defmodule Mix.Tasks.AttestoMcpServer.Gen.MigrationTest.TestRepo.Migrations.CreateAttestoMcpSessions"
@@ -110,7 +112,7 @@ if Code.ensure_loaded?(Mix.Ecto) do
       assert session_source =~ "def down do"
 
       url_source = generated_migration(tmp_dir, "create_attesto_mcp_url_elicitations")
-      assert url_source == url_source |> Code.format_string!() |> IO.iodata_to_binary()
+      assert url_source == (url_source |> Code.format_string!() |> IO.iodata_to_binary()) <> "\n"
 
       assert url_source =~
                "defmodule Mix.Tasks.AttestoMcpServer.Gen.MigrationTest.TestRepo.Migrations.CreateAttestoMcpUrlElicitations"
@@ -140,7 +142,7 @@ if Code.ensure_loaded?(Mix.Ecto) do
         generated_migration(tmp_dir, "add_attesto_mcp_sessions_principal_index")
 
       assert principal_index_source ==
-               principal_index_source |> Code.format_string!() |> IO.iodata_to_binary()
+               (principal_index_source |> Code.format_string!() |> IO.iodata_to_binary()) <> "\n"
 
       assert principal_index_source =~
                "AddAttestoMcpSessionsPrincipalIndex"
@@ -217,6 +219,51 @@ if Code.ensure_loaded?(Mix.Ecto) do
                inspect(
                  ~s|"mcp_sessions"."attesto_mcp_sessions_namespace_principal_expires_at_ms_index"|
                )
+    end
+
+    test "prints usage for --help without touching the filesystem", %{tmp_dir: tmp_dir} do
+      output = capture_io(fn -> Migration.run(["--help"]) end)
+
+      assert output =~ "Usage:"
+      assert output =~ "--skip-url-elicitations"
+      refute File.exists?(migrations_dir(tmp_dir))
+    end
+
+    test "rejects stray arguments next to --help" do
+      assert_raise Mix.Error, ~r/invalid options/, fn ->
+        capture_io(fn -> Migration.run(["--help", "--bogus"]) end)
+      end
+    end
+
+    test "--skip-url-elicitations leaves the optional table out, also on rerun", %{
+      tmp_dir: tmp_dir
+    } do
+      capture_io(fn -> run!(["--skip-url-elicitations"], tmp_dir) end)
+
+      files = tmp_dir |> migrations_dir() |> File.ls!() |> Enum.sort()
+      assert length(files) == 2
+      assert Enum.any?(files, &String.ends_with?(&1, "_create_attesto_mcp_sessions.exs"))
+
+      assert Enum.any?(
+               files,
+               &String.ends_with?(&1, "_add_attesto_mcp_sessions_principal_index.exs")
+             )
+
+      refute Enum.any?(files, &String.ends_with?(&1, "_create_attesto_mcp_url_elicitations.exs"))
+
+      capture_io(fn -> run!(["--skip-url-elicitations"], tmp_dir) end)
+      assert tmp_dir |> migrations_dir() |> File.ls!() |> length() == 2
+    end
+
+    test "generated migrations end with a newline and are already formatted", %{tmp_dir: tmp_dir} do
+      capture_io(fn -> run!([], tmp_dir) end)
+
+      for file <- Path.wildcard(Path.join(migrations_dir(tmp_dir), "*.exs")) do
+        source = File.read!(file)
+        assert String.ends_with?(source, "\n"), "#{file} lacks a trailing newline"
+        formatted = source |> Code.format_string!(file: file) |> IO.iodata_to_binary()
+        assert formatted <> "\n" == source, "#{file} is not format-stable"
+      end
     end
 
     test "produces three files and rerun produces only the missing one", %{tmp_dir: tmp_dir} do

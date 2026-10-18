@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.1 - 2026-10-18
+
+- Accept `--help` in `mix attesto_mcp_server.gen.migration`; it prints the
+  usage and the accepted options instead of failing with "invalid options".
+- Add `--skip-url-elicitations` to the migration generator so a host that does
+  not use URL elicitation can rerun the task for later additions, such as the
+  principal admission index, without the optional table coming back.
+- End generated migrations with a newline so they pass
+  `mix format --check-formatted` unchanged.
+
 ## 2.7.0 - 2026-10-18
 
 - Keep request-path rate-limit decisions constant-time by storing buckets per
