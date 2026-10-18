@@ -37,12 +37,33 @@ defmodule Mix.Tasks.AttestoMcpServer.Gen.MigrationDbTest do
       {:error, {:already_started, _pid}} -> :ok
     end
 
+    # Each test regenerates the migrations into a fresh schema, so the same
+    # migration module names are loaded again; that is expected here.
+    previous_conflict_option = Code.get_compiler_option(:ignore_module_conflict)
+    Code.put_compiler_option(:ignore_module_conflict, true)
+
     on_exit(fn ->
-      if pid = Process.whereis(MigrationRepo), do: Supervisor.stop(pid, :normal)
+      Code.put_compiler_option(:ignore_module_conflict, previous_conflict_option)
+      stop_repo(MigrationRepo)
       Application.delete_env(:attesto_mcp_server_migration_test, MigrationRepo)
     end)
 
     :ok
+  end
+
+  # The repo may already be down when the exit callback runs.
+  defp stop_repo(repo) do
+    case Process.whereis(repo) do
+      nil ->
+        :ok
+
+      pid ->
+        try do
+          Supervisor.stop(pid, :normal)
+        catch
+          :exit, _reason -> :ok
+        end
+    end
   end
 
   setup do
