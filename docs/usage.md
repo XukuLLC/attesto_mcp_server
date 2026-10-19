@@ -479,7 +479,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 2.7"},
+    {:attesto_mcp_server, "~> 2.8"},
     {:bandit, "~> 1.6"}
   ]
 end

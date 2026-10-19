@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.8.0 - 2026-10-19
 
 - Wrap every HTTP authentication in the `auth/authenticate` telemetry span.
   Its `stop` event carries the elapsed `duration`, a bounded `outcome` (for
