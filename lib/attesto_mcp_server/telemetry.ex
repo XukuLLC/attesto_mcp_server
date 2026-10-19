@@ -2,6 +2,20 @@ defmodule AttestoMCP.Server.Telemetry do
   @moduledoc """
   Telemetry helpers for protocol, auth, handler, and transport events.
 
+  The `[:attesto_mcp_server, :auth, :authenticate]` span wraps every HTTP
+  authentication: `:start`, then `:stop` with the elapsed `:duration`, an
+  `:outcome` from a bounded set, the refusal's HTTP `:status`, and the
+  authenticated `:binding` (`:bearer`, `:dpop`, or `:mtls`). The outcomes are
+  `:ok`, `:missing_credentials`, `:invalid_token`, `:token_expired`,
+  `:token_not_yet_valid`, `:invalid_audience`, `:invalid_issuer`,
+  `:sender_constraint_mismatch`, `:invalid_dpop_proof`, `:dpop_replay`,
+  `:dpop_nonce_required`, `:step_up_required`, `:policy_rejected`,
+  `:insufficient_scope`, `:unauthenticated`, `:verifier_unavailable`,
+  `:verifier_failure`, `:principal_binding_failure`, and `:other`. Tokens,
+  claims, principals, and error descriptions are never attached. The span
+  covers credential verification, assign canonicalization, and the principal
+  binding; mount authorization and route scopes keep their own events.
+
   The `[:attesto_mcp_server, :auth, :policy_failure]` event reports an invalid
   revocation result, a caught host-policy callback failure, or an HTTP verifier
   failure without including the callback reason, token claims, or principal.
@@ -50,7 +64,7 @@ defmodule AttestoMCP.Server.Telemetry do
   @allowed_metadata ~w(
     version protocol_version method transport status outcome duration count
     correlation_id category reason error kind source server primitive_type
-    primitive_identity
+    primitive_identity binding
   )a
   @reserved_metadata MapSet.new(@allowed_metadata ++ [:telemetry_metadata])
   @max_trusted_entries 16
@@ -92,22 +106,23 @@ defmodule AttestoMCP.Server.Telemetry do
   @doc "Emits start/stop (or exception) events around a callback."
   @spec span(atom() | [atom()], map(), (-> {term(), map()}), keyword()) :: term()
   def span(event, metadata, fun, opts \\ []) do
+    event = List.wrap(event)
     started = System.monotonic_time()
-    execute([event, :start], %{system_time: System.system_time()}, metadata)
+    execute(event ++ [:start], %{system_time: System.system_time()}, metadata)
 
     try do
       {result, extra} = fun.()
       duration = System.monotonic_time() - started
-      execute([event, :stop], %{duration: duration}, Map.merge(metadata, safe_metadata(extra)))
+      execute(event ++ [:stop], %{duration: duration}, Map.merge(metadata, safe_metadata(extra)))
       result
     catch
       kind, reason ->
         duration = System.monotonic_time() - started
         stacktrace = __STACKTRACE__
-        source = event |> List.wrap() |> List.first()
+        source = List.first(event)
 
         execute(
-          [event, :exception],
+          event ++ [:exception],
           %{duration: duration},
           metadata
           |> Map.put(:error, :exception)
@@ -222,6 +237,8 @@ defmodule AttestoMCP.Server.Telemetry do
   defp safe_field(:kind, value) when is_atom(value), do: value
   defp safe_field(:source, value) when is_atom(value), do: value
   defp safe_field(:server, value) when is_atom(value), do: value
+  defp safe_field(:binding, value) when value in [:bearer, :dpop, :mtls], do: value
+  defp safe_field(:binding, _value), do: nil
 
   defp safe_field(:primitive_type, value)
        when value in [:tool, :prompt, :resource, :template, :completion],

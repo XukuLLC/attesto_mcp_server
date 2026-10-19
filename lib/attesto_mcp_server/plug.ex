@@ -42,6 +42,7 @@ defmodule AttestoMCP.Server.Plug do
   alias AttestoMCP.Server
 
   alias AttestoMCP.Server.{
+    AuthOutcome,
     Error,
     HeaderName,
     HostCallback,
@@ -685,7 +686,7 @@ defmodule AttestoMCP.Server.Plug do
     # enforced later by process_post/3 without repeating authentication.
     case reserve_auth_check(conn, state) do
       {:ok, prechecked_conn, reservation_key} ->
-        case protect_resource(prechecked_conn, state, :authenticate_only) do
+        case authenticate_with_span(prechecked_conn, state) do
           {:ok, authenticated_conn} ->
             :ok = Server.refund_rate(state.server, reservation_key, :auth_checks)
 
@@ -984,6 +985,22 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
+  # The span covers credential verification, assign canonicalization, and the
+  # principal binding. Mount policy and route scopes report through their own
+  # events. `protect_resource/3` never raises, so the span's exception path is
+  # reserved for a failure in this boundary itself.
+  defp authenticate_with_span(conn, state) do
+    Telemetry.span(
+      [:auth, :authenticate],
+      telemetry_options(state, %{transport: :http}),
+      fn ->
+        result = protect_resource(conn, state, :authenticate_only)
+        {result, AuthOutcome.metadata(result)}
+      end,
+      exception_reporter: state.opts[:exception_reporter]
+    )
+  end
+
   defp protect_resource(conn, state, _scopes) do
     conn =
       conn
@@ -1003,11 +1020,11 @@ defmodule AttestoMCP.Server.Plug do
     rescue
       _error ->
         auth_policy_failure(:verifier, :exception)
-        {:halt, auth_halt(conn, 401)}
+        {:halt, conn |> auth_halt(401) |> AuthOutcome.mark(:verifier_failure)}
     catch
       kind, _reason ->
         auth_policy_failure(:verifier, kind)
-        {:halt, auth_halt(conn, 401)}
+        {:halt, conn |> auth_halt(401) |> AuthOutcome.mark(:verifier_failure)}
     end
   end
 

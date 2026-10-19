@@ -1959,6 +1959,8 @@ stable event contract is:
 * `http_request` and `stdio`: `start`, `stop`, and `exception`.
 * `request`, `handler`, and `stream`: `start`, `stop`, `exception`, with
   `timeout`, `open`, `close`, and `backpressure` where applicable.
+* `auth/authenticate`: `start`, `stop`, and `exception` around every HTTP
+  authentication.
 * `auth/refusal`, `auth/policy_failure`, `protocol/error`, `cancellation/request`,
   `cancellation/stop`, and `progress/emit` or `progress/reject`.
 * `principal_binding/exception` and `context_builder/exception`.
@@ -1968,6 +1970,19 @@ stable event contract is:
   `session_store/failure`, `session_store/cleanup/start`,
   `session_store/cleanup/stop`, `client_ip/exception`, and
   `supervision/restart`.
+
+`auth/authenticate/stop` reports the elapsed `duration`, an `outcome` from a
+bounded set, the refusal's HTTP `status`, and for an authenticated request its
+`binding` (`:bearer`, `:dpop`, or `:mtls`). The outcomes are `:ok`,
+`:missing_credentials`, `:invalid_token`, `:token_expired`,
+`:token_not_yet_valid`, `:invalid_audience`, `:invalid_issuer`,
+`:sender_constraint_mismatch`, `:invalid_dpop_proof`, `:dpop_replay`,
+`:dpop_nonce_required`, `:step_up_required`, `:policy_rejected`,
+`:insufficient_scope`, `:unauthenticated`, `:verifier_unavailable`,
+`:verifier_failure`, `:principal_binding_failure`, and `:other`. The span
+covers credential verification, assign canonicalization, and the principal
+binding; mount policy and route-scope decisions keep their own events. Tokens,
+claims, principals, and error descriptions are never attached.
 
 `auth/policy_failure` can report the `:mount_policy` category. A failed
 `principal_binding` callback emits `principal_binding/exception`, and a failed

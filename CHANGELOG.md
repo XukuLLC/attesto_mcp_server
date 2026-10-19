@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Wrap every HTTP authentication in the `auth/authenticate` telemetry span.
+  Its `stop` event carries the elapsed `duration`, a bounded `outcome` (for
+  example `:missing_credentials`, `:token_expired`, `:invalid_audience`,
+  `:sender_constraint_mismatch`, `:dpop_replay`, `:dpop_nonce_required`,
+  `:step_up_required`, `:verifier_unavailable`, `:verifier_failure`,
+  `:principal_binding_failure`), the refusal's HTTP `status`, and the
+  authenticated `binding`. The outcome AttestoMCP records on the connection is
+  used when present; otherwise it is classified from the captured OAuth error
+  envelope, so the span works with every supported AttestoMCP release.
+  `auth/refusal` and `auth/policy_failure` are unchanged.
+
 ## 2.7.2 - 2026-10-18
 
 - Fail the generated principal admission index migration before any DDL when
