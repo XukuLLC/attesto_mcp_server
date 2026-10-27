@@ -3,7 +3,6 @@ defmodule AttestoMCP.Server.MixProject do
 
   @version "2.8.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
-  @bandit_security_ref "d88b21953c65061f21136ea76a89a4f95a2ac7a1"
 
   def project do
     [
@@ -49,12 +48,7 @@ defmodule AttestoMCP.Server.MixProject do
       {:postgrex, ">= 0.22.4 and < 1.0.0", only: :test},
       {:igniter, ">= 0.6.0 and < 0.8.1 or >= 0.8.4 and < 1.0.0", optional: true, runtime: false},
       {:mint, ">= 1.10.2 and < 2.0.0", optional: true},
-      {:bandit,
-       git: "https://github.com/mtrudel/bandit.git",
-       ref: @bandit_security_ref,
-       override: true,
-       only: [:dev, :test],
-       runtime: false},
+      {:bandit, "~> 1.14", override: true, only: [:dev, :test], runtime: false},
       {:phoenix, ">= 1.7.0 and < 2.0.0", only: :test, runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false}

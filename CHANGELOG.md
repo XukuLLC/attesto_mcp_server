@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Replace the repository's dev/test-only Bandit git pin with the Hex
+  requirement `~> 1.14`. Bandit 1.14.0 contains the GHSA-69m6-wcv4-rwcf fix
+  the pin carried and fixes the Bandit advisories published with it. Runtime
+  consumers do not inherit this dependency.
+
 ## 2.8.0 - 2026-10-19
 
 - Wrap every HTTP authentication in the `auth/authenticate` telemetry span.
