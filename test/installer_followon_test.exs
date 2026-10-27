@@ -955,7 +955,11 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
     diff = Igniter.Test.diff(second)
     namespace = generated_session_namespace(:sample, Sample.AdminMCP)
     assert diff =~ ~s(session_namespace: "#{namespace}")
-    assert diff =~ "children = [Sample.Repo, Sample.MCP, Sample.AdminMCP]"
+    # Igniter 0.8.5 inserts right after the last `after:` match; earlier
+    # releases append. Either way the Repo starts before both servers.
+    assert diff =~
+             ~r/children = \[Sample\.Repo, (Sample\.MCP, Sample\.AdminMCP|Sample\.AdminMCP, Sample\.MCP)\]/
+
     assert Enum.any?(second.notices, &String.contains?(&1, "namespace \"#{namespace}\""))
   end
 
