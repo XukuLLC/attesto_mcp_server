@@ -19,6 +19,20 @@ defmodule AttestoMCP.Server.DependencyRequirementsTest do
     end
   end
 
+  test "JOSE admits the patched floor and rejects the next major" do
+    {:jose, requirement} = dependency!(:jose)
+
+    for version <- ~w(1.11.13 1.99.0) do
+      assert Version.match?(version, requirement),
+             "expected #{inspect(requirement)} to admit #{version}"
+    end
+
+    for version <- ~w(1.11.12 2.0.0) do
+      refute Version.match?(version, requirement),
+             "expected #{inspect(requirement)} to reject #{version}"
+    end
+  end
+
   test "JSV admits the supported 0.24 and 0.25 lines" do
     {:jsv, requirement} = dependency!(:jsv)
 

@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 2.8.1 - 2026-10-27
 
+- Require JOSE 1.11.13 or later, which fixes CVE-2026-65625 through
+  CVE-2026-65632. AttestoMCP Server makes no JOSE calls of its own; the
+  floor covers every AttestoMCP release it admits, whose token verification
+  with earlier JOSE releases accepted ECDSA signatures padded with leading
+  zero bytes.
 - Replace the repository's dev/test-only Bandit git pin with the Hex
   requirement `~> 1.14`. Bandit 1.14.0 contains the GHSA-69m6-wcv4-rwcf fix
   the pin carried and fixes the Bandit advisories published with it. Runtime

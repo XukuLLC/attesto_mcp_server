@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "2.8.0"
+  @version "2.8.1"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -34,6 +34,9 @@ defmodule AttestoMCP.Server.MixProject do
   defp deps do
     [
       attesto_mcp_dep(),
+      # Security floor only: this package makes no JOSE calls of its own, but
+      # every AttestoMCP release it admits verifies tokens through JOSE.
+      {:jose, ">= 1.11.13 and < 2.0.0"},
       {:plug, "~> 1.16"},
       {:jason, "~> 1.4"},
       {:jsv, "~> 0.24.0 or ~> 0.25.0"},
