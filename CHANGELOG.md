@@ -21,6 +21,12 @@
   0.26.2 reports exhaustion as an indeterminate pattern that combinators
   cannot invert. The previous requirement `~> 0.24.0 or ~> 0.25.0` could
   not resolve to the fixed release.
+- JSV 0.26.2 also counts `minLength` and `maxLength` in Unicode code points,
+  as JSON Schema requires, instead of grapheme clusters. A tool argument
+  containing combining marks or multi-code-point emoji is now longer than
+  before (a decomposed `é` counts 2), so `maxLength` rejects strings it used
+  to accept and `minLength` accepts strings it used to reject. Check any
+  length-bounded tool schema whose arguments can carry such text.
 
 ## 2.8.1 - 2026-10-27
 
