@@ -1,5 +1,11 @@
 defmodule AttestoMCP.Server.HostCallback do
-  @moduledoc false
+  @moduledoc """
+  Validation and invocation for host-supplied callbacks in `AttestoMCP.Server`.
+
+  For `{module, function, prefix_args}` tuples, `invoke/2` **prepends**
+  `prefix_args` before the per-call `arguments`
+  (`apply(module, function, prefix_args ++ arguments)`).
+  """
 
   @spec valid?(term(), non_neg_integer()) :: boolean()
   def valid?(callback, arity) when is_function(callback, arity), do: true

@@ -402,6 +402,120 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     assert is_list(Jason.decode!(recovered.resp_body)["result"]["tools"])
   end
 
+  describe "allow_dynamic_origin host allowlist" do
+    test "a host outside the loopback default is refused before authentication", %{
+      config: config,
+      server: server
+    } do
+      token =
+        AttestoMCP.Test.Factory.access_token(config,
+          scopes: [AttestoMCP.Scopes.tools_read()],
+          audience: "http://rebound.attacker.example/mcp"
+        )
+
+      response = dynamic_call(server, config, token, "rebound.attacker.example", 80, [])
+
+      assert response.status == 403
+      assert response.resp_body == "forbidden host"
+    end
+
+    test "loopback hosts are answered by default", %{config: config, server: server} do
+      token =
+        AttestoMCP.Test.Factory.access_token(config,
+          scopes: [AttestoMCP.Scopes.tools_read()],
+          audience: "http://localhost/mcp"
+        )
+
+      response = dynamic_call(server, config, token, "localhost", 80, [])
+      assert response.status == 200, "got #{response.status}: #{response.resp_body}"
+    end
+
+    test "an explicit :allowed_hosts list replaces the default, with or without a port", %{
+      config: config,
+      server: server
+    } do
+      token =
+        AttestoMCP.Test.Factory.access_token(config,
+          scopes: [AttestoMCP.Scopes.tools_read()],
+          audience: "http://dev.internal:4000/mcp"
+        )
+
+      allowed = [allowed_hosts: ["dev.internal:4000"]]
+
+      response = dynamic_call(server, config, token, "dev.internal", 4000, allowed)
+      assert response.status == 200, "got #{response.status}: #{response.resp_body}"
+
+      refused = dynamic_call(server, config, token, "localhost", 4000, allowed)
+      assert refused.status == 403
+      assert refused.resp_body == "forbidden host"
+    end
+
+    test "the metadata route applies the same host check", %{config: config, server: server} do
+      plug =
+        AttestoMCP.Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          auth: [config: config, resource: "/mcp", allow_dynamic_origin: true]
+        )
+
+      refused =
+        :get
+        |> conn("/.well-known/oauth-protected-resource/mcp")
+        |> Map.put(:host, "rebound.attacker.example")
+        |> AttestoMCP.Server.Plug.call(plug)
+
+      assert refused.status == 403
+      assert refused.resp_body == "forbidden host"
+
+      served =
+        :get
+        |> conn("/.well-known/oauth-protected-resource/mcp")
+        |> Map.put(:host, "127.0.0.1")
+        |> AttestoMCP.Server.Plug.call(plug)
+
+      assert served.status == 200, "got #{served.status}: #{served.resp_body}"
+    end
+  end
+
+  defp dynamic_call(server, config, token, host, port, auth_overrides) do
+    request = %{
+      "jsonrpc" => "2.0",
+      "id" => 1,
+      "method" => "tools/list",
+      "params" => %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => @version,
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        }
+      }
+    }
+
+    conn =
+      :post
+      |> conn("/mcp", Jason.encode!(request))
+      |> Map.put(:host, host)
+      |> Map.put(:port, port)
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("accept", "application/json, text/event-stream")
+      |> put_req_header("mcp-protocol-version", @version)
+      |> put_req_header("mcp-method", "tools/list")
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        scope_map: %{"tools/list" => [AttestoMCP.Scopes.tools_read()]},
+        auth:
+          Keyword.merge(
+            [config: config, resource: "/mcp", allow_dynamic_origin: true],
+            auth_overrides
+          )
+      )
+
+    AttestoMCP.Server.Plug.call(conn, plug)
+  end
+
   defp call(server, config, token, method, params, opts) do
     meta =
       case Keyword.fetch(opts, :meta) do

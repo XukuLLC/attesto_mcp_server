@@ -33,15 +33,18 @@ defmodule AttestoMCP.Server.DependencyRequirementsTest do
     end
   end
 
-  test "JSV admits the supported 0.24 and 0.25 lines" do
+  # GHSA-cvmg-hgv6-jqcp / CVE-2026-117680: every JSV release before 0.26.2
+  # reports a regex whose backtracking budget ran out as a non-match, which
+  # `not`, `anyOf`, `oneOf`, `if` and `contains` invert into acceptance.
+  test "JSV requires the 0.26.2 security floor and stays on the 0.26 line" do
     {:jsv, requirement} = dependency!(:jsv)
 
-    for version <- ~w(0.24.0 0.24.99 0.25.0 0.25.99) do
+    for version <- ~w(0.26.2 0.26.99) do
       assert Version.match?(version, requirement),
              "expected #{inspect(requirement)} to admit #{version}"
     end
 
-    for version <- ~w(0.23.99 0.26.0) do
+    for version <- ~w(0.24.0 0.25.0 0.25.99 0.26.0 0.26.1 0.27.0) do
       refute Version.match?(version, requirement),
              "expected #{inspect(requirement)} to reject #{version}"
     end

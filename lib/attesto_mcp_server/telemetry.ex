@@ -58,6 +58,11 @@ defmodule AttestoMCP.Server.Telemetry do
   URL-elicitation-store operation that failed. Its failure-specific metadata
   contains only the bounded operation atom in `:source` and a neutral
   `:unavailable` outcome.
+
+  When `:exception_reporter` is configured as `{module, function, args}`,
+  `invoke_reporter/2` invokes `apply(module, function, args ++ [report])`
+  (the configured `args` precede the per-call `report` map; viewed as a 1-arg
+  callback, `report` is appended after `args`).
   """
 
   @prefix [:attesto_mcp_server]

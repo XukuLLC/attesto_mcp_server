@@ -82,6 +82,51 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
     assert get_in(boundary, [:authenticate, :resource_audience]) == :resource
   end
 
+  test "dynamic origin defaults :allowed_hosts to loopback names and keeps them out of the boundary",
+       %{
+         server: server
+       } do
+    state =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [issuer: "https://issuer.example", resource: "/mcp", allow_dynamic_origin: true]
+      )
+
+    assert state.auth_opts[:allowed_hosts] == ["localhost", "127.0.0.1", "::1"]
+    refute Keyword.has_key?(get_in(state.auth_boundary, [:authenticate]), :allowed_hosts)
+  end
+
+  test ":allowed_hosts requires dynamic origin and well-formed entries", %{server: server} do
+    assert_raise ArgumentError, ~r/applies only with allow_dynamic_origin/, fn ->
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [
+          issuer: "https://issuer.example",
+          resource: "/mcp",
+          base_url: "https://mcp.example.com",
+          allowed_hosts: ["localhost"]
+        ]
+      )
+    end
+
+    for hosts <- [[], ["bad host"], ["localhost/path"], "localhost"] do
+      assert_raise ArgumentError, ~r/allowed_hosts must be a non-empty list/, fn ->
+        AttestoMCP.Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          auth: [
+            issuer: "https://issuer.example",
+            resource: "/mcp",
+            allow_dynamic_origin: true,
+            allowed_hosts: hosts
+          ]
+        )
+      end
+    end
+  end
+
   test "a path-only audience without a pinned origin is rejected", %{server: server} do
     assert_raise ArgumentError, ~r/resource_audience must be an absolute URL/, fn ->
       AttestoMCP.Server.Plug.init(

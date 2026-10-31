@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "2.8.1"
+  @version "2.9.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -39,7 +39,7 @@ defmodule AttestoMCP.Server.MixProject do
       {:jose, ">= 1.11.13 and < 2.0.0"},
       {:plug, "~> 1.16"},
       {:jason, "~> 1.4"},
-      {:jsv, "~> 0.24.0 or ~> 0.25.0"},
+      {:jsv, "~> 0.26.2"},
       {:telemetry, "~> 1.2"},
       # Optional: only needed by AttestoMCP.Server.SessionStore.Ecto. ETS is
       # the built-in default, so non-Ecto consumers do not pull persistence
@@ -159,7 +159,13 @@ defmodule AttestoMCP.Server.MixProject do
     )
   end
 
-  defp build_unpacked(_args), do: run_command!("mix hex.build --unpack", "package build")
+  defp build_unpacked(_args) do
+    output = Path.join(Mix.Project.build_path(), "hex_unpacked")
+    File.rm_rf!(output)
+    run_command!("mix hex.build --unpack -o #{output}", "package build")
+    File.rm_rf!(output)
+  end
+
   defp audit_hex(_args), do: run_command!("mix hex.audit", "Hex audit")
 
   defp run_command!(command, label) do

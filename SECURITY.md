@@ -49,7 +49,10 @@ origin at runtime. Treat that callback and its configuration source as part of
 the security boundary. The server requires exact agreement with the mounted
 path and any static resource/origin value, and uses the same resolved identifier
 for metadata and audience verification. Do not use `allow_dynamic_origin` in
-production or derive an audience from an untrusted Host header.
+production or derive an audience from an untrusted Host header. In that
+development mode only requests whose `Host` is in `:allowed_hosts` (loopback
+names by default) are answered; the `Origin` check alone cannot stop a page
+whose DNS name was rebound to the loopback address.
 
 The server-wide `max_json_bytes` budget defaults to 2,000,000 bytes and accepts
 values from 512 through 64,000,000 bytes. The minimum leaves room for a bounded
@@ -105,3 +108,15 @@ host remains responsible for the trusted source of those definitions. Validate
 that a generated replacement contains every intended authorization clause and
 handler before applying it; omitted definitions are removed. Failed and no-op
 replacements do not advance the revision or emit catalog invalidations.
+
+## Runtime floor
+
+Every outbound TLS connection a host makes alongside this package, such as
+authorization-server metadata and JWKS fetches, rides Erlang/OTP `ssl`. Two 2026 OTP advisories
+let a TLS client skip server authentication: CVE-2026-55953 (TLS 1.2 and DTLS
+client accepts an unoffered anonymous cipher suite; fixed in OTP 27.3.4.15,
+28.5.0.4, 29.0.4) and CVE-2026-89422 (TLS 1.3 client skips server
+authentication on an unsolicited `pre_shared_key` extension; fixed in OTP
+27.3.4.18, 28.5.0.7, 29.1.1). Run this package on OTP 27.3.4.19, 28.5.0.8, or
+29.1.2 or later, which also carry the October 2026 `ssl` and `inets` fixes.
+OTP 26 has received no security patches since OTP 29.0 shipped.

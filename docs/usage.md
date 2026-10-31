@@ -479,7 +479,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 2.8"},
+    {:attesto_mcp_server, "~> 2.9"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -577,6 +577,10 @@ replace the mounted resource path or canonical assign keys, and cannot enable
 non-header bearer-token locations. Resolution failure produces a generic 500
 response. `allow_dynamic_origin` remains only for explicitly local development;
 do not derive a production audience from an untrusted request Host header.
+In that mode the Plug answers only requests whose `Host` is in
+`:allowed_hosts` (default `localhost`, `127.0.0.1`, and `::1`, with or without
+a port) and returns `403 forbidden host` for any other, so a browser page whose
+DNS name was rebound to the loopback address cannot reach a local server.
 
 The package requires `attesto_mcp >= 1.3.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract

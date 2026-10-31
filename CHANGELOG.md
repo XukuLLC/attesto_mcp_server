@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.9.0 - 2026-10-31
+
+- Answer `allow_dynamic_origin` requests only when the request `Host` is in
+  the new `:allowed_hosts` auth option, which defaults to `localhost`,
+  `127.0.0.1`, and `::1` with or without a port; any other host receives
+  `403 forbidden host` before origin, metadata, or token work. In that mode
+  the expected origin was derived from the request itself, so a browser page
+  whose DNS name was rebound to the loopback address passed the `Origin`
+  comparison. Pinned-origin mounts are unchanged and reject `:allowed_hosts`.
+  Surfaced by mining the class behind ash_ai CVE-2026-81315 and tidewave
+  CVE-2026-109823.
+- Serve the RFC 9728 metadata document for a dynamic-origin mount reached
+  over plain `http`, as the authenticated legs already were; it answered
+  `500 metadata_unavailable` before.
+- Require JSV 0.26.2 or later (GHSA-cvmg-hgv6-jqcp / CVE-2026-117680).
+  Earlier releases reported a regex whose backtracking budget ran out as a
+  non-match, so a tool argument forbidden by `not`/`pattern`, or left
+  unchecked under `patternProperties`, reached the handler as valid. JSV
+  0.26.2 reports exhaustion as an indeterminate pattern that combinators
+  cannot invert. The previous requirement `~> 0.24.0 or ~> 0.25.0` could
+  not resolve to the fixed release.
+
 ## 2.8.1 - 2026-10-27
 
 - Require JOSE 1.11.13 or later, which fixes CVE-2026-65625 through

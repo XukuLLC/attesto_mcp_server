@@ -19,6 +19,14 @@ defmodule AttestoMCP.Server.Plug do
   not replace the boundary's canonical assign keys, and failures fail the
   request closed.
 
+  `allow_dynamic_origin: true` derives the resource origin from each request's
+  `Host` header and exists only for local development. In that mode the Plug
+  answers only requests whose `Host` is in `:allowed_hosts` (default
+  `localhost`, `127.0.0.1`, and `::1`, each with or without a port) and
+  refuses every other with `403`. A browser page whose DNS name was rebound to
+  the loopback address sends an `Origin` equal to the `Host` it reached, so the
+  `Origin` comparison alone cannot stop it; the host allowlist does.
+
   A host may keep that canonical resource pinned for RFC 9728 metadata while
   accepting tokens for an explicit set of alternate gateway identifiers by
   supplying Attesto core's `:trusted_audiences` inside `:auth`. The list
@@ -36,6 +44,12 @@ defmodule AttestoMCP.Server.Plug do
   the authenticated base context once per protected HTTP leg; only literal
   `true` permits the request, and denial is a neutral 403 before POST body
   reading or protocol dispatch.
+
+  For `{module, function, prefix_args}` callbacks dispatched via
+  `AttestoMCP.Server.HostCallback` (`:auth`, `:principal_binding`, `:client_ip`,
+  `:authorize`, `:context_builder`, `:scope_policy`), `prefix_args` are
+  **prepended** before the per-call arguments
+  (`apply(module, function, prefix_args ++ call_args)`).
   """
   import Plug.Conn
 
@@ -67,6 +81,10 @@ defmodule AttestoMCP.Server.Plug do
   @max_request_header_value_bytes 8_192
   @max_request_header_bytes 65_536
   @default_max_body_bytes 2_000_000
+  # Hosts a dynamic-origin (local development) mount answers for unless the
+  # operator lists its own. Loopback names only: the mode exists so a
+  # developer's browser can reach a server on this machine.
+  @default_dynamic_origin_hosts ["localhost", "127.0.0.1", "::1"]
   @default_max_message_bytes 1_000_000
   @legacy_session_private :attesto_mcp_server_legacy_session
   @static_path_pattern ~r/\A\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\z/
@@ -96,6 +114,7 @@ defmodule AttestoMCP.Server.Plug do
     :max_message_bytes,
     :allow_http,
     :allow_dynamic_origin,
+    :allowed_hosts,
     :origin,
     :base_url,
     :resource,
@@ -144,6 +163,7 @@ defmodule AttestoMCP.Server.Plug do
           | {:max_message_bytes, pos_integer()}
           | {:allow_http, boolean()}
           | {:allow_dynamic_origin, boolean()}
+          | {:allowed_hosts, [String.t()]}
           | {:origin, String.t()}
           | {:base_url, String.t()}
           | {:resource, String.t()}
@@ -392,6 +412,7 @@ defmodule AttestoMCP.Server.Plug do
       :origin,
       :allow_http,
       :allow_dynamic_origin,
+      :allowed_hosts,
       :scopes_supported
     ]
 
@@ -409,6 +430,13 @@ defmodule AttestoMCP.Server.Plug do
     |> Keyword.merge(top)
     |> Keyword.put(:bearer_methods, [:header])
     |> Keyword.put_new(:principal, &__MODULE__.default_principal/2)
+    |> put_default_allowed_hosts()
+  end
+
+  defp put_default_allowed_hosts(opts) do
+    if opts[:allow_dynamic_origin] == true,
+      do: Keyword.put_new(opts, :allowed_hosts, @default_dynamic_origin_hosts),
+      else: opts
   end
 
   defp validate_static_bearer_methods!(options) do
@@ -425,6 +453,7 @@ defmodule AttestoMCP.Server.Plug do
     validate_auth_assign_keys!(auth_opts)
     validate_scope_list_option!(auth_opts, :scopes_supported, allow_empty: false)
     validate_resource_configuration!(auth_opts)
+    validate_allowed_hosts!(auth_opts)
 
     if not pinned_resource?(auth_opts) do
       raise ArgumentError,
@@ -439,6 +468,34 @@ defmodule AttestoMCP.Server.Plug do
 
     :ok
   end
+
+  defp validate_allowed_hosts!(auth_opts) do
+    case Keyword.fetch(auth_opts, :allowed_hosts) do
+      :error ->
+        :ok
+
+      {:ok, hosts} ->
+        if auth_opts[:allow_dynamic_origin] != true do
+          raise ArgumentError,
+                ":allowed_hosts applies only with allow_dynamic_origin: true; " <>
+                  "a pinned origin never consults the request Host"
+        end
+
+        unless is_list(hosts) and hosts != [] and Enum.all?(hosts, &valid_allowed_host?/1) do
+          raise ArgumentError,
+                ":allowed_hosts must be a non-empty list of host or host:port strings"
+        end
+
+        :ok
+    end
+  end
+
+  defp valid_allowed_host?(host) when is_binary(host) do
+    byte_size(host) in 1..255 and String.valid?(host) and
+      not String.contains?(host, [" ", "\t", "\r", "\n", "/", "\\", "@", "?", "#"])
+  end
+
+  defp valid_allowed_host?(_host), do: false
 
   defp validate_auth_assign_keys!(auth_opts) do
     configured =
@@ -589,7 +646,10 @@ defmodule AttestoMCP.Server.Plug do
         cond do
           conn.method == "GET" and metadata_path?(conn, state.path) ->
             state = resolve_authentication!(state)
-            metadata(conn, state)
+
+            if forbidden_host?(conn, state),
+              do: send_resp(conn, 403, "forbidden host"),
+              else: metadata(conn, state)
 
           conn.request_path != state.path ->
             send_resp(conn, 404, "not found")
@@ -614,9 +674,11 @@ defmodule AttestoMCP.Server.Plug do
                   true ->
                     state = resolve_authentication!(state)
 
-                    if invalid_origin?(conn, state),
-                      do: send_resp(conn, 403, "forbidden origin"),
-                      else: protected(conn, state)
+                    cond do
+                      forbidden_host?(conn, state) -> send_resp(conn, 403, "forbidden host")
+                      invalid_origin?(conn, state) -> send_resp(conn, 403, "forbidden origin")
+                      true -> protected(conn, state)
+                    end
                 end
 
               :unavailable ->
@@ -1165,6 +1227,7 @@ defmodule AttestoMCP.Server.Plug do
     |> maybe_pin_resource_origin(canonical_resource)
     |> Keyword.delete(:scopes)
     |> Keyword.delete(:allow_dynamic_origin)
+    |> Keyword.delete(:allowed_hosts)
     |> Keyword.delete(:resource)
     |> Keyword.delete(:resource_audience)
     |> Keyword.put(:resource_path, endpoint_path)
@@ -2804,6 +2867,8 @@ defmodule AttestoMCP.Server.Plug do
     doc =
       AttestoMCP.Metadata.protected_resource(
         resource: resource,
+        allow_http:
+          state.auth_opts[:allow_http] == true or state.auth_opts[:allow_dynamic_origin] == true,
         authorization_servers: authorization_servers(state.auth_opts),
         scopes_supported:
           state.auth_opts[:scopes_supported] || state.opts[:scopes_supported] ||
@@ -3046,6 +3111,50 @@ defmodule AttestoMCP.Server.Plug do
     expected = "/.well-known/oauth-protected-resource" <> path
     conn.request_path == expected
   end
+
+  # `allow_dynamic_origin` derives the canonical origin from the request Host,
+  # which makes the Origin comparison below tautological: a browser page whose
+  # DNS name was rebound to this loopback address sends an Origin equal to the
+  # Host it reached. Answer only hosts the operator listed (loopback names by
+  # default) so the rebound name is refused before any origin or token work.
+  defp forbidden_host?(conn, state) do
+    case dynamic_origin_hosts(state.auth_opts) do
+      nil -> false
+      hosts -> not host_allowed?(conn, hosts)
+    end
+  rescue
+    _ -> true
+  end
+
+  defp dynamic_origin_hosts(auth_opts) when is_list(auth_opts) do
+    if Keyword.get(auth_opts, :allow_dynamic_origin) == true,
+      do: Keyword.get(auth_opts, :allowed_hosts, @default_dynamic_origin_hosts),
+      else: nil
+  end
+
+  defp dynamic_origin_hosts(_auth_opts), do: nil
+
+  defp host_allowed?(conn, hosts) do
+    case normalize_allowed_host(conn.host) do
+      "" ->
+        false
+
+      host ->
+        authority = host <> ":" <> Integer.to_string(conn.port)
+        Enum.any?(hosts, fn allowed -> normalize_allowed_host(allowed) in [host, authority] end)
+    end
+  end
+
+  # Case-insensitive, trailing-dot-insensitive, and bracket-insensitive for
+  # IPv6 literals, so `[::1]:4000`, `::1`, and `[::1]` all name one host.
+  defp normalize_allowed_host(host) when is_binary(host) do
+    host
+    |> String.downcase(:ascii)
+    |> String.trim_trailing(".")
+    |> String.replace(["[", "]"], "")
+  end
+
+  defp normalize_allowed_host(_host), do: ""
 
   defp invalid_origin?(conn, state) do
     expected_origin = canonical_resource(conn, state.auth_opts) |> canonical_origin()
