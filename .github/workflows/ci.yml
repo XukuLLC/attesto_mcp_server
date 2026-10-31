@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  jsv-024-compatibility:
+  jsv-minimum-compatibility:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -17,16 +17,17 @@ jobs:
           elixir-version: "1.18.3"
           otp-version: "27.3.4.19"
           version-type: strict
-      - name: Pin the package test graph to JSV 0.24.0
+      - name: Pin the package test graph to JSV 0.26.2
         run: |
-          sed -i 's/~> 0.24.0 or ~> 0.25.0/== 0.24.0/' mix.exs
+          sed -i 's/{:jsv, "~> 0.26.2"}/{:jsv, "== 0.26.2"}/' mix.exs
+          grep -q '{:jsv, "== 0.26.2"}' mix.exs
           mix deps.unlock jsv
           mix deps.get
-      - name: Verify and exercise the retained JSV line
+      - name: Verify and exercise the minimum JSV release
         run: |
           mix run --no-start -e '
             actual = Application.spec(:jsv, :vsn) |> to_string()
-            unless actual == "0.24.0", do: raise("expected JSV 0.24.0, resolved #{actual}")
+            unless actual == "0.26.2", do: raise("expected JSV 0.26.2, resolved #{actual}")
           '
           mix compile --warnings-as-errors
           mix test \
