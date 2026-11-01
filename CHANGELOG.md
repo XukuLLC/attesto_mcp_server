@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.1.0 - 2026-10-31
+
+- A `{module, function, extra_args}` host callback with a non-empty
+  `extra_args` list is refused at startup until the host confirms the 3.0
+  argument order with
+  `config :attesto_mcp_server, host_callback_order: :call_args_first`. A
+  tool registration with such an `authorize` callback returns
+  `{:error, {:callback_order_unconfirmed, :authorize}}` instead. In 3.0.0 a
+  callback left in the 2.x order started normally and received its arguments
+  swapped, and one with a catch-all clause silently stopped working. The
+  error names the function and its argument counts, never the argument
+  values. Functions, `{module, function}` pairs, and empty `extra_args` lists
+  need no confirmation.
+- The README has an "Upgrading to 3.0" checklist, including a test for each
+  migrated callback that asserts on its output.
+
 ## 3.0.0 - 2026-10-31
 
 - **Breaking:** a `{module, function, extra_args}` host callback now receives
@@ -18,8 +34,10 @@
   To upgrade, move the extra parameters of each such callback to the end. For
   example, `client_ip: {MyApp.Net, :client_ip, [:trusted]}` now calls
   `MyApp.Net.client_ip(conn, :trusted)` where it called
-  `MyApp.Net.client_ip(:trusted, conn)`. Arity is unchanged, so a callback
-  left in the old order is not rejected at startup; check every three-tuple.
+  `MyApp.Net.client_ip(:trusted, conn)`. Arity is unchanged, so 3.0.0 starts
+  with a callback left in the old order and passes it swapped arguments;
+  3.1.0 refuses to start until the order is confirmed (see the README's
+  "Upgrading to 3.0").
 
 ## 2.9.0 - 2026-10-31
 

@@ -10,7 +10,7 @@ defmodule AttestoMCP.Server.Registry do
   @type registration :: {primitive(), String.t(), map() | keyword()}
   use GenServer
 
-  alias AttestoMCP.Server.{CachePolicy, HeaderName, Icons, Schema, UriTemplate}
+  alias AttestoMCP.Server.{CachePolicy, HeaderName, HostCallback, Icons, Schema, UriTemplate}
 
   @types [:tool, :resource, :template, :prompt, :completion]
   @max_identity_bytes 256
@@ -1050,9 +1050,14 @@ defmodule AttestoMCP.Server.Registry do
   defp valid_authorize({module, function}) when is_atom(module) and is_atom(function),
     do: :ok
 
-  defp valid_authorize({module, function, args})
-       when is_atom(module) and is_atom(function) and is_list(args),
-       do: :ok
+  # Registration runs inside the server, so an unconfirmed argument order is
+  # returned as an error the caller sees rather than raised here.
+  defp valid_authorize({module, function, args} = callback)
+       when is_atom(module) and is_atom(function) and is_list(args) do
+    if HostCallback.order_confirmed?(callback),
+      do: :ok,
+      else: {:error, {:callback_order_unconfirmed, :authorize}}
+  end
 
   defp valid_authorize(_), do: {:error, {:invalid_definition, :authorize}}
 

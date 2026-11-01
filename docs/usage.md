@@ -479,7 +479,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.0"},
+    {:attesto_mcp_server, "~> 3.1"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -1218,7 +1218,9 @@ and `exception_reporter` receives a trusted exception report without copying
 private details into protocol responses or Telemetry. Function, `{Module,
 :function}`, and `{Module, :function, extra_args}` callback forms are
 supported; a three-tuple receives the per-call arguments first and
-`extra_args` after them.
+`extra_args` after them. A three-tuple with non-empty `extra_args` requires
+`config :attesto_mcp_server, host_callback_order: :call_args_first` (see the
+README's "Upgrading to 3.0").
 
 The default session store is package-owned in-memory state. The Phoenix
 installer selects the bundled PostgreSQL adapter only when exactly one Repo is

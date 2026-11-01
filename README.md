@@ -32,6 +32,40 @@ short-lived token; it does not set up an OAuth login or consent service.
 Download the `.livemd` file, open it in Livebook, and run its cells in order
 using a dedicated Elixir 1.18+ runtime.
 
+## Upgrading to 3.0
+
+3.0 changes the argument order of `{module, function, extra_args}` host
+callbacks: the per-call arguments now come first and `extra_args` last, as in
+every other Attesto package. Before 3.0, `extra_args` came first. The arity
+does not change, so a callback left in the old order would still start and
+then receive its arguments swapped; one with a catch-all clause would quietly
+stop doing its job.
+
+1. Find every three-tuple with a non-empty `extra_args` list among the plug's
+   `:client_ip`, `:principal_binding`, `:authorize`, and `:context_builder`; a
+   tool's `authorize`; the server's `:instructions_provider`,
+   `:tool_presentation`, `:handler_task_init`, and `:exception_reporter`; the
+   `:cache_policy` `resolver`; and the `AttestoMCP.Server.Phoenix`
+   `:principal` builder. Functions, `{module, function}` pairs, and
+   `{module, function, []}` are unaffected.
+2. Move the extra parameters of each such function to the end:
+   `client_ip: {MyApp.Net, :client_ip, [:trusted]}` now calls
+   `MyApp.Net.client_ip(conn, :trusted)`, not
+   `MyApp.Net.client_ip(:trusted, conn)`.
+3. Confirm the new order in `config/config.exs`. From 3.1, a three-tuple with
+   extra arguments is refused at startup (and a tool registration returns
+   `{:error, {:callback_order_unconfirmed, :authorize}}`) until this is set:
+
+   ```elixir
+   config :attesto_mcp_server, host_callback_order: :call_args_first
+   ```
+
+4. Add a test for each such callback that asserts on its output (the client
+   IP it extracts, the context it builds, the decision it returns), not only
+   that the server starts.
+
+The [CHANGELOG](CHANGELOG.md) has the full 3.0 entry.
+
 ## Install in a Phoenix application
 
 Run this inside the Phoenix child application—not an umbrella root—with
@@ -403,7 +437,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 3.0"}]
+  [{:attesto_mcp_server, "~> 3.1"}]
 end
 ```
 

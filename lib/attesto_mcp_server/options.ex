@@ -88,7 +88,11 @@ defmodule AttestoMCP.Server.Options do
     :instructions_provider,
     :tool_presentation,
     :server_icons,
-    :export_schema_dialect
+    :export_schema_dialect,
+    # Application config confirming the 3.0 host-callback argument order; read
+    # by AttestoMCP.Server.HostCallback, accepted here because the server merges
+    # the application environment into its options.
+    :host_callback_order
   ]
   @rate_defaults %{
     calls: %{burst: 600, window_ms: 60_000},
@@ -258,6 +262,9 @@ defmodule AttestoMCP.Server.Options do
 
     if unknown != [],
       do: raise(ArgumentError, "unknown server option(s): #{inspect(Enum.uniq(unknown))}")
+
+    unless Keyword.get(opts, :host_callback_order, :call_args_first) == :call_args_first,
+      do: raise(ArgumentError, ":host_callback_order must be :call_args_first")
 
     case Keyword.get(opts, :name) do
       nil -> :ok
