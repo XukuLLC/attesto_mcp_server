@@ -9,7 +9,7 @@ defmodule AttestoMCP.Server.OutputArgumentErgonomicsTest do
   @modern "2026-07-28"
 
   defmodule Reporter do
-    def report(parent, report), do: send(parent, {:output_report, report})
+    def report(report, parent), do: send(parent, {:output_report, report})
   end
 
   test "strict output remains the default and opt-in protocols encode common Elixir values" do

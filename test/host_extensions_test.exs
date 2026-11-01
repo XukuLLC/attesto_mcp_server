@@ -15,18 +15,18 @@ defmodule AttestoMCP.Server.HostExtensionsTest do
   defmodule Callbacks do
     @moduledoc false
 
-    def context(prefix, conn), do: %{source: prefix, request_path: conn.request_path}
+    def context(conn, prefix), do: %{source: prefix, request_path: conn.request_path}
 
     def allow_operator(context), do: context.host_context == %{group: "operators"}
 
-    def allow_group(group, context), do: context.host_context == %{group: group}
+    def allow_group(context, group), do: context.host_context == %{group: group}
 
-    def task_init(parent, caller, context) do
+    def task_init(caller, context, parent) do
       send(parent, {:task_init, self(), caller, context.method})
       :ok
     end
 
-    def report(parent, report) do
+    def report(report, parent) do
       send(parent, {:reported_exception, report})
       :ok
     end

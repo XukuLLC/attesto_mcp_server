@@ -45,11 +45,11 @@ defmodule AttestoMCP.Server.Plug do
   `true` permits the request, and denial is a neutral 403 before POST body
   reading or protocol dispatch.
 
-  For `{module, function, prefix_args}` callbacks dispatched via
-  `AttestoMCP.Server.HostCallback` (`:auth`, `:principal_binding`, `:client_ip`,
-  `:authorize`, `:context_builder`, `:scope_policy`), `prefix_args` are
-  **prepended** before the per-call arguments
-  (`apply(module, function, prefix_args ++ call_args)`).
+  For `{module, function, extra_args}` callbacks (`:principal_binding`,
+  `:client_ip`, `:authorize`, `:context_builder`), the per-call arguments
+  come first and `extra_args` after them
+  (`apply(module, function, call_args ++ extra_args)`), as in every Attesto
+  package. Releases before 3.0 passed `extra_args` first.
   """
   import Plug.Conn
 

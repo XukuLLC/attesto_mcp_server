@@ -59,7 +59,11 @@ defmodule AttestoMCP.Server.API do
   @typedoc "A cache scope; string values are restricted to `\"private\"` or `\"public\"`."
   @type cache_scope :: :private | :public | String.t()
 
-  @typedoc "A host callback: a function, `{module, function}`, or `{module, function, prefix_args}`."
+  @typedoc """
+  A host callback: a function, `{module, function}`, or
+  `{module, function, extra_args}`, invoked as
+  `apply(module, function, call_args ++ extra_args)`.
+  """
   @type host_callback :: function() | {module(), atom()} | {module(), atom(), list()}
 
   @typedoc """

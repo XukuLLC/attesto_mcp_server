@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.0.0 - 2026-10-31
+
+- **Breaking:** a `{module, function, extra_args}` host callback now receives
+  the per-call arguments first and `extra_args` after them
+  (`apply(module, function, call_args ++ extra_args)`), the order attesto,
+  attesto_phoenix, attesto_mcp, and this package's tool handlers already use.
+  Releases before 3.0 passed `extra_args` first. This affects three-tuple
+  values for the plug's `:client_ip`, `:principal_binding`, `:authorize`, and
+  `:context_builder`; a tool's `authorize`; the server's
+  `:instructions_provider`, `:tool_presentation`, `:handler_task_init`, and
+  `:exception_reporter`; the `:cache_policy` `resolver`; and the
+  `AttestoMCP.Server.Phoenix` `:principal` builder. Functions and
+  `{module, function}` pairs are unchanged, and so is the zero-argument
+  `:auth` resolver the installer generates.
+
+  To upgrade, move the extra parameters of each such callback to the end. For
+  example, `client_ip: {MyApp.Net, :client_ip, [:trusted]}` now calls
+  `MyApp.Net.client_ip(conn, :trusted)` where it called
+  `MyApp.Net.client_ip(:trusted, conn)`. Arity is unchanged, so a callback
+  left in the old order is not rejected at startup; check every three-tuple.
+
 ## 2.9.0 - 2026-10-31
 
 - Answer `allow_dynamic_origin` requests only when the request `Host` is in

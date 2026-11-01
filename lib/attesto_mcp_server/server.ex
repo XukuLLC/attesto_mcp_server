@@ -6134,7 +6134,7 @@ defmodule AttestoMCP.Server do
           apply(elem(callback, 0), elem(callback, 1), [context])
 
         is_tuple(callback) and tuple_size(callback) == 3 ->
-          apply(elem(callback, 0), elem(callback, 1), elem(callback, 2) ++ [context])
+          apply(elem(callback, 0), elem(callback, 1), [context | elem(callback, 2)])
 
         true ->
           false

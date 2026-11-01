@@ -14,7 +14,7 @@ defmodule AttestoMCP.Server.ClientIPRateLimitTest do
 
     def client_ip(conn), do: conn.private[:test_client_ip]
     def direct_client_ip(conn), do: conn.private[:test_client_ip]
-    def prefixed_client_ip(_prefix, conn), do: conn.private[:test_client_ip]
+    def prefixed_client_ip(conn, _prefix), do: conn.private[:test_client_ip]
     def throw_client_ip(_conn), do: throw(:private_client_ip_detail)
     def exit_client_ip(_conn), do: exit(:private_client_ip_detail)
   end

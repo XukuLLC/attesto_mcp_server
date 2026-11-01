@@ -479,7 +479,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 2.9"},
+    {:attesto_mcp_server, "~> 3.0"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -1216,8 +1216,9 @@ primitive type and exact identity; unknown wire methods are reported as
 `:unknown`. `handler_task_init` runs in the request worker before the handler,
 and `exception_reporter` receives a trusted exception report without copying
 private details into protocol responses or Telemetry. Function, `{Module,
-:function}`, and `{Module, :function, prefix_args}` callback forms are
-supported.
+:function}`, and `{Module, :function, extra_args}` callback forms are
+supported; a three-tuple receives the per-call arguments first and
+`extra_args` after them.
 
 The default session store is package-owned in-memory state. The Phoenix
 installer selects the bundled PostgreSQL adapter only when exactly one Repo is

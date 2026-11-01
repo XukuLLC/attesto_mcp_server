@@ -59,10 +59,9 @@ defmodule AttestoMCP.Server.Telemetry do
   contains only the bounded operation atom in `:source` and a neutral
   `:unavailable` outcome.
 
-  When `:exception_reporter` is configured as `{module, function, args}`,
-  `invoke_reporter/2` invokes `apply(module, function, args ++ [report])`
-  (the configured `args` precede the per-call `report` map; viewed as a 1-arg
-  callback, `report` is appended after `args`).
+  When `:exception_reporter` is configured as `{module, function, extra_args}`,
+  `invoke_reporter/2` invokes `apply(module, function, [report | extra_args])`:
+  the per-call `report` map first, then the configured `extra_args`.
   """
 
   @prefix [:attesto_mcp_server]
@@ -310,9 +309,9 @@ defmodule AttestoMCP.Server.Telemetry do
        when is_atom(module) and is_atom(function),
        do: apply(module, function, [report])
 
-  defp invoke_reporter({module, function, args}, report)
-       when is_atom(module) and is_atom(function) and is_list(args),
-       do: apply(module, function, args ++ [report])
+  defp invoke_reporter({module, function, extra_args}, report)
+       when is_atom(module) and is_atom(function) and is_list(extra_args),
+       do: apply(module, function, [report | extra_args])
 
   defp invoke_reporter(_reporter, _report), do: :ok
 end

@@ -6,7 +6,8 @@ defmodule AttestoMCP.Server.Presentation do
 
   `:instructions` remains a static string. `:instructions_provider` is an
   optional one-argument callback (a function, `{module, function}`, or
-  `{module, function, prefix_args}`) that receives the trusted request context
+  `{module, function, extra_args}`, with `extra_args` after the context) that
+  receives the trusted request context
   and returns:
 
     * `{:ok, instructions}` with a non-empty UTF-8 string of at most 65,536

@@ -19,7 +19,7 @@ defmodule AttestoMCP.Server.PrincipalBindingMountAuthorizationTest do
     def binding(%{id: id}), do: id
     def shared_binding(_principal), do: "shared-binding"
 
-    def authorize(events, context) do
+    def authorize(context, events) do
       Agent.update(events, &(&1 ++ [{:authorize, context}]))
       context.principal.role == :admin
     end
