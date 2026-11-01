@@ -10,6 +10,7 @@ defmodule OAuthHost do
     DiscoveryController,
     JWKSController,
     OpenIDConfigurationController,
+    RegistrationController,
     TokenController
   }
 
@@ -44,6 +45,10 @@ defmodule OAuthHost do
     base_url = Keyword.get(options, :base_url, "https://mcp.oauth-fixture.example")
     client = %{id: @client_id, dpop?: dpop?}
     scopes = ["openid" | AttestoMCP.Scopes.all()]
+    # With a registry, clients come from dynamic registration (RFC 7591) and
+    # refresh tokens are issued and rotated; without one, the original fixed
+    # native client and code-only grant catalog.
+    registry = Keyword.get(options, :registry)
 
     config =
       Config.new(
@@ -54,18 +59,24 @@ defmodule OAuthHost do
         principal_kinds: [Attesto.PrincipalKind.new("user", "usr_")],
         code_store: Attesto.CodeStore.ETS,
         token_endpoint_auth_methods_supported: ["none"],
-        grant_types_supported: ["authorization_code"],
+        grant_types_supported:
+          if(registry,
+            do: ["authorization_code", "refresh_token", "client_credentials"],
+            else: ["authorization_code"]
+          ),
+        registration_enabled: registry != nil,
+        register_client: registry && fn attrs -> register(registry, attrs) end,
+        refresh_store: registry && Attesto.RefreshStore.ETS,
+        refresh_token_rotation_grace_seconds: Keyword.get(options, :refresh_grace, 60),
         scopes_supported: scopes,
         resource_indicators: [allowed_resources: [resource, other_resource]],
-        load_client: fn id ->
-          if id == @client_id, do: {:ok, client}, else: {:error, :not_found}
-        end,
+        load_client: fn id -> load_client(registry, id, client) end,
         verify_client_secret: fn _client, _secret -> false end,
-        client_id: & &1.id,
+        client_id: &client_id/1,
         client_public?: fn _ -> true end,
-        client_native?: fn _ -> true end,
-        client_requires_dpop?: & &1.dpop?,
-        client_redirect_uris: fn _ -> ["http://127.0.0.1:0/callback"] end,
+        client_native?: &(not registered?(&1)),
+        client_requires_dpop?: &Map.get(&1, :dpop?, false),
+        client_redirect_uris: &redirect_uris/1,
         authorize_scope: fn _client, requested ->
           if Enum.all?(requested, &(&1 in scopes)),
             do: {:ok, requested},
@@ -75,11 +86,14 @@ defmodule OAuthHost do
         authenticate_resource_owner: fn _conn, _request, _opts ->
           {:authenticated, %{subject: "fixture", auth_time: System.system_time(:second)}}
         end,
-        consent: fn _conn, _request, subject -> {:consented, subject} end,
+        consent: fn _conn, _request, subject ->
+          send(owner, {:consent, subject})
+          {:consented, subject}
+        end,
         build_principal: fn _client, subject, granted ->
           %{kind: "user", sub: "usr_" <> subject, scopes: granted, claims: %{}}
         end,
-        issue_refresh_token?: fn _client, _scope -> false end,
+        issue_refresh_token?: fn _client, _scope -> registry != nil end,
         dpop_nonce_required: dpop?,
         nonce_store: Attesto.DPoP.NonceStore.ETS
       )
@@ -105,6 +119,30 @@ defmodule OAuthHost do
     plug = AttestoMCP.Server.Plug.init(server: server, path: "/mcp", auth: auth)
     %{config: config, protocol: protocol, mcp: plug, owner: owner}
   end
+
+  defp register(registry, attrs) do
+    Agent.update(registry, &Map.put(&1, attrs["client_id"], attrs))
+    {:ok, attrs}
+  end
+
+  defp load_client(nil, @client_id, client), do: {:ok, client}
+  defp load_client(nil, _id, _client), do: {:error, :not_found}
+
+  defp load_client(registry, id, _client) do
+    case Agent.get(registry, &Map.get(&1, id)) do
+      nil -> {:error, :not_found}
+      attrs -> {:ok, attrs}
+    end
+  end
+
+  defp registered?(%{"client_id" => _}), do: true
+  defp registered?(_client), do: false
+
+  defp client_id(%{"client_id" => id}), do: id
+  defp client_id(%{id: id}), do: id
+
+  defp redirect_uris(%{"redirect_uris" => uris}), do: uris
+  defp redirect_uris(_client), do: ["http://127.0.0.1:0/callback"]
 
   # Req's supported in-process Plug transport exercises the actual controllers
   # and MCP authentication boundary without relaxing client DNS/TLS policy.
@@ -141,6 +179,9 @@ defmodule OAuthHost do
 
           {"POST", "/oauth/token"} ->
             TokenController.create(conn, conn.params)
+
+          {"POST", "/oauth/register"} ->
+            RegistrationController.create(conn, conn.params)
 
           _ ->
             send_resp(conn, 404, "not found")
