@@ -6,7 +6,12 @@ Application.put_env(
   JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_pem() |> elem(1)
 )
 
-for module <- [Attesto.CodeStore.ETS, Attesto.DPoP.NonceStore.ETS, Attesto.DPoP.ReplayCache, Attesto.RefreshStore.ETS] do
+for module <- [
+      Attesto.CodeStore.ETS,
+      Attesto.DPoP.NonceStore.ETS,
+      Attesto.DPoP.ReplayCache,
+      Attesto.RefreshStore.ETS
+    ] do
   case module.start_link() do
     {:ok, _pid} -> :ok
     {:error, {:already_started, _pid}} -> :ok
