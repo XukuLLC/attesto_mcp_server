@@ -10,6 +10,14 @@ defmodule AttestoMCP.Server.Plug do
   request-scoped tool streams with `stream_tools` or `stream_all_tools`; both
   options are validated during `init/1`.
 
+  `:subscription_timeout` (milliseconds, default 300000) is how long a
+  `subscriptions/listen` stream lasts, counted from when the listen request is
+  dispatched; keepalives and notifications do not extend it. At the deadline
+  the stream ends with the listen request's final response. The deadline is
+  enforced once dispatch returns, so a dispatch that itself runs longer
+  (bounded by `request_timeout`) delays the end by that much. When a proxy or
+  hosting platform caps request duration, set it below that cap.
+
   `:auth` accepts either a keyword list or a zero-arity remote callback/MFA
   returning one. Resolver-backed authentication is evaluated for every
   applicable MCP or metadata request, so runtime authorization configuration
@@ -1668,6 +1676,10 @@ defmodule AttestoMCP.Server.Plug do
     request_ref = make_ref()
     parent = self()
 
+    # `subscription_timeout` is the stream's whole lifetime, counted from here.
+    deadline =
+      System.monotonic_time(:millisecond) + (state.opts[:subscription_timeout] || 300_000)
+
     Telemetry.execute([:stream, :open], %{count: 1}, %{transport: :http, method: request.method})
 
     on_event = fn event -> send(parent, {:mcp_subscription_pre_ack, request_ref, event}) end
@@ -1686,20 +1698,31 @@ defmodule AttestoMCP.Server.Plug do
         subscription_id =
           get_in(response, ["result", "_meta", "io.modelcontextprotocol/subscriptionId"])
 
-        conn = flush_subscription_pre_ack(conn, state, request_ref)
+        # The listen request's id is the subscription id.
+        listen_id = Map.get(request, :id)
 
-        if is_binary(subscription_id) or is_integer(subscription_id) do
-          subscription_stream(conn, state, subscription_id, request_ref, session_id, response)
-        else
-          _ = chunk(conn, sse_event(response))
-          maybe_touch(state.server, session_id)
+        case continue_subscription_pre_ack_flush(conn, state, request_ref, deadline, nil) do
+          {:closed, conn, acknowledged_id} ->
+            # The client went away during the flush; release what this request
+            # opened instead of waiting for a keepalive write to fail.
+            release_request_subscription(state.server, listen_id, request_ref, acknowledged_id)
+            conn
 
-          Telemetry.execute([:stream, :close], %{count: 1}, %{
-            transport: :http,
-            outcome: :completed
-          })
-
-          conn
+          {:ok, conn, acknowledged_id} ->
+            if is_binary(subscription_id) or is_integer(subscription_id) do
+              subscription_stream(
+                conn,
+                state,
+                subscription_id,
+                request_ref,
+                session_id,
+                response,
+                deadline
+              )
+            else
+              release_request_subscription(state.server, listen_id, request_ref, acknowledged_id)
+              finish_failed_listen(conn, state, response, session_id)
+            end
         end
 
       _ ->
@@ -1712,9 +1735,79 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp flush_subscription_pre_ack(conn, state, request_ref) do
+  defp finish_failed_listen(conn, state, response, session_id) do
+    _ = chunk(conn, sse_event(response))
+    maybe_touch(state.server, session_id)
+    Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :completed})
+    conn
+  end
+
+  # Closes the subscription this listen request opened, if it is still open,
+  # then drops its queued messages. A dispatch that fails after the
+  # subscription opened (a request timeout, for example) leaves it registered
+  # to this process. Close notices and backpressure carry only the
+  # subscription id, so they are dropped only when they are this request's:
+  # when it closed the subscription here, or when it saw the subscription's
+  # acknowledgement, which carries its request tag, and so knows that
+  # subscription opened and was closed by something else. A subscription this
+  # process opened some other way under the same id keeps its notices.
+  defp release_request_subscription(server, listen_id, request_ref, acknowledged_id) do
+    reply =
+      if is_binary(listen_id) or is_integer(listen_id),
+        do: AttestoMCP.Server.close_request_subscription(server, listen_id, self(), request_ref),
+        else: :not_found
+
+    # Read after the registry call: a still-queued open sends its
+    # acknowledgement before the registry answers the close.
+    acknowledged_id = acknowledged_id || unread_acknowledgement_id(request_ref)
+
+    subscription_id =
+      case reply do
+        :closed -> listen_id
+        :mismatch -> nil
+        _not_found_or_unknown -> acknowledged_id
+      end
+
+    if not is_nil(subscription_id), do: drain_subscription_controls(subscription_id)
+    drain_subscription_messages(request_ref, subscription_id)
+  end
+
+  defp unread_acknowledgement_id(request_ref) do
+    case unread_acknowledgement(request_ref) do
+      nil -> nil
+      event -> event_subscription_id(event)
+    end
+  end
+
+  # This request's acknowledgement, if it is still queued. It arrives directly,
+  # or relayed through `on_event` when it reached this process while dispatch
+  # was still running.
+  defp unread_acknowledgement(request_ref) do
+    receive do
+      {:mcp_subscription, ^request_ref, _subscription_id,
+       %{"method" => "notifications/subscriptions/acknowledged"} = event} ->
+        event
+
+      {:mcp_subscription_pre_ack, ^request_ref,
+       %{"method" => "notifications/subscriptions/acknowledged"} = event} ->
+        event
+    after
+      0 -> nil
+    end
+  end
+
+  defp acknowledgement_id(%{"method" => "notifications/subscriptions/acknowledged"} = event, _),
+    do: event_subscription_id(event)
+
+  defp acknowledgement_id(_event, acknowledged_id), do: acknowledged_id
+
+  # Returns the subscription id from the acknowledgement once the flush has
+  # read it, whether or not writing it succeeded.
+  defp flush_subscription_pre_ack(conn, state, request_ref, deadline, acknowledged_id) do
     receive do
       {:mcp_subscription, ^request_ref, _subscription_id, event} ->
+        acknowledged_id = acknowledgement_id(event, acknowledged_id)
+
         case emit_subscription(conn, state.server, event_subscription_id(event), event) do
           {:ok, conn} ->
             if event["method"] != "notifications/subscriptions/acknowledged" do
@@ -1725,23 +1818,118 @@ defmodule AttestoMCP.Server.Plug do
               )
             end
 
-            flush_subscription_pre_ack(conn, state, request_ref)
+            continue_subscription_pre_ack_flush(
+              conn,
+              state,
+              request_ref,
+              deadline,
+              acknowledged_id
+            )
 
           {:closed, conn} ->
-            conn
+            {:closed, conn, acknowledged_id}
         end
 
       {:mcp_subscription_pre_ack, ^request_ref, event} ->
+        acknowledged_id = acknowledgement_id(event, acknowledged_id)
+
         case emit_subscription(conn, state.server, event_subscription_id(event), event) do
-          {:ok, conn} -> flush_subscription_pre_ack(conn, state, request_ref)
-          {:closed, conn} -> conn
+          {:ok, conn} ->
+            continue_subscription_pre_ack_flush(
+              conn,
+              state,
+              request_ref,
+              deadline,
+              acknowledged_id
+            )
+
+          {:closed, conn} ->
+            {:closed, conn, acknowledged_id}
         end
     after
-      0 -> conn
+      0 -> {:ok, conn, acknowledged_id}
     end
   end
 
-  defp subscription_stream(conn, state, subscription_id, request_ref, session_id, final_response) do
+  # Each ack can release another queued event, so a steady flow would keep the
+  # flush going; it stops at the stream's deadline and the stream then ends.
+  defp continue_subscription_pre_ack_flush(conn, state, request_ref, deadline, acknowledged_id) do
+    if System.monotonic_time(:millisecond) < deadline,
+      do: flush_subscription_pre_ack(conn, state, request_ref, deadline, acknowledged_id),
+      else: end_subscription_pre_ack_flush(conn, state, request_ref, acknowledged_id)
+  end
+
+  # Past the deadline only the acknowledgement is still written, wherever it
+  # sits in the buffer, so the client sees the subscription open before its
+  # final response. The rest of this request's buffer is dropped rather than
+  # kept in a connection process that may serve further requests.
+  defp end_subscription_pre_ack_flush(conn, state, request_ref, acknowledged_id) do
+    result =
+      case unread_acknowledgement(request_ref) do
+        nil ->
+          {:ok, conn, acknowledged_id}
+
+        event ->
+          case emit_subscription(conn, state.server, event_subscription_id(event), event) do
+            {:ok, conn} -> {:ok, conn, event_subscription_id(event)}
+            {:closed, conn} -> {:closed, conn, event_subscription_id(event)}
+          end
+      end
+
+    drain_subscription_messages(request_ref, nil)
+    result
+  end
+
+  # Keepalives and events re-enter the receive, so each pass waits only for the
+  # time left before the deadline and none of them extends the stream. The
+  # deadline is checked before the receive because a receive takes a waiting
+  # message ahead of an expired `after`, so a steady flow of events would
+  # otherwise keep the stream open past it. Each delivery checks it again
+  # before writing, since the process can be descheduled between the two.
+  defp subscription_stream(
+         conn,
+         state,
+         subscription_id,
+         request_ref,
+         session_id,
+         final_response,
+         deadline
+       ) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0 do
+      await_subscription_message(
+        conn,
+        state,
+        subscription_id,
+        request_ref,
+        session_id,
+        final_response,
+        deadline,
+        remaining
+      )
+    else
+      end_subscription_stream_at_deadline(
+        conn,
+        state,
+        subscription_id,
+        request_ref,
+        session_id,
+        final_response
+      )
+    end
+  end
+
+  defp await_subscription_message(
+         conn,
+         state,
+         subscription_id,
+         request_ref,
+         session_id,
+         final_response,
+         deadline,
+         remaining
+       ) do
     keepalive_ms = state.opts[:stream_keepalive_ms] || state.opts[:legacy_keepalive_ms]
 
     if is_integer(keepalive_ms) and keepalive_ms > 0 and
@@ -1753,66 +1941,113 @@ defmodule AttestoMCP.Server.Plug do
       {:mcp_subscription_keepalive, ^request_ref} ->
         Process.delete({:mcp_subscription_keepalive, request_ref})
 
-        case chunk(conn, ": keepalive\n\n") do
-          {:ok, conn} ->
-            if is_integer(keepalive_ms) and keepalive_ms > 0,
-              do: schedule_subscription_keepalive(request_ref, keepalive_ms)
+        if past_deadline?(deadline) do
+          end_subscription_stream_at_deadline(
+            conn,
+            state,
+            subscription_id,
+            request_ref,
+            session_id,
+            final_response
+          )
+        else
+          case chunk(conn, ": keepalive\n\n") do
+            {:ok, conn} ->
+              if is_integer(keepalive_ms) and keepalive_ms > 0,
+                do: schedule_subscription_keepalive(request_ref, keepalive_ms)
 
-            subscription_stream(
-              conn,
-              state,
-              subscription_id,
-              request_ref,
-              session_id,
-              final_response
-            )
+              subscription_stream(
+                conn,
+                state,
+                subscription_id,
+                request_ref,
+                session_id,
+                final_response,
+                deadline
+              )
 
-          {:error, _reason} ->
-            cancel_subscription_keepalive(request_ref)
-            close_owned_subscription(state.server, subscription_id)
-            conn
+            {:error, _reason} ->
+              cancel_subscription_keepalive(request_ref)
+              close_owned_subscription(state.server, subscription_id)
+              drain_subscription_messages(request_ref, subscription_id)
+              conn
+          end
         end
 
       {:mcp_subscription, ^request_ref, ^subscription_id, event} ->
-        case emit_subscription(conn, state.server, subscription_id, event) do
-          {:ok, conn} ->
-            if event["method"] != "notifications/subscriptions/acknowledged" do
-              AttestoMCP.Server.ack_subscription(state.server, subscription_id, self())
-            end
+        if past_deadline?(deadline) do
+          end_subscription_stream_at_deadline(
+            conn,
+            state,
+            subscription_id,
+            request_ref,
+            session_id,
+            final_response
+          )
+        else
+          case emit_subscription(conn, state.server, subscription_id, event) do
+            {:ok, conn} ->
+              if event["method"] != "notifications/subscriptions/acknowledged" do
+                AttestoMCP.Server.ack_subscription(state.server, subscription_id, self())
+              end
 
-            subscription_stream(
-              conn,
-              state,
-              subscription_id,
-              request_ref,
-              session_id,
-              final_response
-            )
+              subscription_stream(
+                conn,
+                state,
+                subscription_id,
+                request_ref,
+                session_id,
+                final_response,
+                deadline
+              )
 
-          {:closed, conn} ->
-            cancel_subscription_keepalive(request_ref)
-            conn
+            {:closed, conn} ->
+              cancel_subscription_keepalive(request_ref)
+              drain_subscription_messages(request_ref, subscription_id)
+              conn
+          end
         end
 
       {:mcp_subscription_pre_ack, ^request_ref, event} ->
-        case emit_subscription(conn, state.server, subscription_id, event) do
-          {:ok, conn} ->
-            subscription_stream(
-              conn,
-              state,
-              subscription_id,
-              request_ref,
-              session_id,
-              final_response
-            )
+        if past_deadline?(deadline) do
+          end_subscription_stream_at_deadline(
+            conn,
+            state,
+            subscription_id,
+            request_ref,
+            session_id,
+            final_response
+          )
+        else
+          case emit_subscription(conn, state.server, subscription_id, event) do
+            {:ok, conn} ->
+              subscription_stream(
+                conn,
+                state,
+                subscription_id,
+                request_ref,
+                session_id,
+                final_response,
+                deadline
+              )
 
-          {:closed, conn} ->
-            cancel_subscription_keepalive(request_ref)
-            conn
+            {:closed, conn} ->
+              cancel_subscription_keepalive(request_ref)
+              drain_subscription_messages(request_ref, subscription_id)
+              conn
+          end
         end
 
       {:mcp_subscription_backpressure, ^subscription_id} ->
-        subscription_stream(conn, state, subscription_id, request_ref, session_id, final_response)
+        subscription_stream(
+          conn,
+          state,
+          subscription_id,
+          request_ref,
+          session_id,
+          final_response,
+          deadline
+        )
 
       {:mcp_subscription_cancel, ^subscription_id} ->
         cancel_subscription_keepalive(request_ref)
@@ -1830,12 +2065,53 @@ defmodule AttestoMCP.Server.Plug do
         Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :closed})
         emit_final_subscription_response(conn, state.server, subscription_id, final_response)
     after
-      state.opts[:subscription_timeout] || 300_000 ->
-        cancel_subscription_keepalive(request_ref)
-        close_owned_subscription(state.server, subscription_id)
-        maybe_touch(state.server, session_id)
-        Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :timeout})
-        emit_final_subscription_response(conn, state.server, subscription_id, final_response)
+      remaining ->
+        end_subscription_stream_at_deadline(
+          conn,
+          state,
+          subscription_id,
+          request_ref,
+          session_id,
+          final_response
+        )
+    end
+  end
+
+  defp past_deadline?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  defp end_subscription_stream_at_deadline(
+         conn,
+         state,
+         subscription_id,
+         request_ref,
+         session_id,
+         final_response
+       ) do
+    cancel_subscription_keepalive(request_ref)
+    close_owned_subscription(state.server, subscription_id)
+    # The deadline can pass with events still queued. Close has returned, so
+    # nothing more arrives for this subscription; drop what is left rather than
+    # keep it in a connection process that may serve further requests.
+    drain_subscription_messages(request_ref, subscription_id)
+    maybe_touch(state.server, session_id)
+    Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :timeout})
+    emit_final_subscription_response(conn, state.server, subscription_id, final_response)
+  end
+
+  # Drops this request's queued events and pre-acknowledgement messages, and
+  # the backpressure notices of its subscription when one is known.
+  defp drain_subscription_messages(request_ref, subscription_id) do
+    receive do
+      {:mcp_subscription, ^request_ref, _subscription_id, _event} ->
+        drain_subscription_messages(request_ref, subscription_id)
+
+      {:mcp_subscription_pre_ack, ^request_ref, _event} ->
+        drain_subscription_messages(request_ref, subscription_id)
+
+      {:mcp_subscription_backpressure, ^subscription_id} when not is_nil(subscription_id) ->
+        drain_subscription_messages(request_ref, subscription_id)
+    after
+      0 -> :ok
     end
   end
 

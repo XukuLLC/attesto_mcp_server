@@ -199,19 +199,11 @@ defmodule AttestoMCP.Server.Stdio do
         loop(server, context, opts, max, reader, reader_monitor, pending)
 
       {:stdio_event, work_ref, event} ->
-        if pending_ref?(pending, work_ref), do: write(event)
+        write_request_event(pending, work_ref, event)
         loop(server, context, opts, max, reader, reader_monitor, pending)
 
       {:stdio_subscription_event, work_ref, subscription_id, event} ->
-        case pending_entry(pending, work_ref) do
-          %{pid: worker} ->
-            write(event)
-            send(worker, {:stdio_subscription_ack, subscription_id, :ok})
-
-          _ ->
-            :ok
-        end
-
+        deliver_subscription_event(pending, work_ref, subscription_id, event)
         loop(server, context, opts, max, reader, reader_monitor, pending)
 
       {:mcp_legacy_event, stream_ref, _event_id, event} ->
@@ -390,6 +382,15 @@ defmodule AttestoMCP.Server.Stdio do
     # the session is negotiated.
     frame_bytes = Process.get(:attesto_mcp_stdio_json_budget)
 
+    # A listen's `subscription_timeout` is its whole lifetime, counted from
+    # dispatch, as on HTTP. The writer keeps the same deadline with the pending
+    # entry and refuses the listen's notifications that reach it later.
+    deadline =
+      if request.method == "subscriptions/listen",
+        do:
+          System.monotonic_time(:millisecond) +
+            (Keyword.get(opts, :subscription_timeout) || 300_000)
+
     {pid, monitor} =
       spawn_monitor(fn ->
         on_event = fn event -> send(parent, {:stdio_event, work_ref, event}) end
@@ -416,7 +417,7 @@ defmodule AttestoMCP.Server.Stdio do
                   response_id,
                   response,
                   subscription_id,
-                  Keyword.get(opts, :subscription_timeout) || 300_000
+                  deadline
                 )
 
               _ ->
@@ -428,7 +429,7 @@ defmodule AttestoMCP.Server.Stdio do
         end
       end)
 
-    Map.put(pending, key, %{id: id, pid: pid, monitor: monitor, ref: work_ref})
+    Map.put(pending, key, %{id: id, pid: pid, monitor: monitor, ref: work_ref, deadline: deadline})
   end
 
   defp cancel_request(server, context, pending, params) do
@@ -446,6 +447,11 @@ defmodule AttestoMCP.Server.Stdio do
     pending
   end
 
+  # Events and unrelated messages re-enter the receive, so each pass waits
+  # only for the time left before the deadline. The deadline is checked before
+  # the receive because a receive takes a waiting message ahead of an expired
+  # `after`, so a steady flow of events would otherwise keep the subscription
+  # open past it.
   defp subscription_loop(
          server,
          parent,
@@ -453,7 +459,42 @@ defmodule AttestoMCP.Server.Stdio do
          response_id,
          response,
          subscription_id,
-         timeout
+         deadline
+       ) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0 do
+      await_subscription_event(
+        server,
+        parent,
+        work_ref,
+        response_id,
+        response,
+        subscription_id,
+        deadline,
+        remaining
+      )
+    else
+      end_subscription_at_deadline(
+        server,
+        parent,
+        work_ref,
+        response_id,
+        response,
+        subscription_id
+      )
+    end
+  end
+
+  defp await_subscription_event(
+         server,
+         parent,
+         work_ref,
+         response_id,
+         response,
+         subscription_id,
+         deadline,
+         remaining
        ) do
     receive do
       {:mcp_subscription, ^work_ref, ^subscription_id, event} ->
@@ -470,16 +511,22 @@ defmodule AttestoMCP.Server.Stdio do
               response_id,
               response,
               subscription_id,
-              timeout
+              deadline
             )
 
           {:stdio_subscription_ack, ^subscription_id, {:error, _reason}} ->
             AttestoMCP.Server.close_subscription(server, subscription_id, self())
             send(parent, {:stdio_result, work_ref, {response_id, response}})
         after
-          timeout ->
-            AttestoMCP.Server.close_subscription(server, subscription_id, self())
-            send(parent, {:stdio_result, work_ref, {response_id, response}})
+          max(deadline - System.monotonic_time(:millisecond), 0) ->
+            end_subscription_at_deadline(
+              server,
+              parent,
+              work_ref,
+              response_id,
+              response,
+              subscription_id
+            )
         end
 
       {:mcp_subscription_cancel, ^subscription_id} ->
@@ -496,13 +543,68 @@ defmodule AttestoMCP.Server.Stdio do
           response_id,
           response,
           subscription_id,
-          timeout
+          deadline
         )
     after
-      timeout ->
-        AttestoMCP.Server.close_subscription(server, subscription_id, self())
-        send(parent, {:stdio_result, work_ref, {response_id, response}})
+      remaining ->
+        end_subscription_at_deadline(
+          server,
+          parent,
+          work_ref,
+          response_id,
+          response,
+          subscription_id
+        )
     end
+  end
+
+  # The writer checks the listen's deadline too: a worker can pass an event on
+  # just before its deadline and the writer reach it only after. Refusing the
+  # write makes the worker close the subscription and send the final response.
+  defp deliver_subscription_event(pending, work_ref, subscription_id, event) do
+    case pending_entry(pending, work_ref) do
+      %{pid: worker} = entry ->
+        if before_deadline?(entry) do
+          write(event)
+          send(worker, {:stdio_subscription_ack, subscription_id, :ok})
+        else
+          send(worker, {:stdio_subscription_ack, subscription_id, {:error, :deadline}})
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Notifications a listen receives while its dispatch is still running come
+  # through here. Past the deadline only the acknowledgement is still written.
+  defp write_request_event(pending, work_ref, event) do
+    case pending_entry(pending, work_ref) do
+      nil ->
+        :ok
+
+      entry ->
+        if before_deadline?(entry) or
+             match?(%{"method" => "notifications/subscriptions/acknowledged"}, event),
+           do: write(event)
+    end
+  end
+
+  defp before_deadline?(%{deadline: deadline}) when is_integer(deadline),
+    do: System.monotonic_time(:millisecond) < deadline
+
+  defp before_deadline?(_entry), do: true
+
+  defp end_subscription_at_deadline(
+         server,
+         parent,
+         work_ref,
+         response_id,
+         response,
+         subscription_id
+       ) do
+    AttestoMCP.Server.close_subscription(server, subscription_id, self())
+    send(parent, {:stdio_result, work_ref, {response_id, response}})
   end
 
   defp context_principal(context) do
@@ -673,8 +775,6 @@ defmodule AttestoMCP.Server.Stdio do
     end
   end
 
-  defp pending_ref?(pending, ref), do: Enum.any?(pending, fn {_id, entry} -> entry.ref == ref end)
-
   defp pending_entry(pending, ref),
     do: Enum.find_value(pending, fn {_id, entry} -> if entry.ref == ref, do: entry end)
 
@@ -706,19 +806,11 @@ defmodule AttestoMCP.Server.Stdio do
     else
       receive do
         {:stdio_event, work_ref, event} ->
-          if pending_ref?(pending, work_ref), do: write(event)
+          write_request_event(pending, work_ref, event)
           drain_pending(pending, deadline)
 
         {:stdio_subscription_event, work_ref, subscription_id, event} ->
-          case pending_entry(pending, work_ref) do
-            %{pid: worker} ->
-              write(event)
-              send(worker, {:stdio_subscription_ack, subscription_id, :ok})
-
-            _ ->
-              :ok
-          end
-
+          deliver_subscription_event(pending, work_ref, subscription_id, event)
           drain_pending(pending, deadline)
 
         {:stdio_result, work_ref, result} ->

@@ -59,6 +59,13 @@ defmodule AttestoMCP.Server.Subscriptions do
   @spec close(pid(), term(), pid() | nil) :: :ok
   def close(pid, id, owner), do: GenServer.call(pid, {:close, id, owner})
 
+  # Closes the owner's subscription only when it carries `tag`, so a transport
+  # can release the subscription its own request opened without touching
+  # another one under the same owner and id. `:mismatch` reports that other one.
+  @doc false
+  @spec close_tagged(pid(), term(), pid(), term()) :: :closed | :not_found | :mismatch
+  def close_tagged(pid, id, owner, tag), do: GenServer.call(pid, {:close_tagged, id, owner, tag})
+
   @doc "Cancels one subscription without affecting its peers."
   @spec cancel(pid(), term()) :: :ok
   def cancel(pid, id), do: GenServer.call(pid, {:cancel, id, self()})
@@ -114,6 +121,23 @@ defmodule AttestoMCP.Server.Subscriptions do
       Enum.reduce(state.subscriptions, 0, fn {_id, sub}, total -> total + sub.queue_size end)
 
     {:reply, %{count: map_size(state.subscriptions), queued: queued}, state}
+  end
+
+  def handle_call({:close_tagged, id, owner, tag}, {caller, _ref}, state) do
+    key = find_key(state, id, owner)
+
+    case state.subscriptions[key] do
+      %{tag: ^tag, sink: sink} ->
+        telemetry(state, [:subscription, :close], %{count: 1}, %{transport: :core})
+        if is_pid(sink) and sink != caller, do: send(sink, {:mcp_subscription_close, id})
+        {:reply, :closed, remove(state, key)}
+
+      %{} ->
+        {:reply, :mismatch, state}
+
+      nil ->
+        {:reply, :not_found, state}
+    end
   end
 
   def handle_call({:close, id, owner}, {caller, _tag}, state) do

@@ -14,6 +14,83 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     send(parent, {:telemetry_event, event, measurements, metadata})
   end
 
+  def sleep_handler(_event, _measurements, _metadata, ms), do: Process.sleep(ms)
+
+  def notify_then_sleep_handler(event, measurements, metadata, {parent, ms}) do
+    send(parent, {:telemetry_event, event, measurements, metadata})
+    Process.sleep(ms)
+  end
+
+  defmodule ClosingAdapter do
+    @moduledoc false
+    # The Plug.Test adapter, except that every chunk after the first `allowed`
+    # fails as it does once the client has disconnected.
+    @behaviour Plug.Conn.Adapter
+
+    alias Plug.Adapters.Test.Conn, as: TestConn
+
+    def wrap(%Plug.Conn{adapter: {TestConn, state}} = conn, allowed),
+      do: %{conn | adapter: {__MODULE__, {state, allowed}}}
+
+    @impl true
+    def chunk({_state, 0}, _body), do: {:error, :closed}
+
+    def chunk({state, allowed}, body) do
+      {:ok, data, state} = TestConn.chunk(state, body)
+      {:ok, data, {state, allowed - 1}}
+    end
+
+    @impl true
+    def send_chunked({state, allowed}, status, headers) do
+      {:ok, data, state} = TestConn.send_chunked(state, status, headers)
+      {:ok, data, {state, allowed}}
+    end
+
+    @impl true
+    def send_resp({state, allowed}, status, headers, body) do
+      {:ok, data, state} = TestConn.send_resp(state, status, headers, body)
+      {:ok, data, {state, allowed}}
+    end
+
+    @impl true
+    def send_file({state, allowed}, status, headers, path, offset, length) do
+      {:ok, data, state} = TestConn.send_file(state, status, headers, path, offset, length)
+      {:ok, data, {state, allowed}}
+    end
+
+    @impl true
+    def read_req_body({state, allowed}, opts) do
+      {tag, data, state} = TestConn.read_req_body(state, opts)
+      {tag, data, {state, allowed}}
+    end
+
+    @impl true
+    def inform({state, _allowed}, status, headers), do: TestConn.inform(state, status, headers)
+
+    @impl true
+    def upgrade({state, allowed}, protocol, opts) do
+      case TestConn.upgrade(state, protocol, opts) do
+        {:ok, state} -> {:ok, {state, allowed}}
+        error -> error
+      end
+    end
+
+    @impl true
+    def push({state, _allowed}, path, headers), do: TestConn.push(state, path, headers)
+
+    @impl true
+    def get_peer_data({state, _allowed}), do: TestConn.get_peer_data(state)
+
+    @impl true
+    def get_sock_data({state, _allowed}), do: TestConn.get_sock_data(state)
+
+    @impl true
+    def get_ssl_data({state, _allowed}), do: TestConn.get_ssl_data(state)
+
+    @impl true
+    def get_http_protocol({state, _allowed}), do: TestConn.get_http_protocol(state)
+  end
+
   test "delivery verifier options reject mismatched sender bindings" do
     config = AttestoMCP.Test.Factory.config()
     verify_opts = [expected_typ: "access", trusted_audiences: [@resource]]
@@ -899,6 +976,792 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
 
     refute_receive {:mcp_subscription_close, 140}, 25
     refute_receive {:mcp_subscription_cancel, 140}, 25
+  end
+
+  test "keepalives do not extend an HTTP subscription past subscription_timeout" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    attach_telemetry([[:attesto_mcp_server, :stream, :close]])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        stream_keepalive_ms: 5,
+        subscription_timeout: 500,
+        auth: [config: config, resource: @resource]
+      )
+
+    started = System.monotonic_time(:millisecond)
+    {pid, monitor} = start_deadline_stream(plug, token, 150)
+
+    # A keepalive every 5 ms used to restart the 500 ms timeout, so the stream
+    # stayed open for as long as keepalives were written.
+    assert_receive {:subscription_done, 150, conn, leftover}, 3_000
+    assert System.monotonic_time(:millisecond) - started >= 500
+    assert conn.status == 200
+    assert leftover == []
+
+    events = String.split(conn.resp_body, "\n\n", trim: true)
+    {keepalives, data} = Enum.split_with(events, &(&1 == ": keepalive"))
+    assert length(keepalives) >= 2
+
+    messages =
+      Enum.map(data, fn event ->
+        event |> String.split("data: ", parts: 2) |> List.last() |> Jason.decode!()
+      end)
+
+    assert Enum.map(messages, & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             nil
+           ]
+
+    assert List.last(events) == List.last(data)
+    assert List.last(messages)["id"] == 150
+    assert get_in(List.last(messages), ["result", "resultType"]) == "complete"
+
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :stream, :close], _,
+                    %{transport: :http, outcome: :timeout}}
+
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert :ok = await_subscriptions(server, 0)
+  end
+
+  test "events do not extend an HTTP subscription past subscription_timeout" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    attach_telemetry([[:attesto_mcp_server, :subscription, :open]])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        subscription_timeout: 500,
+        auth: [config: config, resource: @resource]
+      )
+
+    started = System.monotonic_time(:millisecond)
+    {pid, monitor} = start_deadline_stream(plug, token, 151)
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :open], _, _}, 1_000
+    publisher = publish_tools_list_changed_every(server, 5)
+
+    # An event every 5 ms used to restart the 500 ms timeout in the same way.
+    assert_receive {:subscription_done, 151, conn, leftover}, 3_000
+    elapsed = System.monotonic_time(:millisecond) - started
+    stop_publisher(publisher)
+
+    assert elapsed >= 500
+    assert leftover == []
+    messages = stream_messages(conn)
+    assert hd(messages)["method"] == "notifications/subscriptions/acknowledged"
+
+    assert Enum.count(messages, &(&1["method"] == "notifications/tools/list_changed")) >= 2
+
+    assert List.last(messages)["id"] == 151
+    assert get_in(List.last(messages), ["result", "resultType"]) == "complete"
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert :ok = await_subscriptions(server, 0)
+  end
+
+  test "an HTTP listen whose dispatch outlasts subscription_timeout ends at once with its acknowledgement" do
+    # The progress notification is buffered ahead of the acknowledgement.
+    {:ok, server} =
+      Server.start_link(
+        handler_task_init: fn _caller, context ->
+          :ok = context.progress.("listen-progress", 1, nil)
+          Process.sleep(100)
+          :ok
+        end
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        stream_keepalive_ms: 5,
+        subscription_timeout: 20,
+        auth: [config: config, resource: @resource]
+      )
+
+    {pid, monitor} =
+      start_buffered_stream(plug, token, 153, [{:mcp_subscription_backpressure, 153}])
+
+    # Dispatch takes 100 ms, past the 20 ms deadline, so the stream writes only
+    # the acknowledgement and the final response and ends without waiting.
+    assert_receive {:subscription_done, 153, conn, leftover}, 2_000
+    assert leftover == []
+
+    assert Enum.map(stream_messages(conn), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             nil
+           ]
+
+    assert List.last(stream_messages(conn))["id"] == 153
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert :ok = await_subscriptions(server, 0)
+  end
+
+  test "an HTTP listen whose dispatch fails after subscription_timeout leaves nothing queued" do
+    {:ok, server} =
+      Server.start_link(
+        request_timeout: 100,
+        handler_task_init: fn _caller, context ->
+          :ok = context.progress.("listen-progress", 1, nil)
+          :ok = context.progress.("listen-progress", 2, nil)
+          Process.sleep(300)
+          :ok
+        end
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        subscription_timeout: 20,
+        auth: [config: config, resource: @resource]
+      )
+
+    {pid, monitor} = start_buffered_stream(plug, token, 154, [])
+
+    # Dispatch times out at 100 ms with an error and no subscription. Past the
+    # deadline the buffered progress is dropped, not written or left queued.
+    assert_receive {:subscription_done, 154, conn, leftover}, 2_000
+    assert leftover == []
+    refute conn.resp_body =~ "notifications/progress"
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "an HTTP listen whose client disconnects during the flush leaves nothing queued" do
+    {:ok, server} =
+      Server.start_link(
+        request_timeout: 100,
+        handler_task_init: fn _caller, context ->
+          :ok = context.progress.("listen-progress", 1, nil)
+          :ok = context.progress.("listen-progress", 2, nil)
+          Process.sleep(300)
+          :ok
+        end
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    # The first progress write fails; the second progress is still buffered.
+    {pid, monitor} =
+      start_buffered_stream(plug, token, 155, [], &ClosingAdapter.wrap(&1, 0))
+
+    assert_receive {:subscription_done, 155, _conn, leftover}, 2_000
+    assert leftover == []
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "an HTTP listen whose dispatch fails after its subscription opened closes that subscription" do
+    {:ok, server} = Server.start_link(request_timeout: 50)
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    parent = self()
+    handler_id = {__MODULE__, :slow_subscription_open, make_ref()}
+
+    # Runs inside the subscription registry after it sends the acknowledgement,
+    # so the open outlasts the 50 ms request timeout and dispatch fails.
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:attesto_mcp_server, :subscription, :open],
+        &__MODULE__.sleep_handler/4,
+        200
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    pid =
+      spawn(fn ->
+        conn =
+          plug
+          |> listen_conn(token, 156, %{"toolsListChanged" => true})
+          |> AttestoMCP.Server.Plug.call(plug)
+
+        # Still the subscription's owner, so only an explicit close removes it.
+        send(parent, {:subscription_done, 156, conn, Server.stats(server).subscriptions})
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    monitor = Process.monitor(pid)
+
+    assert_receive {:subscription_done, 156, conn, open_subscriptions}, 2_000
+    assert open_subscriptions == 0
+    assert hd(stream_messages(conn))["method"] == "notifications/subscriptions/acknowledged"
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "an HTTP listen whose client disconnects after a successful dispatch closes its subscription at once" do
+    # The progress notification is buffered ahead of the acknowledgement, so
+    # the failed write carries no subscription id.
+    {:ok, server} =
+      Server.start_link(
+        handler_task_init: fn _caller, context ->
+          :ok = context.progress.("listen-progress", 1, nil)
+          :ok
+        end
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    parent = self()
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    request = %{
+      "jsonrpc" => "2.0",
+      "id" => 157,
+      "method" => "subscriptions/listen",
+      "params" => %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => @version,
+          "io.modelcontextprotocol/clientCapabilities" => %{},
+          "progressToken" => "listen-progress"
+        },
+        "notifications" => %{"toolsListChanged" => true}
+      }
+    }
+
+    pid =
+      spawn(fn ->
+        conn(:post, "/mcp", Jason.encode!(request))
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("accept", "application/json, text/event-stream")
+        |> put_req_header("mcp-protocol-version", @version)
+        |> put_req_header("mcp-method", "subscriptions/listen")
+        |> ClosingAdapter.wrap(0)
+        |> AttestoMCP.Server.Plug.call(plug)
+
+        {:messages, messages} = Process.info(self(), :messages)
+        leftover = Enum.filter(messages, &subscription_message?/1)
+        send(parent, {:subscription_done, 157, Server.stats(server).subscriptions, leftover})
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    monitor = Process.monitor(pid)
+
+    # Keepalives are 15 s apart, so waiting for one to fail would miss this.
+    assert_receive {:subscription_done, 157, open_subscriptions, leftover}, 2_000
+    assert open_subscriptions == 0
+    assert leftover == []
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "a failed HTTP listen leaves the same process's other subscription with that id open" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    parent = self()
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    params = %{
+      "_meta" => %{
+        "io.modelcontextprotocol/protocolVersion" => @version,
+        "io.modelcontextprotocol/clientCapabilities" => %{}
+      },
+      "notifications" => %{"toolsListChanged" => true}
+    }
+
+    pid =
+      spawn(fn ->
+        # A custom transport in this process already holds subscription 158.
+        {158, %{"result" => _}} =
+          Server.dispatch(
+            server,
+            %{kind: :request, id: 158, method: "subscriptions/listen", params: params},
+            %{principal: "shared-owner", scopes: [AttestoMCP.Scopes.tools_read()]},
+            version: @version
+          )
+
+        conn =
+          plug
+          |> listen_conn(token, 158, %{"toolsListChanged" => true})
+          |> AttestoMCP.Server.Plug.call(plug)
+
+        send(parent, {:subscription_done, 158, conn, Server.stats(server).subscriptions})
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    monitor = Process.monitor(pid)
+
+    assert_receive {:subscription_done, 158, conn, open_subscriptions}, 2_000
+    refute conn.resp_body =~ "subscriptions/acknowledged"
+    assert open_subscriptions == 1
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "an HTTP listen whose acknowledgement write fails leaves nothing queued" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    # The failed acknowledgement write closes the subscription itself, so the
+    # stream's own cleanup finds nothing left to close.
+    {pid, monitor} =
+      start_buffered_stream(
+        plug,
+        token,
+        159,
+        [{:mcp_subscription_backpressure, 159}],
+        &ClosingAdapter.wrap(&1, 0)
+      )
+
+    assert_receive {:subscription_done, 159, _conn, leftover}, 2_000
+    assert leftover == []
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert :ok = await_subscriptions(server, 0)
+  end
+
+  test "an HTTP subscription event that reaches the stream after its deadline is not written" do
+    {:ok, server} = Server.start_link([])
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        subscription_timeout: 1_000,
+        auth: [config: config, resource: @resource]
+      )
+
+    started = System.monotonic_time(:millisecond)
+    {pid, monitor} = start_deadline_stream(plug, token, 160)
+    on_exit(fn -> resume_quietly(pid) end)
+
+    # The stream waits for messages with an event already queued and resumes
+    # past its deadline, as a long scheduler delay would leave it.
+    assert :ok = await_waiting_in(pid, {AttestoMCP.Server.Plug, :await_subscription_message, 8})
+    :erlang.suspend_process(pid)
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+
+    assert :ok =
+             await_message_queued(
+               pid,
+               &match?(
+                 {:mcp_subscription, _, 160, %{"method" => "notifications/tools/list_changed"}},
+                 &1
+               )
+             )
+
+    assert System.monotonic_time(:millisecond) - started < 1_000
+    # The deadline was set before the stream reached its receive, so a full
+    # timeout from here is past it.
+    Process.sleep(1_200)
+    :erlang.resume_process(pid)
+
+    assert_receive {:subscription_done, 160, conn, leftover}, 2_000
+    assert leftover == []
+
+    assert Enum.map(stream_messages(conn), & &1["method"]) == [
+             "notifications/subscriptions/acknowledged",
+             nil
+           ]
+
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert :ok = await_subscriptions(server, 0)
+  end
+
+  test "a failed HTTP listen whose subscription something else closed leaves nothing queued" do
+    {:ok, server} = Server.start_link(request_timeout: 50)
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    handler_id = {__MODULE__, :closed_elsewhere, make_ref()}
+
+    # The open outlasts the 50 ms request timeout, so dispatch fails after the
+    # acknowledgement has gone out.
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:attesto_mcp_server, :subscription, :open],
+        &__MODULE__.notify_then_sleep_handler/4,
+        {self(), 200}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    {pid, monitor} =
+      start_buffered_stream(plug, token, 161, [{:mcp_subscription_backpressure, 161}])
+
+    # Queued in the registry ahead of the stream's own cleanup, this close
+    # removes the subscription and sends its close notice to the stream.
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :open], _, _}, 1_000
+    assert :ok = Server.close_subscription(server, 161, pid)
+
+    assert_receive {:subscription_done, 161, conn, leftover}, 2_000
+    assert leftover == []
+    assert hd(stream_messages(conn))["method"] == "notifications/subscriptions/acknowledged"
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "an HTTP listen closed elsewhere whose client disconnects before its acknowledgement leaves nothing queued" do
+    # The progress notification is buffered ahead of the acknowledgement, and
+    # its write fails, so the acknowledgement is never read.
+    {:ok, server} =
+      Server.start_link(
+        handler_task_init: fn _caller, context ->
+          :ok = context.progress.("listen-progress", 1, nil)
+          :ok
+        end
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    handler_id = {__MODULE__, :closed_elsewhere_unread, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:attesto_mcp_server, :subscription, :open],
+        &__MODULE__.notify_then_sleep_handler/4,
+        {self(), 200}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    {pid, monitor} =
+      start_buffered_stream(
+        plug,
+        token,
+        162,
+        [{:mcp_subscription_backpressure, 162}],
+        &ClosingAdapter.wrap(&1, 0)
+      )
+
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :open], _, _}, 1_000
+    assert :ok = Server.close_subscription(server, 162, pid)
+
+    assert_receive {:subscription_done, 162, _conn, leftover}, 2_000
+    assert leftover == []
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "a failed HTTP listen keeps the close notice of another subscription its process held under that id" do
+    # Only the HTTP listen's dispatch is slow, so it times out before opening.
+    {:ok, server} =
+      Server.start_link(
+        request_timeout: 50,
+        handler_task_init: fn _caller, context ->
+          if context[:principal] != "shared-owner", do: Process.sleep(200)
+          :ok
+        end
+      )
+
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    parent = self()
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    params = %{
+      "_meta" => %{
+        "io.modelcontextprotocol/protocolVersion" => @version,
+        "io.modelcontextprotocol/clientCapabilities" => %{}
+      },
+      "notifications" => %{"toolsListChanged" => true}
+    }
+
+    pid =
+      spawn(fn ->
+        # A custom transport in this process holds subscription 163, which
+        # something else then closes, leaving its close notice here.
+        {163, %{"result" => _}} =
+          Server.dispatch(
+            server,
+            %{kind: :request, id: 163, method: "subscriptions/listen", params: params},
+            %{principal: "shared-owner", scopes: [AttestoMCP.Scopes.tools_read()]},
+            version: @version
+          )
+
+        send(parent, {:custom_subscription_open, self()})
+
+        receive do
+          :custom_subscription_closed -> :ok
+        end
+
+        _conn =
+          plug
+          |> listen_conn(token, 163, %{"toolsListChanged" => true})
+          |> AttestoMCP.Server.Plug.call(plug)
+
+        {:messages, messages} = Process.info(self(), :messages)
+        send(parent, {:subscription_done, 163, {:mcp_subscription_close, 163} in messages})
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    monitor = Process.monitor(pid)
+
+    assert_receive {:custom_subscription_open, ^pid}, 1_000
+    assert :ok = Server.close_subscription(server, 163, pid)
+    send(pid, :custom_subscription_closed)
+
+    assert_receive {:subscription_done, 163, close_notice_kept?}, 2_000
+    assert close_notice_kept?
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  test "a failed HTTP listen whose open was still queued at cleanup leaves nothing queued" do
+    {:ok, server} = Server.start_link(request_timeout: 300)
+    config = AttestoMCP.Test.Factory.config()
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+    parent = self()
+    registry = GenServer.call(server, :subscriptions)
+
+    plug =
+      AttestoMCP.Server.Plug.init(
+        server: server,
+        path: "/mcp",
+        auth: [config: config, resource: @resource]
+      )
+
+    # The registry stalls with the listen's open queued, then an outside
+    # close, then the stream's own cleanup after dispatch times out.
+    :ok = :sys.suspend(registry)
+    on_exit(fn -> if Process.alive?(registry), do: :sys.resume(registry) end)
+    {pid, monitor} = start_buffered_stream(plug, token, 164, [])
+    assert :ok = await_queue_length(registry, 1)
+    spawn(fn -> send(parent, {:outside_close, Server.close_subscription(server, 164, pid)}) end)
+    assert :ok = await_queue_length(registry, 2)
+    assert :ok = await_queue_length(registry, 3)
+    {:messages, queued} = Process.info(registry, :messages)
+
+    assert [
+             {:"$gen_call", _, {:open, 164, _, _, _, _, _, _, _}},
+             {:"$gen_call", _, {:close, 164, ^pid}},
+             {:"$gen_call", _, {:close_tagged, 164, ^pid, _}}
+           ] = queued
+
+    :ok = :sys.resume(registry)
+
+    assert_receive {:outside_close, :ok}, 2_000
+    assert_receive {:subscription_done, 164, _conn, leftover}, 2_000
+    assert leftover == []
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+  end
+
+  defp await_queue_length(pid, length, attempts \\ 400)
+
+  defp await_queue_length(_pid, _length, 0), do: {:error, :timeout}
+
+  defp await_queue_length(pid, length, attempts) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, queued} when queued >= length ->
+        :ok
+
+      _ ->
+        Process.sleep(5)
+        await_queue_length(pid, length, attempts - 1)
+    end
+  end
+
+  defp await_waiting_in(pid, mfa, attempts \\ 400)
+
+  defp await_waiting_in(_pid, _mfa, 0), do: {:error, :timeout}
+
+  defp await_waiting_in(pid, mfa, attempts) do
+    case Process.info(pid, [:current_function, :status]) do
+      [current_function: ^mfa, status: :waiting] ->
+        :ok
+
+      _ ->
+        Process.sleep(5)
+        await_waiting_in(pid, mfa, attempts - 1)
+    end
+  end
+
+  # Waits until a message matching `queued?` is in the process's mailbox.
+  defp await_message_queued(pid, queued?, attempts \\ 400)
+
+  defp await_message_queued(_pid, _queued?, 0), do: {:error, :timeout}
+
+  defp await_message_queued(pid, queued?, attempts) do
+    {:messages, messages} = Process.info(pid, :messages)
+
+    if Enum.any?(messages, queued?) do
+      :ok
+    else
+      Process.sleep(5)
+      await_message_queued(pid, queued?, attempts - 1)
+    end
+  end
+
+  defp resume_quietly(pid) do
+    :erlang.resume_process(pid)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # Like start_deadline_stream/3, with a progress token on the listen and
+  # messages already in the stream process's mailbox before it starts. They
+  # stand in for messages that reached the stream for this subscription and
+  # were still queued when its deadline passed.
+  defp start_buffered_stream(plug, token, id, queued, wrap \\ & &1) do
+    parent = self()
+
+    request = %{
+      "jsonrpc" => "2.0",
+      "id" => id,
+      "method" => "subscriptions/listen",
+      "params" => %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => @version,
+          "io.modelcontextprotocol/clientCapabilities" => %{},
+          "progressToken" => "listen-progress"
+        },
+        "notifications" => %{"toolsListChanged" => true}
+      }
+    }
+
+    pid =
+      spawn(fn ->
+        Enum.each(queued, &send(self(), &1))
+
+        conn =
+          conn(:post, "/mcp", Jason.encode!(request))
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("accept", "application/json, text/event-stream")
+          |> put_req_header("mcp-protocol-version", @version)
+          |> put_req_header("mcp-method", "subscriptions/listen")
+          |> wrap.()
+          |> AttestoMCP.Server.Plug.call(plug)
+
+        {:messages, messages} = Process.info(self(), :messages)
+
+        send(
+          parent,
+          {:subscription_done, id, conn, Enum.filter(messages, &subscription_message?/1)}
+        )
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    {pid, Process.monitor(pid)}
+  end
+
+  # Runs one listen in its own process. When the stream ends, that process
+  # reports the response and any subscription messages left in its mailbox.
+  defp start_deadline_stream(plug, token, id) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        conn =
+          plug
+          |> listen_conn(token, id, %{"toolsListChanged" => true})
+          |> AttestoMCP.Server.Plug.call(plug)
+
+        {:messages, messages} = Process.info(self(), :messages)
+
+        send(
+          parent,
+          {:subscription_done, id, conn, Enum.filter(messages, &subscription_message?/1)}
+        )
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    {pid, Process.monitor(pid)}
+  end
+
+  defp subscription_message?(message) when is_tuple(message) and tuple_size(message) > 0 do
+    elem(message, 0) in [
+      :mcp_subscription,
+      :mcp_subscription_pre_ack,
+      :mcp_subscription_backpressure,
+      :mcp_subscription_keepalive,
+      :mcp_subscription_close,
+      :mcp_subscription_cancel
+    ]
+  end
+
+  defp subscription_message?(_message), do: false
+
+  defp attach_telemetry(events) do
+    handler_id = {__MODULE__, :deadline, make_ref()}
+    :ok = :telemetry.attach_many(handler_id, events, &__MODULE__.telemetry_handler/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp publish_tools_list_changed_every(server, interval_ms) do
+    spawn_link(fn -> publish_tools_list_changed_loop(server, interval_ms) end)
+  end
+
+  defp publish_tools_list_changed_loop(server, interval_ms) do
+    receive do
+      :stop -> :ok
+    after
+      interval_ms ->
+        :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+        publish_tools_list_changed_loop(server, interval_ms)
+    end
+  end
+
+  defp stop_publisher(publisher) do
+    monitor = Process.monitor(publisher)
+    send(publisher, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^publisher, :normal}, 1_000
   end
 
   defp start_stream(parent, plug, token, id, filter) do

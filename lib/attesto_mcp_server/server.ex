@@ -719,6 +719,15 @@ defmodule AttestoMCP.Server do
     end
   end
 
+  @doc false
+  def close_request_subscription(server, id, owner, tag) do
+    try do
+      Subscriptions.close_tagged(GenServer.call(server, :subscriptions), id, owner, tag)
+    catch
+      :exit, _ -> :unknown
+    end
+  end
+
   def cancel_subscription(server, id), do: cancel_subscription(server, id, self())
 
   def cancel_subscription(server, id, owner) do
