@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.1.1 - 2026-11-04
+
+- `subscription_timeout` now bounds the lifetime of a `subscriptions/listen`
+  stream, counted from when the listen request is dispatched, on HTTP and
+  stdio. Before, every keepalive and every notification restarted it, so an
+  HTTP listen stream with keepalives (every 15 seconds by default) never
+  reached it and stayed open until the client or a proxy cut the connection,
+  and a stdio listen receiving notifications more often than the timeout
+  never ended either. At the deadline the server closes the subscription and
+  sends the listen request's final response, as the timeout path already
+  did; a client that wants further notifications opens a new listen. With
+  the 300000 ms default, listen streams now end after five minutes. The
+  deadline is enforced once dispatch returns, so a dispatch that itself runs
+  longer (bounded by `request_timeout`) delays the end by that much. When a
+  proxy or hosting platform caps request duration, set
+  `subscription_timeout` below that cap, with room for the time the request
+  spends before and during dispatch. The option is now described in the usage guide and the
+  Plug documentation.
+- On HTTP, a listen whose client disconnects, or whose dispatch fails after
+  its subscription opened (a request timeout, for example), no longer leaves
+  the subscription registered or its queued messages in the connection
+  process, which may go on to serve further requests.
+
 ## 3.1.0 - 2026-10-31
 
 - A `{module, function, extra_args}` host callback with a non-empty

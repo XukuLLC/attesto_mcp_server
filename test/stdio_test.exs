@@ -6,6 +6,10 @@ defmodule AttestoMCP.Server.StdioTest do
   alias AttestoMCP.Server
   alias AttestoMCP.Server.Stdio
 
+  def telemetry_handler(event, measurements, metadata, parent) do
+    send(parent, {:telemetry_event, event, measurements, metadata})
+  end
+
   defmodule ErrorReplyServer do
     @moduledoc false
     use GenServer
@@ -639,6 +643,216 @@ defmodule AttestoMCP.Server.StdioTest do
     refute Process.alive?(runner)
   end
 
+  test "events do not extend a stdio subscription past subscription_timeout" do
+    {:ok, server} = Server.start_link(max_concurrency: 4)
+    parent = self()
+    handler_id = {__MODULE__, :stdio_deadline, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:attesto_mcp_server, :subscription, :open],
+          [:attesto_mcp_server, :subscription, :close]
+        ],
+        &__MODULE__.telemetry_handler/4,
+        parent
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    request = %{
+      jsonrpc: "2.0",
+      id: 72,
+      method: "subscriptions/listen",
+      params: %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        },
+        "notifications" => %{"toolsListChanged" => true}
+      }
+    }
+
+    {:ok, step} = Agent.start_link(fn -> 0 end)
+
+    # The reader gives up after five seconds, so a failed test leaves no
+    # blocked reader behind.
+    input = fn ->
+      case Agent.get_and_update(step, fn
+             0 -> {Jason.encode!(request) <> "\n", 1}
+             1 -> {:wait, 2}
+             2 -> {:eof, 2}
+           end) do
+        :wait ->
+          send(parent, {:stdio_input_waiting, self()})
+
+          receive do
+            :continue -> :eof
+          after
+            5_000 -> :eof
+          end
+
+        value ->
+          value
+      end
+    end
+
+    started = System.monotonic_time(:millisecond)
+
+    runner =
+      spawn(fn ->
+        output =
+          capture_io(fn ->
+            Stdio.run(server,
+              principal: "stdio-deadline",
+              scopes: [AttestoMCP.Scopes.tools_read()],
+              input: input,
+              subscription_timeout: 500
+            )
+          end)
+
+        send(parent, {:stdio_deadline_output, output})
+      end)
+
+    on_exit(fn -> Process.exit(runner, :kill) end)
+    runner_monitor = Process.monitor(runner)
+
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :open], _, _}, 1_000
+    publisher = publish_tools_list_changed_every(server, 5)
+
+    # An event every 5 ms used to restart the 500 ms timeout, so the
+    # subscription stayed open for as long as events arrived.
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :close], _, _}, 3_000
+    assert System.monotonic_time(:millisecond) - started >= 500
+
+    assert_receive {:stdio_input_waiting, input_pid}, 1_000
+    send(input_pid, :continue)
+    assert_receive {:stdio_deadline_output, output}, 2_000
+    stop_publisher(publisher)
+
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert hd(messages)["method"] == "notifications/subscriptions/acknowledged"
+
+    assert Enum.count(messages, &(&1["method"] == "notifications/tools/list_changed")) >= 2
+
+    assert List.last(messages)["id"] == 72
+    assert get_in(List.last(messages), ["result", "resultType"]) == "complete"
+    assert_receive {:DOWN, ^runner_monitor, :process, ^runner, :normal}, 1_000
+  end
+
+  test "a stdio subscription event the writer reaches after the deadline is not written" do
+    {:ok, server} = Server.start_link(max_concurrency: 4)
+    parent = self()
+    handler_id = {__MODULE__, :stdio_late_event, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:attesto_mcp_server, :subscription, :open],
+          [:attesto_mcp_server, :subscription, :close]
+        ],
+        &__MODULE__.telemetry_handler/4,
+        parent
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    request = %{
+      jsonrpc: "2.0",
+      id: 73,
+      method: "subscriptions/listen",
+      params: %{
+        "_meta" => %{
+          "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities" => %{}
+        },
+        "notifications" => %{"toolsListChanged" => true}
+      }
+    }
+
+    {:ok, step} = Agent.start_link(fn -> 0 end)
+
+    input = fn ->
+      case Agent.get_and_update(step, fn
+             0 -> {Jason.encode!(request) <> "\n", 1}
+             1 -> {:wait, 2}
+             2 -> {:eof, 2}
+           end) do
+        :wait ->
+          send(parent, {:stdio_input_waiting, self()})
+
+          receive do
+            :continue -> :eof
+          after
+            5_000 -> :eof
+          end
+
+        value ->
+          value
+      end
+    end
+
+    started = System.monotonic_time(:millisecond)
+
+    runner =
+      spawn(fn ->
+        output =
+          capture_io(fn ->
+            Stdio.run(server,
+              principal: "stdio-late-event",
+              scopes: [AttestoMCP.Scopes.tools_read()],
+              input: input,
+              subscription_timeout: 1_000
+            )
+          end)
+
+        send(parent, {:stdio_late_event_output, output})
+      end)
+
+    on_exit(fn -> Process.exit(runner, :kill) end)
+    on_exit(fn -> resume_quietly(runner) end)
+    runner_monitor = Process.monitor(runner)
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :open], _, _}, 1_000
+    assert_receive {:stdio_input_waiting, input_pid}, 1_000
+
+    # The writer is descheduled while the worker hands it an event, and resumes
+    # only after the worker's deadline has closed the subscription.
+    assert :ok = await_waiting_in(runner, {AttestoMCP.Server.Stdio, :loop, 7})
+    :erlang.suspend_process(runner)
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+
+    assert :ok =
+             await_message_queued(runner, fn
+               {:stdio_subscription_event, _, 73,
+                %{"method" => "notifications/tools/list_changed"}} ->
+                 true
+
+               {:stdio_event, _, %{"method" => "notifications/tools/list_changed"}} ->
+                 true
+
+               _ ->
+                 false
+             end)
+
+    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert_receive {:telemetry_event, [:attesto_mcp_server, :subscription, :close], _, _}, 3_000
+    :erlang.resume_process(runner)
+
+    send(input_pid, :continue)
+    assert_receive {:stdio_late_event_output, output}, 2_000
+
+    messages = output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.map(messages, &(&1["method"] || &1["id"])) == [
+             "notifications/subscriptions/acknowledged",
+             73
+           ]
+
+    assert_receive {:DOWN, ^runner_monitor, :process, ^runner, :normal}, 1_000
+  end
+
   test "an unknown stdio cancellation cannot cancel another owner's subscription" do
     {:ok, server} = Server.start_link(max_concurrency: 4)
     parent = self()
@@ -1102,5 +1316,62 @@ defmodule AttestoMCP.Server.StdioTest do
           }
         }) <> "\n"
     end
+  end
+
+  defp await_waiting_in(pid, mfa, attempts \\ 400)
+
+  defp await_waiting_in(_pid, _mfa, 0), do: {:error, :timeout}
+
+  defp await_waiting_in(pid, mfa, attempts) do
+    case Process.info(pid, [:current_function, :status]) do
+      [current_function: ^mfa, status: :waiting] ->
+        :ok
+
+      _ ->
+        Process.sleep(5)
+        await_waiting_in(pid, mfa, attempts - 1)
+    end
+  end
+
+  # Waits until a message matching `queued?` is in the process's mailbox.
+  defp await_message_queued(pid, queued?, attempts \\ 400)
+
+  defp await_message_queued(_pid, _queued?, 0), do: {:error, :timeout}
+
+  defp await_message_queued(pid, queued?, attempts) do
+    {:messages, messages} = Process.info(pid, :messages)
+
+    if Enum.any?(messages, queued?) do
+      :ok
+    else
+      Process.sleep(5)
+      await_message_queued(pid, queued?, attempts - 1)
+    end
+  end
+
+  defp resume_quietly(pid) do
+    :erlang.resume_process(pid)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp publish_tools_list_changed_every(server, interval_ms) do
+    spawn_link(fn -> publish_tools_list_changed_loop(server, interval_ms) end)
+  end
+
+  defp publish_tools_list_changed_loop(server, interval_ms) do
+    receive do
+      :stop -> :ok
+    after
+      interval_ms ->
+        :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+        publish_tools_list_changed_loop(server, interval_ms)
+    end
+  end
+
+  defp stop_publisher(publisher) do
+    monitor = Process.monitor(publisher)
+    send(publisher, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^publisher, :normal}, 1_000
   end
 end

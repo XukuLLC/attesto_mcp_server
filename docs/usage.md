@@ -1549,6 +1549,20 @@ delivery rechecks that opening union plus its notification requirements;
 resource updates also require `resources_read` and any matched definition
 scopes.
 
+A listen stream lasts `subscription_timeout` milliseconds (default 300000,
+five minutes), counted from when the listen request is dispatched.
+Keepalives and notifications do not extend it. At the deadline the server
+closes the subscription and sends the listen request's final response; a
+client that wants further notifications opens a new listen. The deadline is
+enforced once dispatch returns, so a dispatch that itself runs longer (a
+slow `handler_task_init`, for example, bounded by `request_timeout`) delays
+the end by that much. Set it as a server or Plug option (the Plug value
+takes precedence over the server's), or pass it to `Stdio.run/2`. When a
+proxy or hosting platform caps the total duration of a request, set
+`subscription_timeout` below that cap, with room for the time the request
+spends before and during dispatch, so the stream ends with its final
+response instead of being cut off.
+
 Stdio hosts supply granted scopes through `Stdio.run/2`'s `:scopes` option or
 the context map. Custom transports put the granted scope list in the dispatch
 context. Direct callers of `Subscriptions.open/9` and
