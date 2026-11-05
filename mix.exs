@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "3.1.1"
+  @version "3.1.2"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -89,7 +89,7 @@ defmodule AttestoMCP.Server.MixProject do
     end
   end
 
-  defp hex_attesto_mcp_dep, do: {:attesto_mcp, ">= 1.3.0 and < 3.0.0"}
+  defp hex_attesto_mcp_dep, do: {:attesto_mcp, ">= 2.2.3 and < 3.0.0"}
 
   defp source_checkout?(path) when is_binary(path) do
     marker = Path.join(path, ".git")

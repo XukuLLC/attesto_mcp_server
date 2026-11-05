@@ -530,10 +530,10 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     id = 115
     pid = start_stream(self(), plug, token, id, %{"toolsListChanged" => true})
 
-    assert_receive {:null_client_principal, :null}, 1_000
+    assert_receive {:null_client_principal, nil}, 1_000
     assert :ok = await_subscriptions(server, 1)
     assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
-    assert_receive {:null_client_principal, :null}, 1_000
+    assert_receive {:null_client_principal, nil}, 1_000
     Server.close_subscription(server, id, pid)
 
     assert_receive {:subscription_done, ^id, conn}, 2_000
