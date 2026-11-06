@@ -47,16 +47,16 @@ jobs:
           elixir-version: "1.18.3"
           otp-version: "27.3.4.19"
           version-type: strict
-      - name: Pin the package test graph to AttestoMCP 2.2.3
+      - name: Pin the package test graph to AttestoMCP 1.3.0
         run: |
-          sed -i 's/>= 2.2.3 and < 3.0.0/== 2.2.3/' mix.exs
+          sed -i 's/>= 1.3.0 and < 3.0.0/== 1.3.0/' mix.exs
           mix deps.unlock attesto_mcp attesto
           mix deps.get
       - name: Verify and exercise the retained minimum
         run: |
           mix run --no-start -e '
             actual = Application.spec(:attesto_mcp, :vsn) |> to_string()
-            unless actual == "2.2.3", do: raise("expected attesto_mcp 2.2.3, resolved #{actual}")
+            unless actual == "1.3.0", do: raise("expected attesto_mcp 1.3.0, resolved #{actual}")
           '
           mix compile --warnings-as-errors
           mix test test/header_name_test.exs test/scope_map_test.exs test/plug_auth_test.exs
@@ -74,7 +74,7 @@ jobs:
         run: |
           mix deps.get
           mix run --no-start -e '
-            expected = [attesto: ">= 2.11.0 and < 3.0.0", attesto_mcp: ">= 2.2.3 and < 3.0.0"]
+            expected = [attesto: ">= 1.12.2 and < 3.0.0", attesto_mcp: ">= 1.3.0 and < 3.0.0"]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
               unless Version.match?(actual, requirement),
@@ -185,7 +185,7 @@ jobs:
       - name: verify released Attesto dependency ranges
         run: |
           mix run --no-start -e '
-            expected = [attesto: ">= 2.11.0 and < 3.0.0", attesto_mcp: ">= 2.2.3 and < 3.0.0"]
+            expected = [attesto: ">= 1.12.2 and < 3.0.0", attesto_mcp: ">= 1.3.0 and < 3.0.0"]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
               unless Version.match?(actual, requirement),
@@ -292,7 +292,7 @@ jobs:
       - name: verify released Attesto dependency ranges
         run: |
           mix run --no-start -e '
-            expected = [attesto: ">= 2.11.0 and < 3.0.0", attesto_mcp: ">= 2.2.3 and < 3.0.0"]
+            expected = [attesto: ">= 1.12.2 and < 3.0.0", attesto_mcp: ">= 1.3.0 and < 3.0.0"]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
               unless Version.match?(actual, requirement),

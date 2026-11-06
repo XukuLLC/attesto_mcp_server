@@ -2,12 +2,13 @@
 
 ## 3.1.2 - 2026-11-05
 
-- Require AttestoMCP 2.2.3 or later, which requires Attesto 2.11.0. Earlier
-  Attesto releases could accept a `"cnf": null` access token as an unbound
-  bearer token under the Jason or Poison JOSE backend.
-- Claims passed to host callbacks carry JSON `null` as `nil` whichever JSON
-  backend JOSE uses, following Attesto 2.11.0. Under JOSE's builtin OTP backend
-  they previously carried `:null`.
+- Hosts should update to Attesto 2.11.0 or later. Earlier Attesto releases
+  could accept a `"cnf": null` access token as an unbound bearer token under the
+  Jason or Poison JOSE backend. The supported dependency ranges are unchanged so
+  that hosts on Attesto 1.x and AttestoPhoenix 2.x keep resolving.
+- With Attesto 2.11.0, claims passed to host callbacks carry JSON `null` as
+  `nil` whichever JSON backend JOSE uses. Under JOSE's builtin OTP backend they
+  previously carried `:null`.
 
 ## 3.1.1 - 2026-11-04
 
