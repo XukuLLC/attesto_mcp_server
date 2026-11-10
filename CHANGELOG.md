@@ -12,6 +12,16 @@
   process, ending every session and stream it served. A late acknowledgement
   is now ignored. The `subscriptions/listen` registry ignores late
   acknowledgements in the same way.
+- For `resources/read`, the `Mcp-Name` header was compared against
+  `params.name` when the body carried one and against `params.uri` only
+  otherwise, while the read itself uses `params.uri`. A request with
+  `Mcp-Name: urn:public`, `params.name: "urn:public"` and
+  `params.uri: "urn:secret"` was accepted and returned `urn:secret`, so an
+  intermediary that routes or authorizes on the header saw a different
+  resource from the one read. `Mcp-Name` is now compared against
+  `params.uri` for `resources/read` and against `params.name` for
+  `tools/call` and `prompts/get`, as the usage guide documents; a mismatch
+  returns HTTP 400 with `body_header_mismatch`.
 
 ## 3.1.2 - 2026-11-05
 

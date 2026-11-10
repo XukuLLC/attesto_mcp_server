@@ -2785,9 +2785,13 @@ defmodule AttestoMCP.Server.Plug do
             ],
        do: params["taskId"]
 
+  # Mcp-Name mirrors the body field the method acts on, so an intermediary
+  # that routes or authorizes on the header sees the target that is used.
   defp request_name(%{params: params, method: method})
-       when method in ["tools/call", "resources/read", "prompts/get"],
-       do: params["name"] || params["uri"]
+       when method in ["tools/call", "prompts/get"],
+       do: params["name"]
+
+  defp request_name(%{params: params, method: "resources/read"}), do: params["uri"]
 
   defp request_name(_), do: nil
 

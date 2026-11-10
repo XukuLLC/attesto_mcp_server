@@ -76,6 +76,45 @@ defmodule AttestoMCP.Server.MirrorHeadersTest do
     end
   end
 
+  test "Mcp-Name mirrors only the body field the method acts on", %{
+    server: server,
+    config: config
+  } do
+    assert :ok =
+             Server.register_tool(server, "mirror-tool", %{
+               handler: fn _arguments, _context -> {:ok, "tool"} end
+             })
+
+    assert :ok =
+             Server.register_resource(server, "urn:mirror:secret", %{
+               handler: fn %{uri: uri}, _context ->
+                 {:ok, %{"contents" => [%{"uri" => uri, "text" => "secret"}]}}
+               end
+             })
+
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+    plug = selected_definition_plug(server, config)
+
+    cases = [
+      {"resources/read", %{"uri" => "urn:mirror:secret", "name" => "urn:mirror:decoy"},
+       "urn:mirror:secret", "urn:mirror:decoy"},
+      {"tools/call", %{"name" => "mirror-tool", "arguments" => %{}, "uri" => "urn:mirror:decoy"},
+       "mirror-tool", "urn:mirror:decoy"}
+    ]
+
+    for {method, params, target, decoy} <- cases do
+      accepted = selected_call(plug, token, method, params, target)
+      assert accepted.status == 200
+      assert %{"result" => _} = Jason.decode!(accepted.resp_body)
+
+      rejected = selected_call(plug, token, method, params, decoy)
+      assert rejected.status == 400
+
+      assert %{"error" => %{"code" => -32020, "data" => %{"reason" => "body_header_mismatch"}}} =
+               Jason.decode!(rejected.resp_body)
+    end
+  end
+
   test "modern protocol-version and method mirrors are required and exact", %{
     server: server,
     config: config
