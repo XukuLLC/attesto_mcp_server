@@ -414,6 +414,31 @@ defmodule AttestoMCP.Server.StateSubscriptionTest do
     send(other_sink, :stop)
   end
 
+  test "an acknowledgement for a closed subscription leaves it closed" do
+    {:ok, subscriptions} = Subscriptions.start_link([])
+
+    assert {:ok, id} =
+             Subscriptions.open(
+               subscriptions,
+               "alice",
+               nil,
+               "listen-1",
+               %{"toolsListChanged" => true},
+               self(),
+               :listen,
+               nil
+             )
+
+    assert_receive {:mcp_subscription, :listen, ^id, _acknowledgment}
+    assert :ok = Subscriptions.close(subscriptions, id, self())
+    Subscriptions.ack(subscriptions, id, self())
+
+    assert Subscriptions.stats(subscriptions) == %{count: 0, queued: 0}
+    assert :ok = Subscriptions.publish_sync(subscriptions, %{"type" => "toolsListChanged"})
+    refute_receive {:mcp_subscription, :listen, ^id, _event}, 25
+    assert Process.alive?(subscriptions)
+  end
+
   test "modern listen uses request id and sends acknowledgment before real notifications" do
     {:ok, server} = Server.start_link([])
     parent = self()

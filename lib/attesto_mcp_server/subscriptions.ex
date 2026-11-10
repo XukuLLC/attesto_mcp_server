@@ -174,32 +174,27 @@ defmodule AttestoMCP.Server.Subscriptions do
   def handle_cast({:ack, id, owner}, state) do
     key = find_key(state, id, owner)
 
-    state =
-      case key do
-        nil ->
-          state
+    # An acknowledgement can arrive after its subscription was closed; it
+    # must not recreate an entry for that key.
+    case state.subscriptions do
+      %{^key => %{queue_size: size} = subscription} when not is_nil(key) ->
+        next_size = max(size - 1, 0)
 
-        key ->
-          update_in(state.subscriptions[key], fn
-            nil ->
-              nil
+        subscription = %{
+          subscription
+          | queue_size: next_size,
+            overflowed:
+              if(next_size < (state.opts[:max_queue] || @max_queue),
+                do: false,
+                else: subscription.overflowed
+              )
+        }
 
-            %{queue_size: size} = subscription ->
-              next_size = max(size - 1, 0)
+        {:noreply, put_in(state.subscriptions[key], subscription)}
 
-              %{
-                subscription
-                | queue_size: next_size,
-                  overflowed:
-                    if(next_size < (state.opts[:max_queue] || @max_queue),
-                      do: false,
-                      else: subscription.overflowed
-                    )
-              }
-          end)
-      end
-
-    {:noreply, state}
+      _closed ->
+        {:noreply, state}
+    end
   end
 
   def handle_cast({:publish, notification, opts}, state) do

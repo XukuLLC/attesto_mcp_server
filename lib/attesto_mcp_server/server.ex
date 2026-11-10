@@ -1689,14 +1689,18 @@ defmodule AttestoMCP.Server do
     end
   end
 
+  # A connection process acknowledges each event after writing it, so an
+  # acknowledgement can arrive after its stream was closed (session deleted,
+  # backpressure close). It must not recreate an entry for that stream.
   def handle_cast({:ack_legacy_stream, stream_ref}, state) do
-    state =
-      update_in(state.legacy_streams[stream_ref], fn
-        nil -> nil
-        %{queue_size: queue_size} = stream -> %{stream | queue_size: max(queue_size - 1, 0)}
-      end)
+    case state.legacy_streams do
+      %{^stream_ref => %{queue_size: queue_size} = stream} ->
+        stream = %{stream | queue_size: max(queue_size - 1, 0)}
+        {:noreply, put_in(state.legacy_streams[stream_ref], stream)}
 
-    {:noreply, state}
+      _closed ->
+        {:noreply, state}
+    end
   end
 
   def handle_cast(_request, state), do: {:noreply, state}

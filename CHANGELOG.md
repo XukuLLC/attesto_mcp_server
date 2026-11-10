@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- A legacy SSE connection that acknowledged an event after its stream had
+  closed (the session was deleted, or the stream was closed for backpressure
+  while the client was not reading) left a `nil` entry in the server's stream
+  table. The next stream open, stream close or monitored process exit on the
+  same server raised `BadMapError` and stopped the `AttestoMCP.Server`
+  process, ending every session and stream it served. A late acknowledgement
+  is now ignored. The `subscriptions/listen` registry ignores late
+  acknowledgements in the same way.
+
 ## 3.1.2 - 2026-11-05
 
 - Hosts should update to Attesto 2.11.0 or later. Earlier Attesto releases

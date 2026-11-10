@@ -2,6 +2,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
   use ExUnit.Case, async: false
 
   alias AttestoMCP.Server
+  alias AttestoMCP.Server.TestSupport.Async
 
   @legacy "2025-11-25"
   @legacy_2025_06_18 "2025-06-18"
@@ -689,6 +690,69 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
       end)
 
     assert count == 100
+  end
+
+  test "late legacy stream acknowledgements leave closed streams closed" do
+    {:ok, server} = Server.start_link(stream_queue_size: 2)
+    scopes = [AttestoMCP.Scopes.tools_read()]
+
+    open = fn principal ->
+      {:ok, session} = Server.new_session(server, principal, nil)
+      assert :ok = Server.negotiate_session(server, session.id, principal, nil, @legacy, %{})
+      assert :ok = Server.mark_initialized(server, session.id)
+
+      assert {:ok, stream} =
+               Server.open_legacy_stream(server, session.id, principal, nil, self(), nil, scopes)
+
+      {session, stream}
+    end
+
+    # Session deleted while an event was still unacknowledged.
+    {deleted_session, deleted_stream} = open.("deleted")
+    assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+    assert_receive {:mcp_legacy_event, ^deleted_stream, _id, _event}, 1_000
+    assert :ok = Server.delete_session(server, deleted_session.id)
+    assert_receive {:mcp_legacy_close, ^deleted_stream, :session_deleted}, 1_000
+    Server.ack_legacy_stream(server, deleted_stream)
+
+    # Stream closed for backpressure, then the reader catches up.
+    {_session, slow_stream} = open.("slow")
+
+    for _ <- 1..3, do: assert(:ok = Server.publish(server, %{"type" => "toolsListChanged"}))
+
+    assert_receive {:mcp_legacy_close, ^slow_stream, :backpressure}, 1_000
+    for _ <- 1..3, do: Server.ack_legacy_stream(server, slow_stream)
+
+    assert Server.stats(server).legacy_streams == 0
+    refute Map.has_key?(:sys.get_state(server).legacy_streams, deleted_stream)
+    refute Map.has_key?(:sys.get_state(server).legacy_streams, slow_stream)
+
+    # Another principal's stream lifecycle, including the sink-down path
+    # that walks every open stream, still works on the same server.
+    {other_session, other_stream} = open.("other")
+    other_sink = spawn(fn -> Process.sleep(:infinity) end)
+
+    assert {:ok, _monitored} =
+             Server.open_legacy_stream(
+               server,
+               other_session.id,
+               "other",
+               nil,
+               other_sink,
+               nil,
+               scopes
+             )
+
+    Process.exit(other_sink, :kill)
+
+    assert Async.eventually(fn -> Server.stats(server).legacy_streams == 1 end,
+             attempts: 100,
+             final_check: true
+           )
+
+    assert :ok = Server.close_legacy_stream(server, other_stream)
+    assert Server.stats(server).legacy_streams == 0
+    assert Process.alive?(server)
   end
 
   test "legacy server requests return typed sampling, elicitation, and roots results" do
