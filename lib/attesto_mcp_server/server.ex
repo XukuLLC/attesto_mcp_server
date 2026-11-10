@@ -64,7 +64,11 @@ defmodule AttestoMCP.Server do
   @max_cluster_combined_scope_memberships 2_048
   @max_cluster_combined_scope_bytes 131_072
   @log_levels ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
-  @traceparent_pattern ~r/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
+  @traceparent_pattern ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})\z/
+  # W3C tracestate and baggage values are visible ASCII, spaces and tabs.
+  # Hosts forward them as outbound header values, so control characters
+  # (CR and LF in particular) and non-ASCII bytes are refused.
+  @trace_header_value_pattern ~r/\A[\t\x20-\x7E]*\z/
   @primitive_types [:tool, :resource, :template, :prompt, :completion]
   @cache_hint_fields ["ttlMs", "cacheScope"]
   @session_pg_scope AttestoMCP.Server.SessionCluster
@@ -4731,9 +4735,16 @@ defmodule AttestoMCP.Server do
           {:cont, :ok}
 
         {:ok, value} when is_binary(value) and byte_size(value) <= @max_trace_state_bytes ->
-          if key == "traceparent" and not valid_traceparent?(value),
-            do: {:halt, {:error, Error.invalid_params(%{"reason" => "invalid_traceparent"})}},
-            else: {:cont, :ok}
+          cond do
+            key == "traceparent" and not valid_traceparent?(value) ->
+              {:halt, {:error, Error.invalid_params(%{"reason" => "invalid_traceparent"})}}
+
+            not Regex.match?(@trace_header_value_pattern, value) ->
+              {:halt, {:error, Error.invalid_params(%{"reason" => "invalid_trace_context"})}}
+
+            true ->
+              {:cont, :ok}
+          end
 
         {:ok, _value} ->
           {:halt, {:error, Error.invalid_params(%{"reason" => "invalid_trace_context"})}}

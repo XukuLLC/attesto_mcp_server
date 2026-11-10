@@ -22,6 +22,15 @@
   `params.uri` for `resources/read` and against `params.name` for
   `tools/call` and `prompts/get`, as the usage guide documents; a mismatch
   returns HTTP 400 with `body_header_mismatch`.
+- The `traceparent` pattern used `^...$`, which also matches a value ending
+  in a newline, and `tracestate` and `baggage` were checked only for type
+  and length. A request could pass `"tracestate": "a=b\r\nX-Injected: 1"`
+  and a `traceparent` with a trailing `\n` through to
+  `context.trace_context`, which hosts forward as outbound header values.
+  `traceparent` is now matched against the whole value, and `tracestate`
+  and `baggage` must consist of visible ASCII, space and tab. Other values
+  return `-32602` with reason `invalid_traceparent` or
+  `invalid_trace_context`.
 
 ## 3.1.2 - 2026-11-05
 

@@ -2040,10 +2040,12 @@ callback values are removed before Telemetry emission.
 ### W3C trace context
 
 Request `_meta` may carry `traceparent`, `tracestate`, and `baggage`. The core
-syntax-validates `traceparent`; `tracestate` and `baggage` are bounded opaque
-forwarding values. Each field is limited to 4096 bytes and accepted values are
-passed to handlers as `context.trace_context`. Baggage is available to the
-handler only; it is never included in logs or Telemetry.
+syntax-validates the whole `traceparent` value; `tracestate` and `baggage` are
+opaque forwarding values restricted to visible ASCII, space, and tab, so a value
+containing CR, LF, another control character, or a non-ASCII byte is rejected
+with `invalid_trace_context`. Each field is limited to 4096 bytes and accepted
+values are passed to handlers as `context.trace_context`. Baggage is available
+to the handler only; it is never included in logs or Telemetry.
 
 ## Stdio interop
 

@@ -57,6 +57,43 @@ defmodule AttestoMCP.Server.TraceContextTest do
     end
   end
 
+  @tag :t04
+  test "trace context values with line breaks or control characters are rejected" do
+    {:ok, server} = Server.start_link([])
+
+    assert :ok =
+             Server.register_tool(server, "trace", %{
+               handler: fn _arguments, _context -> {:ok, "ok"} end
+             })
+
+    valid = %{
+      "traceparent" => "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      "tracestate" => "vendor=value,other=x\ty",
+      "baggage" => "key=value;prop, other=%20v"
+    }
+
+    assert {1, %{"result" => %{"resultType" => "complete"}}} =
+             Server.dispatch(server, request(1, valid), %{principal: "trace"}, version: @modern)
+
+    for {key, value, reason} <- [
+          {"traceparent", valid["traceparent"] <> "\n", "invalid_traceparent"},
+          {"traceparent", "\n" <> valid["traceparent"], "invalid_traceparent"},
+          {"tracestate", "a=b\r\nX-Injected: 1", "invalid_trace_context"},
+          {"tracestate", "a=b\n", "invalid_trace_context"},
+          {"tracestate", "a=b\0", "invalid_trace_context"},
+          {"baggage", "a=b\r\nX-Injected: 1", "invalid_trace_context"},
+          {"baggage", "a=café", "invalid_trace_context"}
+        ] do
+      assert {2, %{"error" => %{"code" => -32602, "data" => %{"reason" => ^reason}}}} =
+               Server.dispatch(
+                 server,
+                 request(2, Map.put(valid, key, value)),
+                 %{principal: "trace"},
+                 version: @modern
+               )
+    end
+  end
+
   defp request(id, trace) do
     %{
       kind: :request,
