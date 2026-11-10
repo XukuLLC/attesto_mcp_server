@@ -48,6 +48,7 @@ defmodule AttestoMCP.Server do
   @max_resource_subscription_uri_bytes 4_096
   @max_resource_subscriptions_per_session 128
   @max_rate_buckets 10_000
+  @default_rate_limit_ipv6_prefix 64
   @cluster_notification_version 2
   @legacy_cluster_notification_version 1
   @session_close_message_version 1
@@ -860,6 +861,7 @@ defmodule AttestoMCP.Server do
 
   def handle_call({:allow_rate, key, category}, _from, state) do
     now = System.monotonic_time(:millisecond)
+    key = normalize_rate_key(key, state.opts)
 
     case rate_decision(state.opts[:rate_limits], category, key, state.rate_buckets, now) do
       {:ok, buckets} ->
@@ -873,12 +875,14 @@ defmodule AttestoMCP.Server do
 
   def handle_call({:refund_rate, key, category}, _from, state) do
     now = System.monotonic_time(:millisecond)
+    key = normalize_rate_key(key, state.opts)
     buckets = refund_rate(state.opts[:rate_limits], category, key, state.rate_buckets, now)
     {:reply, :ok, %{state | rate_buckets: buckets}}
   end
 
   def handle_call({:rate_available, key, category}, _from, state) do
     now = System.monotonic_time(:millisecond)
+    key = normalize_rate_key(key, state.opts)
 
     {:reply, rate_available(state.opts[:rate_limits], category, key, state.rate_buckets, now),
      state}
@@ -2071,17 +2075,15 @@ defmodule AttestoMCP.Server do
         {:ok, buckets}
 
       {:ok, burst, window_ms} ->
-        bucket_key = normalize_rate_key(category, key)
-
         buckets =
-          if rate_bucket_present?(buckets, category, bucket_key) do
+          if rate_bucket_present?(buckets, category, key) do
             buckets
           else
             make_rate_bucket_room(buckets, category)
           end
 
         previous =
-          get_rate_bucket(buckets, category, bucket_key) ||
+          get_rate_bucket(buckets, category, key) ||
             %{
               tokens: burst * 1.0,
               at: now,
@@ -2094,7 +2096,7 @@ defmodule AttestoMCP.Server do
         cond do
           replenished >= 1.0 ->
             {:ok,
-             put_rate_bucket(buckets, category, bucket_key, %{
+             put_rate_bucket(buckets, category, key, %{
                tokens: replenished - 1.0,
                at: now,
                window_ms: window_ms,
@@ -2103,7 +2105,7 @@ defmodule AttestoMCP.Server do
 
           true ->
             {:error,
-             put_rate_bucket(buckets, category, bucket_key, %{
+             put_rate_bucket(buckets, category, key, %{
                tokens: replenished,
                at: now,
                window_ms: window_ms,
@@ -2121,9 +2123,7 @@ defmodule AttestoMCP.Server do
         buckets
 
       {:ok, burst, window_ms} ->
-        bucket_key = normalize_rate_key(category, key)
-
-        case get_rate_bucket(buckets, category, bucket_key) do
+        case get_rate_bucket(buckets, category, key) do
           nil ->
             buckets
 
@@ -2133,9 +2133,9 @@ defmodule AttestoMCP.Server do
             refunded = min(burst * 1.0, replenished + 1.0)
 
             if refunded >= burst do
-              delete_rate_bucket(buckets, category, bucket_key)
+              delete_rate_bucket(buckets, category, key)
             else
-              put_rate_bucket(buckets, category, bucket_key, %{
+              put_rate_bucket(buckets, category, key, %{
                 tokens: refunded,
                 at: now,
                 window_ms: window_ms,
@@ -2154,9 +2154,7 @@ defmodule AttestoMCP.Server do
         :ok
 
       {:ok, burst, window_ms} ->
-        bucket_key = normalize_rate_key(category, key)
-
-        case get_rate_bucket(buckets, category, bucket_key) do
+        case get_rate_bucket(buckets, category, key) do
           nil ->
             :ok
 
@@ -2168,14 +2166,35 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  # Authentication-failure limits protect a network boundary. Treat one IPv6
-  # /64 as one source so rotating interface identifiers cannot allocate a new
-  # live bucket per failed signature verification.
-  defp normalize_rate_key(category, {:ip, {a, b, c, d, _e, _f, _g, _h}})
-       when category in [:auth_checks, :auth_failures],
-       do: {:ip, {a, b, c, d, 0, 0, 0, 0}}
+  # One IPv6 subscriber usually controls a whole prefix (commonly a /64), so
+  # every address-keyed bucket treats that prefix as one source. Otherwise a
+  # client rotating interface identifiers gets a fresh bucket per address
+  # and can fill the shared bucket table. IPv4 addresses, including
+  # IPv4-mapped IPv6 addresses from dual-stack listeners, stay keyed on the
+  # full address.
+  defp normalize_rate_key({:ip, address}, opts),
+    do: {:ip, rate_key_address(address, opts)}
 
-  defp normalize_rate_key(_category, key), do: key
+  defp normalize_rate_key({:principal, binding, address}, opts),
+    do: {:principal, binding, rate_key_address(address, opts)}
+
+  defp normalize_rate_key(key, _opts), do: key
+
+  defp rate_key_address({0, 0, 0, 0, 0, 0xFFFF, high, low}, _opts)
+       when high in 0..0xFFFF and low in 0..0xFFFF,
+       do: {div(high, 256), rem(high, 256), div(low, 256), rem(low, 256)}
+
+  defp rate_key_address({a, b, c, d, e, f, g, h}, opts)
+       when a in 0..0xFFFF and b in 0..0xFFFF and c in 0..0xFFFF and d in 0..0xFFFF and
+              e in 0..0xFFFF and f in 0..0xFFFF and g in 0..0xFFFF and h in 0..0xFFFF do
+    host_bits = 128 - Keyword.get(opts, :rate_limit_ipv6_prefix, @default_rate_limit_ipv6_prefix)
+    <<address::128>> = <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+    network = address |> Bitwise.bsr(host_bits) |> Bitwise.bsl(host_bits)
+    <<n1::16, n2::16, n3::16, n4::16, n5::16, n6::16, n7::16, n8::16>> = <<network::128>>
+    {n1, n2, n3, n4, n5, n6, n7, n8}
+  end
+
+  defp rate_key_address(address, _opts), do: address
 
   defp normalize_rate_setting(nil), do: :disabled
   defp normalize_rate_setting(false), do: :disabled

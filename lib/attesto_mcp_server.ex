@@ -101,6 +101,7 @@ defmodule AttestoMCP.Server.API do
           | {:stream_queue_size, pos_integer()}
           | {:subscription_queue_size, pos_integer()}
           | {:rate_limits, map()}
+          | {:rate_limit_ipv6_prefix, 1..128}
           | {:cursor_secret, binary()}
           | {:cursor_ttl, pos_integer()}
           | {:request_state_secret, binary()}

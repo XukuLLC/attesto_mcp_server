@@ -1169,9 +1169,16 @@ trust a raw client-supplied
 `X-Forwarded-For` entry; use only connection state normalized by a correctly
 configured trusted-proxy component.
 
-Authentication-failure buckets group IPv6 addresses by `/64`, preventing
-interface-identifier rotation from consuming the complete 10,000-bucket
-table. Each authentication attempt checks existing failure capacity before
+Every address-keyed bucket, authenticated or failed, groups IPv6 addresses by
+the `rate_limit_ipv6_prefix` server option (an integer from 1 to 128, default
+`64`), so a client rotating addresses within the prefix it controls shares one
+bucket and cannot consume the complete 10,000-bucket table. Set it to the
+prefix length your network assigns to one subscriber, or `128` to key on the
+full address. IPv4 addresses, including IPv4-mapped IPv6 addresses
+(`::ffff:192.0.2.1`) reported by dual-stack listeners, are keyed on the full
+IPv4 address.
+
+Each authentication attempt checks existing failure capacity before
 signature verification and atomically reserves `auth_checks` capacity. The
 concurrent-check reservation is refunded after either result, and only a
 failure consumes `auth_failures` capacity. Fully refunded check buckets are

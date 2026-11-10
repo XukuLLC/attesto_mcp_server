@@ -53,6 +53,7 @@ defmodule AttestoMCP.Server.Options do
     :subscription_queue_size,
     :subscription_timeout,
     :rate_limits,
+    :rate_limit_ipv6_prefix,
     :cursor_secret,
     :cursor_ttl,
     :request_state_secret,
@@ -133,6 +134,7 @@ defmodule AttestoMCP.Server.Options do
       |> Keyword.put_new(:stream_keepalive_ms, 15_000)
       |> Keyword.put_new(:max_queue, 128)
       |> Keyword.put_new(:rate_limits, @rate_defaults)
+      |> Keyword.put_new(:rate_limit_ipv6_prefix, 64)
       |> Keyword.put(:modern_tasks, false)
       |> Keyword.put(:legacy_tasks, false)
       |> normalize_cache_scope()
@@ -307,6 +309,10 @@ defmodule AttestoMCP.Server.Options do
       do: raise(ArgumentError, ":request_timeout cannot exceed :max_request_timeout")
 
     validate_rate_limits!(opts[:rate_limits])
+
+    unless opts[:rate_limit_ipv6_prefix] in 1..128,
+      do: raise(ArgumentError, ":rate_limit_ipv6_prefix must be an integer from 1 to 128")
+
     validate_replica_options!(opts)
     :ok
   end

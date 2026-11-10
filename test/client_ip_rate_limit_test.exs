@@ -38,11 +38,72 @@ defmodule AttestoMCP.Server.ClientIPRateLimitTest do
     assert authenticated_request(plug, token, {127, 0, 0, 1}).status == 429
     assert authenticated_request(plug, token, {127, 0, 0, 2}).status == 200
 
-    assert authenticated_request(plug, token, {0, 0, 0, 0, 0, 0, 0, 1}).status == 200
-    assert authenticated_request(plug, token, {0, 0, 0, 0, 0, 0, 0, 1}).status == 429
-    assert authenticated_request(plug, token, {0, 0, 0, 0, 0, 0, 0, 2}).status == 200
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 0, 1, 0, 0, 0, 1}).status == 200
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 0, 1, 0, 0, 0, 1}).status == 429
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 0, 2, 0, 0, 0, 1}).status == 200
 
     stop_server(server)
+  end
+
+  test "authenticated buckets aggregate IPv6 by /64 and keep IPv4 per address", %{
+    config: config
+  } do
+    {:ok, server} = start_server()
+    plug = init_plug(server, config, client_ip: &Callbacks.client_ip/1)
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 5, 6, 0, 0, 0, 1}).status == 200
+
+    for interface <- [2, 3, 0xFFFF] do
+      address = {0x2001, 0xDB8, 5, 6, interface, 0, 0, interface}
+      assert authenticated_request(plug, token, address).status == 429
+    end
+
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 5, 7, 0, 0, 0, 1}).status == 200
+
+    # ::ffff:192.0.2.100 is the same client as 192.0.2.100; ::ffff:192.0.2.101
+    # is a different one.
+    assert authenticated_request(plug, token, {0, 0, 0, 0, 0, 0xFFFF, 0xC000, 0x0264}).status ==
+             200
+
+    assert authenticated_request(plug, token, {192, 0, 2, 100}).status == 429
+
+    assert authenticated_request(plug, token, {0, 0, 0, 0, 0, 0xFFFF, 0xC000, 0x0265}).status ==
+             200
+
+    assert authenticated_request(plug, token, {192, 0, 2, 102}).status == 200
+
+    stop_server(server)
+  end
+
+  test "rate_limit_ipv6_prefix sets the IPv6 grouping for every address-keyed bucket", %{
+    config: config
+  } do
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+
+    {:ok, server} = start_server(rate_limit_ipv6_prefix: 48)
+    plug = init_plug(server, config, client_ip: &Callbacks.client_ip/1)
+
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 9, 1, 0, 0, 0, 1}).status == 200
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 9, 2, 0, 0, 0, 1}).status == 429
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 10, 1, 0, 0, 0, 1}).status == 200
+    assert failed_request(plug, {0x2001, 0xDB8, 11, 1, 0, 0, 0, 1}).status == 401
+    assert failed_request(plug, {0x2001, 0xDB8, 11, 2, 0, 0, 0, 1}).status == 429
+    stop_server(server)
+
+    {:ok, server} = start_server(rate_limit_ipv6_prefix: 128)
+    plug = init_plug(server, config, client_ip: &Callbacks.client_ip/1)
+
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 9, 1, 0, 0, 0, 1}).status == 200
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 9, 1, 0, 0, 0, 1}).status == 429
+    assert authenticated_request(plug, token, {0x2001, 0xDB8, 9, 1, 0, 0, 0, 2}).status == 200
+    stop_server(server)
+
+    for prefix <- [0, 129, 64.0, "64", nil] do
+      assert_raise ArgumentError, ~r/rate_limit_ipv6_prefix/, fn ->
+        AttestoMCP.Server.Options.normalize(rate_limit_ipv6_prefix: prefix)
+      end
+    end
   end
 
   test "client_ip MFA is used for authenticated buckets", %{config: config} do
@@ -97,6 +158,12 @@ defmodule AttestoMCP.Server.ClientIPRateLimitTest do
     assert failed_request(plug, ipv6).status == 401
     assert failed_request(plug, same_prefix_ipv6).status == 429
     assert failed_request(plug, other_ipv6).status == 401
+
+    # IPv4-mapped addresses from a dual-stack listener are separate IPv4
+    # sources, not one shared ::/64 source.
+    assert failed_request(plug, {0, 0, 0, 0, 0, 0xFFFF, 0xC000, 0x020C}).status == 401
+    assert failed_request(plug, {0, 0, 0, 0, 0, 0xFFFF, 0xC000, 0x020D}).status == 401
+    assert failed_request(plug, {192, 0, 2, 13}).status == 429
 
     stop_server(server)
   end
@@ -424,13 +491,15 @@ defmodule AttestoMCP.Server.ClientIPRateLimitTest do
     stop_server(server)
   end
 
-  defp start_server do
+  defp start_server(extra \\ []) do
     Server.start_link(
-      rate_limits: %{
-        calls: %{burst: 1, window_ms: 60_000},
-        auth_checks: %{burst: 1, window_ms: 60_000},
-        auth_failures: %{burst: 1, window_ms: 60_000}
-      }
+      [
+        rate_limits: %{
+          calls: %{burst: 1, window_ms: 60_000},
+          auth_checks: %{burst: 1, window_ms: 60_000},
+          auth_failures: %{burst: 1, window_ms: 60_000}
+        }
+      ] ++ extra
     )
   end
 

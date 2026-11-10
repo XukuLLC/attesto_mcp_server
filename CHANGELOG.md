@@ -31,6 +31,18 @@
   and `baggage` must consist of visible ASCII, space and tab. Other values
   return `-32602` with reason `invalid_traceparent` or
   `invalid_trace_context`.
+- The per-principal `calls`, `completion` and `subscriptions` buckets were
+  keyed on the full client address, so one token sent from `2001:db8::1`,
+  `2001:db8::2` and so on got a fresh bucket per address. A client holding an
+  IPv6 prefix could exceed its limit by any factor and fill the shared
+  10,000-bucket table, evicting other callers' buckets. Every address-keyed
+  bucket now groups IPv6 addresses by the new `rate_limit_ipv6_prefix`
+  server option (1 to 128, default `64`), as the authentication-failure
+  buckets already did at a fixed `/64`. IPv4 keying is unchanged.
+  IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`), which dual-stack listeners
+  report for IPv4 peers, are now keyed on the IPv4 address; before, the
+  fixed `/64` grouping put every such peer into one shared
+  authentication-failure bucket.
 
 ## 3.1.2 - 2026-11-05
 
