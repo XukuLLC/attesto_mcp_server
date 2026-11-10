@@ -586,6 +586,58 @@ The package requires `attesto_mcp >= 1.3.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 
+### DPoP target URI
+
+A DPoP proof signs the URI of the request it was made for (`htu`, RFC 9449
+§4.3), and the boundary compares it with the URI it computes for the request.
+If that URI follows the request `Host`, a server that answers more than one
+`Host` accepts a DPoP-bound token together with a proof made for another
+server. `AttestoMCP.Plug.Authenticate` chooses the URI in this order:
+
+1. an `:htu` callback in the `auth` options, unchanged;
+2. with `attesto_mcp` releases after 2.2.4, the mount's pinned origin
+   (`base_url`/`origin`, or the origin of an absolute `resource`) followed
+   by the request path;
+3. with `attesto_mcp` 2.2.4 and earlier, Attesto core's default, built from
+   the request scheme, `Host` header, and port.
+
+Every mount pins its origin, so on the static `auth: [config: ...]` path an
+`attesto_mcp` upgrade pins the `htu` with no configuration change. With
+`allow_dynamic_origin: true` the origin is the request's own, so the `htu`
+follows the request `Host`; `:allowed_hosts` bounds which hosts are answered.
+
+On the AttestoPhoenix path
+(`auth: {AttestoMCP.Server.Phoenix, :protected_resource_options, [:my_app]}`),
+the derived options always carry AttestoPhoenix's `:htu` callback. It counts
+as step 1, so the mount's `base_url` does not choose the `htu` there. The
+callback uses AttestoPhoenix's own configuration: its `:htu` when set, else
+`:resource_origin` followed by the request path (`attesto_phoenix` releases
+after 4.5.0), else the request `Host` (or the forwarded host from a peer in
+`:trusted_proxies`). Pin it with one value, the same origin as the mount's
+`base_url`:
+
+```elixir
+config :my_app, AttestoPhoenix.Config,
+  resource_origin: "https://mcp.example.com"
+```
+
+`:resource_origin` applies to every protected resource of that AttestoPhoenix
+configuration, including its bundled UserInfo and credential endpoints. When
+those are served on another origin than the MCP mount, or with an
+`attesto_phoenix` release that predates `:resource_origin`, set AttestoPhoenix's
+`:htu` callback instead, built from configured origins:
+
+```elixir
+config :my_app, AttestoPhoenix.Config,
+  htu: {MyApp.MCP, :dpop_htu}
+
+# in MyApp.MCP
+def dpop_htu(%Plug.Conn{request_path: "/mcp"}), do: "https://mcp.example.com/mcp"
+
+# nil keeps AttestoPhoenix's own derivation for its other endpoints.
+def dpop_htu(_conn), do: nil
+```
+
 Per-delivery subscription reauthorization requires an executable
 `%Attesto.Config{}` through `auth: [config: ...]`. It re-verifies the captured
 access token's validity, audience, sender binding, applicable scopes, and any

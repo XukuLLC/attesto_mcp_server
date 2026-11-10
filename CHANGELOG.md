@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- The usage guide's new "DPoP target URI" section states how the DPoP `htu`
+  a proof must sign is derived on each `auth:` path and how to pin it. This
+  matters only when DPoP is enabled and the server answers more than one
+  `Host`; an `htu` that follows the request `Host` then lets the server accept
+  a proof made for another server (RFC 9449 §4.3). On the static `auth: [config: ...]`
+  path, `attesto_mcp` releases after 2.2.4 pin the `htu` to the mount's
+  `base_url`/`origin` with no configuration change here. On the AttestoPhoenix
+  path, `AttestoMCP.Server.Phoenix.protected_resource_options/1,2` returns
+  AttestoPhoenix's `:htu` callback, which takes precedence over the mount's
+  `base_url`; set `resource_origin:` to the mount's public origin in the
+  AttestoPhoenix configuration (`attesto_phoenix` releases after 4.5.0), or
+  its `htu:` callback with earlier releases. No code in this package changed,
+  and the dependency ranges are unchanged.
+
 ## 3.2.0 - 2026-11-09
 
 ### Security

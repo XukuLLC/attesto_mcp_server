@@ -64,6 +64,14 @@ defmodule AttestoMCP.Server.Phoenix do
   the adapter callbacks close over the current validated configuration and
   must not be baked into a compiled Phoenix router.
 
+  The canonical-URL callback is returned as `:htu`, so it decides the DPoP
+  target URI a proof must sign ahead of the mount's `base_url`/`origin`. It
+  follows the AttestoPhoenix configuration: that configuration's `:htu`, else
+  its `:resource_origin` followed by the request path, else the request
+  `Host` (or the forwarded host from a trusted proxy). Set `:resource_origin`
+  to the mount's public origin to pin it; see "DPoP target URI" in the usage
+  guide.
+
   `attesto_phoenix` 3.x and 4.x bind each callback to the named profile loaded from
   the `otp_app` argument, so multiple named host profiles remain isolated.
   This helper does not select a profile from `conn.private`. The 2.14
