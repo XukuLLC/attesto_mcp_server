@@ -1060,7 +1060,11 @@ updates.
 `stream_queue_size`, `max_sessions_per_principal`, and
 `max_legacy_streams_per_session` are the bounded server limits. The two
 session-bound defaults are 128 active sessions per principal and eight live
-streams per session and server process. A principal is the authenticated
+streams per session and server process. The `capabilities` object a client
+sends in a session-bound `initialize` is stored in the session record and is
+limited to a fixed 16,384 bytes of encoded JSON (or `max_json_bytes`, when that
+is lower); a larger object is rejected with `-32602` and reason
+`invalid_initialize_params`. A principal is the authenticated
 subject or, when absent, the client identifier. Hosts where one client identity
 fronts many users should raise `max_sessions_per_principal` to match expected
 concurrency. `subscription_queue_size`

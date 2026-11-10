@@ -47,6 +47,7 @@ defmodule AttestoMCP.Server do
   @max_notifications_per_request 128
   @max_resource_subscription_uri_bytes 4_096
   @max_resource_subscriptions_per_session 128
+  @max_client_capabilities_bytes 16_384
   @max_rate_buckets 10_000
   @default_rate_limit_ipv6_prefix 64
   @cluster_notification_version 2
@@ -4545,7 +4546,7 @@ defmodule AttestoMCP.Server do
 
     with :ok <- validate_request_params_shape(params),
          {:ok, request_meta} <- request_meta_snapshot(params, runtime.opts),
-         :ok <- validate_legacy_initialize_request(method, era, params, runtime.opts),
+         :ok <- validate_legacy_initialize_request(method, era, params, context, runtime.opts),
          :ok <- validate_era(era, params, runtime.opts),
          :ok <- validate_trace_context(params),
          :ok <- authorization(method, params, context, runtime.opts) do
@@ -4652,22 +4653,23 @@ defmodule AttestoMCP.Server do
 
   defp validate_protocol_binding(_method, _era, _context, _opts), do: :ok
 
-  defp validate_legacy_initialize_request("initialize", era, params, opts)
+  defp validate_legacy_initialize_request("initialize", era, params, context, opts)
        when era == @legacy and is_map(params) do
     client_info = params["clientInfo"]
     capabilities = params["capabilities"]
+    max_bytes = max_client_capabilities_bytes(context, opts)
 
     if is_binary(params["protocolVersion"]) and is_map(capabilities) and
-         valid_legacy_capabilities?(capabilities, opts) and valid_client_info?(client_info),
+         valid_legacy_capabilities?(capabilities, max_bytes) and valid_client_info?(client_info),
        do: :ok,
        else: {:error, Error.invalid_params(%{"reason" => "invalid_initialize_params"})}
   end
 
-  defp validate_legacy_initialize_request("initialize", era, _params, _opts)
+  defp validate_legacy_initialize_request("initialize", era, _params, _context, _opts)
        when era == @legacy,
        do: {:error, Error.invalid_params(%{"reason" => "invalid_initialize_params"})}
 
-  defp validate_legacy_initialize_request(_method, _era, _params, _opts), do: :ok
+  defp validate_legacy_initialize_request(_method, _era, _params, _context, _opts), do: :ok
 
   defp valid_client_info?(%{"name" => name, "version" => version})
        when is_binary(name) and is_binary(version),
@@ -4675,7 +4677,7 @@ defmodule AttestoMCP.Server do
 
   defp valid_client_info?(_), do: false
 
-  defp valid_legacy_capabilities?(capabilities, opts) when is_map(capabilities) do
+  defp valid_legacy_capabilities?(capabilities, max_bytes) when is_map(capabilities) do
     known = [
       "experimental",
       "logging",
@@ -4688,7 +4690,7 @@ defmodule AttestoMCP.Server do
       "completions"
     ]
 
-    Schema.json_value(capabilities, json_budget_opts(opts)) == :ok and
+    Schema.json_value(capabilities, max_bytes: max_bytes) == :ok and
       Enum.all?(capabilities, fn {key, value} ->
         is_binary(key) and
           (key not in known or is_map(value))
@@ -4699,6 +4701,20 @@ defmodule AttestoMCP.Server do
           value -> is_boolean(value)
         end
       end)
+  end
+
+  # A session-bound initialize stores the capabilities in the session record,
+  # which is decoded, validated and re-encoded on every request for that
+  # session in the shared server and session-store processes. A small fixed
+  # cap keeps that per-request work bounded; real client capabilities are a
+  # few hundred bytes. Without a session nothing is stored, and the
+  # configured JSON budget applies.
+  defp max_client_capabilities_bytes(context, opts) do
+    budget = Keyword.fetch!(json_budget_opts(opts), :max_bytes)
+
+    if is_binary(context[:session_id]),
+      do: min(@max_client_capabilities_bytes, budget),
+      else: budget
   end
 
   defp authorization(method, params, context, opts) do

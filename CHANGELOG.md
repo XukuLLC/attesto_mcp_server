@@ -53,6 +53,16 @@
   the `401` challenge without consuming `auth_failures`. Presented
   credentials that fail are still counted, and an exhausted bucket still
   refuses every request from that address.
+- The `capabilities` object in a session-bound `initialize` was bounded only
+  by `max_json_bytes` (2,000,000 bytes by default) and by the 1,000,000-byte
+  session record limit. It is stored in the session record, which the shared
+  server and session-store processes decode, validate and re-encode on every
+  request for that session, so one session with about 0.9 MB of
+  capabilities cost about two million reductions per `ping` in the server
+  process and delayed every other session. Negotiated capabilities are now
+  limited to 16,384 bytes of encoded JSON (or `max_json_bytes`, when lower);
+  a larger object returns `-32602` with reason `invalid_initialize_params`
+  and leaves the session unnegotiated.
 
 ## 3.1.2 - 2026-11-05
 

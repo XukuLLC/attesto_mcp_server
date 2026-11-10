@@ -92,6 +92,65 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
     assert data["supported"] == [@legacy, @legacy_2025_06_18]
   end
 
+  test "legacy initialize bounds negotiated client capabilities at 16 KiB" do
+    {:ok, server} = Server.start_link([])
+    {:ok, session} = Server.new_session(server, "legacy", nil)
+
+    initialize = fn id, capabilities, context ->
+      Server.dispatch(
+        server,
+        %{
+          kind: :request,
+          id: id,
+          method: "initialize",
+          params: %{
+            "protocolVersion" => @legacy,
+            "capabilities" => capabilities,
+            "clientInfo" => %{"name" => "legacy-test", "version" => "1.0"}
+          }
+        },
+        context,
+        version: @legacy
+      )
+    end
+
+    padded = fn bytes ->
+      overhead = byte_size(Jason.encode!(%{"experimental" => %{"pad" => ""}}))
+      %{"experimental" => %{"pad" => String.duplicate("a", bytes - overhead)}}
+    end
+
+    huge = %{
+      "experimental" => Map.new(1..9_000, fn i -> {"k#{i}", String.duplicate("a", 90)} end)
+    }
+
+    for {id, capabilities} <- [{1, padded.(16_385)}, {2, huge}] do
+      assert {^id,
+              %{
+                "error" => %{
+                  "code" => -32602,
+                  "data" => %{"reason" => "invalid_initialize_params"}
+                }
+              }} =
+               initialize.(id, capabilities, %{principal: "legacy", session_id: session.id})
+    end
+
+    assert {:ok, %{version: nil, client_capabilities: %{}}} =
+             Server.get_session(server, session.id, "legacy", nil)
+
+    fitting = padded.(16_384)
+    assert byte_size(Jason.encode!(fitting)) == 16_384
+
+    assert {3, %{"result" => %{"protocolVersion" => @legacy}}} =
+             initialize.(3, fitting, %{principal: "legacy", session_id: session.id})
+
+    assert {:ok, %{version: @legacy, client_capabilities: ^fitting}} =
+             Server.get_session(server, session.id, "legacy", nil)
+
+    # A sessionless initialize stores nothing and keeps the JSON budget.
+    assert {4, %{"result" => %{"protocolVersion" => @legacy}}} =
+             initialize.(4, padded.(16_385), %{principal: "legacy"})
+  end
+
   test "legacy resource subscriptions filter one-route SSE delivery and close on delete" do
     {:ok, server} = Server.start_link([])
     {:ok, session} = Server.new_session(server, "legacy", "tenant")
