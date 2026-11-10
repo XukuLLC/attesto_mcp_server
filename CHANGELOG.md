@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
 ### Documentation
 
@@ -18,7 +18,7 @@
   its `htu:` callback with earlier releases. No code in this package changed,
   and the dependency ranges are unchanged.
 
-## 3.2.0 - 2026-11-09
+## [3.2.0] - 2026-11-09
 
 ### Security
 
@@ -89,7 +89,7 @@
   returns `-32602` with reason `resource_subscription_limit`, as the count
   limit already did. Existing session records are loaded unchanged.
 
-## 3.1.2 - 2026-11-05
+## [3.1.2] - 2026-11-05
 
 - Hosts should update to Attesto 2.11.0 or later. Earlier Attesto releases
   could accept a `"cnf": null` access token as an unbound bearer token under the
@@ -99,7 +99,7 @@
   `nil` whichever JSON backend JOSE uses. Under JOSE's builtin OTP backend they
   previously carried `:null`.
 
-## 3.1.1 - 2026-11-04
+## [3.1.1] - 2026-11-04
 
 - `subscription_timeout` now bounds the lifetime of a `subscriptions/listen`
   stream, counted from when the listen request is dispatched, on HTTP and
@@ -122,7 +122,7 @@
   the subscription registered or its queued messages in the connection
   process, which may go on to serve further requests.
 
-## 3.1.0 - 2026-10-31
+## [3.1.0] - 2026-10-31
 
 - A `{module, function, extra_args}` host callback with a non-empty
   `extra_args` list is refused at startup until the host confirms the 3.0
@@ -138,7 +138,7 @@
 - The README has an "Upgrading to 3.0" checklist, including a test for each
   migrated callback that asserts on its output.
 
-## 3.0.0 - 2026-10-31
+## [3.0.0] - 2026-10-31
 
 - **Breaking:** a `{module, function, extra_args}` host callback now receives
   the per-call arguments first and `extra_args` after them
@@ -161,7 +161,7 @@
   3.1.0 refuses to start until the order is confirmed (see the README's
   "Upgrading to 3.0").
 
-## 2.9.0 - 2026-10-31
+## [2.9.0] - 2026-10-31
 
 - Answer `allow_dynamic_origin` requests only when the request `Host` is in
   the new `:allowed_hosts` auth option, which defaults to `localhost`,
@@ -189,7 +189,7 @@
   to accept and `minLength` accepts strings it used to reject. Check any
   length-bounded tool schema whose arguments can carry such text.
 
-## 2.8.1 - 2026-10-27
+## [2.8.1] - 2026-10-27
 
 - Require JOSE 1.11.13 or later, which fixes CVE-2026-65625 through
   CVE-2026-65632. AttestoMCP Server makes no JOSE calls of its own; the
@@ -201,7 +201,7 @@
   the pin carried and fixes the Bandit advisories published with it. Runtime
   consumers do not inherit this dependency.
 
-## 2.8.0 - 2026-10-19
+## [2.8.0] - 2026-10-19
 
 - Wrap every HTTP authentication in the `auth/authenticate` telemetry span.
   Its `stop` event carries the elapsed `duration`, a bounded `outcome` (for
@@ -214,7 +214,7 @@
   envelope, so the span works with every supported AttestoMCP release.
   `auth/refusal` and `auth/policy_failure` are unchanged.
 
-## 2.7.2 - 2026-10-18
+## [2.7.2] - 2026-10-18
 
 - Fail the generated principal admission index migration before any DDL when
   `attesto_mcp_sessions` does not exist, instead of returning successfully.
@@ -223,7 +223,7 @@
   failure and the migration runs again once the sessions migration has been
   applied. A Postgres-backed regression test covers both outcomes.
 
-## 2.7.1 - 2026-10-18
+## [2.7.1] - 2026-10-18
 
 - Accept `--help` in `mix attesto_mcp_server.gen.migration`; it prints the
   usage and the accepted options instead of failing with "invalid options".
@@ -237,7 +237,7 @@
   migration skips itself with a warning when `attesto_mcp_sessions` does not
   exist yet instead of failing.
 
-## 2.7.0 - 2026-10-18
+## [2.7.0] - 2026-10-18
 
 - Keep request-path rate-limit decisions constant-time by storing buckets per
   traffic category, pruning expired buckets during periodic cleanup, and
@@ -295,7 +295,7 @@
 - Verify the frozen 2.6 conformance fingerprint against its recorded release
   commit so later release work does not invalidate historical evidence.
 
-## 2.6.0 - 2026-10-17
+## [2.6.0] - 2026-10-17
 
 - Make the server-side HTTP authorization gate use the same per-method scope
   defaults and params-dependent completion/subscription rules as the Plug
@@ -310,7 +310,7 @@
 - Exercise the retained JSV 0.24.0 floor in an explicit CI lane, and label the
   archived 2.3.0 dependency inventory as historical release evidence.
 
-## 2.5.0 - 2026-10-15
+## [2.5.0] - 2026-10-15
 
 - Extend automatic AttestoPhoenix installation through the 4.x line while
   retaining the 2.14 floor and 3.x compatibility. The coordinated source and
@@ -353,7 +353,7 @@
   pin with the first patched release when Bandit publishes one. Runtime
   consumers do not inherit this repository-only dependency.
 
-## 2.4.0 - 2026-10-06
+## [2.4.0] - 2026-10-06
 
 - Expose an immutable, bounded snapshot of each request's `_meta` object to
   handlers and per-request callbacks as `context.request_meta`, for HTTP,
@@ -396,13 +396,13 @@
   The three fixed roots share a ten-second startup deadline; user-supplied
   schema compilation and evaluation retain their one-second deadlines.
 
-## 2.3.1 - 2026-10-04
+## [2.3.1] - 2026-10-04
 
 - Support JSV 0.24.x as well as 0.25.x. Both retain the existing bounded
   validation and format policy. The 0.24.0 floor passes the server suite and
   pinned JSON Schema corpus with the same explicit exclusions.
 
-## 2.3.0 - 2026-10-03
+## [2.3.0] - 2026-10-03
 
 - Use JSV for bounded JSON Schema 2020-12 and draft-07 evaluation, including
   reference scope, numeric equality, and unevaluated annotations. Network
@@ -429,14 +429,14 @@
   the remaining inputs. Preserve validated answers and the original expiry
   in fresh signed state, while rejecting unbound input and replay.
 
-## 2.2.0 - 2026-09-13
+## [2.2.0] - 2026-09-13
 
 - Allow a protected MCP endpoint to retain its canonical RFC 9728 resource in
   metadata while using Attesto core's explicit `:trusted_audiences` policy for
   access tokens issued to trusted reverse-gateway identifiers. Subscription
   delivery now reuses the same audience policy.
 
-## 2.1.0 - 2026-09-03
+## [2.1.0] - 2026-09-03
 
 - Add staged URL elicitation support for modern interactive requests in the
   `2026-07-28` protocol revision (`AttestoMCP.Server.UrlElicitation` and
@@ -460,7 +460,7 @@
   operations deserve a browser gate and why the library does not refuse the
   mode by principal type.
 
-## 2.0.1 - 2026-09-02
+## [2.0.1] - 2026-09-02
 
 - Bind automatic protected-resource callbacks to the named profile loaded from
   the helper's `otp_app` argument on `attesto_phoenix` 3.x, keeping multiple
@@ -469,7 +469,7 @@
   globally configured profile; using it for multiple profiles can route
   persistent replay or revocation reads through that global profile's store.
 
-## 2.0.0 - 2026-09-02
+## [2.0.0] - 2026-09-02
 
 - Make `PhoenixParser` treat each configured path as a decoded segment prefix:
   the prefix, route-equivalent trailing or repeated slashes, and every child
@@ -502,7 +502,7 @@
   and namespace filtering, but excludes start telemetry, local stream closing,
   and clustered close broadcast.
 
-## 1.1.0 - 2026-09-01
+## [1.1.0] - 2026-09-01
 
 - Add `AttestoMCP.Server.Result.tool_from_context/2,3` so tool handlers and
   shared adapters inherit the supervised server's JSON budget and output
@@ -510,7 +510,7 @@
   The standalone result constructors and their secure defaults remain
   unchanged.
 
-## 1.0.0 - 2026-09-01
+## [1.0.0] - 2026-09-01
 
 - Establish the stable 1.0 host API while preserving the strict output and
   string-keyed argument defaults from 0.14.
@@ -540,7 +540,7 @@
 - Add a public migration guide for moving documented `anubis_mcp` component,
   response, context, scope, and schema APIs onto AttestoMCP registrations.
 
-## 0.14.0 - 2026-09-01
+## [0.14.0] - 2026-09-01
 
 - Add an optional PostgreSQL-backed Ecto session store for the session-bound
   `2025-11-25` and `2025-06-18` revisions. Composite, collision-resistant
@@ -593,7 +593,7 @@
 - Make HexDocs open on the installer-first README so the Phoenix SaaS path is
   the package's default documentation entry point.
 
-## 0.13.0 - 2026-08-31
+## [0.13.0] - 2026-08-31
 
 - Require `attesto_mcp >= 1.3.0 and < 2.0.0`, adding compatibility with the
   Attesto 2.x authorization contracts.
@@ -603,7 +603,7 @@
 - Refresh path-based `Mix.install/2` examples so an existing install cache
   cannot retain dependency versions from an earlier server release.
 
-## 0.12.2 - 2026-08-30
+## [0.12.2] - 2026-08-30
 
 - Reject `2026-07-28` request metadata paired with missing, duplicate, or
   mismatched HTTP mirror headers before session-bound routing, preserving one
@@ -619,7 +619,7 @@
   README around the batteries-included Phoenix path, client onboarding, and a
   concrete non-Phoenix dependency setup.
 
-## 0.12.1 - 2026-08-30
+## [0.12.1] - 2026-08-30
 
 - Support bounded resource URI templates containing up to 16 separated simple
   or reserved path expressions and 32 globally unique variables. Reverse
@@ -655,7 +655,7 @@
   finite budget with `max_json_bytes`, while retaining the 2,000,000-byte
   default and all structural and canonical-Base64 checks.
 
-## 0.12.0 - 2026-08-29
+## [0.12.0] - 2026-08-29
 
 - Add bounded `alternative_scope_sets` to primitive definitions. The primary
   `required_scopes` clause and each alternative remain all-of requirements,
@@ -715,7 +715,7 @@
   regressions, and make live stdio tests wait for owned child processes before
   removing isolated build directories.
 
-## 0.11.1 - 2026-08-29
+## [0.11.1] - 2026-08-29
 
 - Document the existing per-definition `authorize` contract, including callback
   forms, host context, evaluation order, neutral denial behavior, and the
@@ -727,7 +727,7 @@
 - Clarify host-owned custom-scope configuration and pin parser bypass behavior
   for route-equivalent repeated trailing slashes.
 
-## 0.11.0 - 2026-08-28
+## [0.11.0] - 2026-08-28
 
 - Add per-mount RFC 9728 `scopes_supported` configuration. Custom-scope
   deployments no longer have to advertise the package's generic scopes and
@@ -771,7 +771,7 @@
   redact private server options from crash status, and ignore unrelated calls,
   casts, and mailbox messages without terminating the server.
 
-## 0.10.6 - 2026-08-28
+## [0.10.6] - 2026-08-28
 
 - Apply the automatic AttestoPhoenix access-token JTI revocation check and
   principal loader when authenticating each MCP request or stream, before
@@ -795,7 +795,7 @@
 - Require the oldest published compatible AttestoPhoenix release, 2.14.1,
   when the installer reuses its protected-resource policy.
 
-## 0.10.5 - 2026-08-28
+## [0.10.5] - 2026-08-28
 
 - Carry the host's current AttestoPhoenix protected-resource adapter options
   into generated MCP routes, including DPoP replay/nonce, canonical-request,
@@ -814,7 +814,7 @@
   registrations, refusing near matches, and leaving nested quoted examples
   untouched.
 
-## 0.10.4 - 2026-08-28
+## [0.10.4] - 2026-08-28
 
 - Preserve Attesto's scheme-correct OAuth challenges and error details for
   invalid DPoP proofs, sender-bound tokens presented as Bearer, nonce requests,
@@ -824,7 +824,7 @@
   configured canonical resource origin, and cover header and host-owned
   credential paths with DPoP regressions.
 
-## 0.10.3 - 2026-08-28
+## [0.10.3] - 2026-08-28
 
 - Configure detected `attesto_phoenix` hosts for URL client metadata and native
   loopback clients by enabling Client ID Metadata Documents and ephemeral
@@ -884,7 +884,7 @@
   a live stdio pipe recovery check spanning malformed, oversized, and valid
   consecutive frames.
 
-## 0.10.2 - 2026-08-27
+## [0.10.2] - 2026-08-27
 
 - Document the distinct tool, prompt, resource, and completion callback inputs,
   including prompt and resource envelopes, their declared atom-keyed fields,
@@ -894,7 +894,7 @@
 - Derive the default advertised server version from package application
   metadata so patch releases cannot retain a stale hard-coded version.
 
-## 0.10.1 - 2026-08-27
+## [0.10.1] - 2026-08-27
 
 - Accept JSON request bodies already decoded by a Phoenix or Plug parser while
   retaining message-size, nesting, JSON-RPC validation, and recoverable-ID
@@ -902,7 +902,7 @@
 - Add Phoenix-style parser-pipeline and pass-through parser regressions using a
   current legacy-initialize client request.
 
-## 0.10.0 - 2026-08-27
+## [0.10.0] - 2026-08-27
 
 - Add an optional, idempotent Igniter installer for Phoenix hosts.
 - Scaffold a supervised MCP module, protected `/mcp` and RFC 9728 metadata
@@ -917,7 +917,7 @@
   forwards and Phoenix 1.7 plug reuse, and preserve a zero-diff second run
   across the supported Igniter range.
 
-## 0.9.0 - 2026-08-26
+## [0.9.0] - 2026-08-26
 
 - Accept and exactly echo MCP `2025-06-18` during legacy initialization while
   retaining `2025-11-25` and preferred `2026-07-28` behavior.
@@ -936,7 +936,7 @@
 - Expose the exact negotiated legacy revision as `context.protocol_version` to
   request handlers.
 
-## 0.8.0
+## [0.8.0]
 
 Initial Apache-2.0 release of the Attesto-native dual-era MCP server.
 
