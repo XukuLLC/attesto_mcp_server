@@ -595,7 +595,7 @@ If that URI follows the request `Host`, a server that answers more than one
 server. `AttestoMCP.Plug.Authenticate` chooses the URI in this order:
 
 1. an `:htu` callback in the `auth` options, unchanged;
-2. with `attesto_mcp` releases after 2.2.4, the mount's pinned origin
+2. with `attesto_mcp` 2.3.0 and later, the mount's pinned origin
    (`base_url`/`origin`, or the origin of an absolute `resource`) followed
    by the request path;
 3. with `attesto_mcp` 2.2.4 and earlier, Attesto core's default, built from
@@ -611,8 +611,8 @@ On the AttestoPhoenix path
 the derived options always carry AttestoPhoenix's `:htu` callback. It counts
 as step 1, so the mount's `base_url` does not choose the `htu` there. The
 callback uses AttestoPhoenix's own configuration: its `:htu` when set, else
-`:resource_origin` followed by the request path (`attesto_phoenix` releases
-after 4.5.0), else the request `Host` (or the forwarded host from a peer in
+`:resource_origin` followed by the request path (`attesto_phoenix` 4.6.0
+and later), else the request `Host` (or the forwarded host from a peer in
 `:trusted_proxies`). Pin it with one value, the same origin as the mount's
 `base_url`:
 
