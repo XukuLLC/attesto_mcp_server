@@ -299,6 +299,35 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
              Server.subscribe_resource(server, session.id, "bounded", nil, "urn:bounded:129")
   end
 
+  test "legacy resource subscriptions bound the total URI bytes per session" do
+    {:ok, server} = Server.start_link([])
+    {:ok, session} = Server.new_session(server, "bytes", nil)
+    assert :ok = Server.negotiate_session(server, session.id, "bytes", nil, @legacy, %{})
+    assert :ok = Server.mark_initialized(server, session.id)
+
+    # Eight 4,096-byte URIs fill the 32,768-byte budget exactly.
+    uri = fn index ->
+      "urn:#{index}:" <> String.duplicate("x", 4_096 - 5 - byte_size("#{index}"))
+    end
+
+    assert byte_size(uri.(1)) == 4_096
+
+    for index <- 1..8 do
+      assert :ok = Server.subscribe_resource(server, session.id, "bytes", nil, uri.(index))
+    end
+
+    assert :ok = Server.subscribe_resource(server, session.id, "bytes", nil, uri.(1))
+
+    assert {:error, :limit_reached} =
+             Server.subscribe_resource(server, session.id, "bytes", nil, "urn:x")
+
+    assert {:ok, current} = Server.get_session(server, session.id, "bytes", nil)
+    assert map_size(current.resource_subscriptions) == 8
+
+    assert :ok = Server.unsubscribe_resource(server, session.id, "bytes", nil, uri.(8))
+    assert :ok = Server.subscribe_resource(server, session.id, "bytes", nil, "urn:x")
+  end
+
   test "2025-06-18 omits newer catalog icons and rejects newer client-request modes" do
     {:ok, server} = Server.start_link([])
 

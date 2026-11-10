@@ -47,6 +47,7 @@ defmodule AttestoMCP.Server do
   @max_notifications_per_request 128
   @max_resource_subscription_uri_bytes 4_096
   @max_resource_subscriptions_per_session 128
+  @max_resource_subscription_bytes_per_session 32_768
   @max_client_capabilities_bytes 16_384
   @max_rate_buckets 10_000
   @default_rate_limit_ipv6_prefix 64
@@ -5106,12 +5107,20 @@ defmodule AttestoMCP.Server do
 
   defp validate_resource_subscription_uri(_uri), do: {:error, :invalid_uri}
 
+  # Session-bound subscriptions are stored in the session record, which is
+  # decoded, validated and re-encoded on every request for that session in
+  # the shared server and session-store processes, so their total size is
+  # bounded as well as their count. Summing at most 128 keys is a fixed cost.
   defp update_resource_subscriptions(:subscribe, subscriptions, uri) do
     cond do
       Map.has_key?(subscriptions, uri) ->
         {:ok, subscriptions}
 
       map_size(subscriptions) >= @max_resource_subscriptions_per_session ->
+        {:error, :limit_reached}
+
+      subscribed_uri_bytes(subscriptions) + byte_size(uri) >
+          @max_resource_subscription_bytes_per_session ->
         {:error, :limit_reached}
 
       true ->
@@ -5121,6 +5130,10 @@ defmodule AttestoMCP.Server do
 
   defp update_resource_subscriptions(:unsubscribe, subscriptions, uri),
     do: {:ok, Map.delete(subscriptions, uri)}
+
+  defp subscribed_uri_bytes(subscriptions) do
+    Enum.reduce(subscriptions, 0, fn {uri, _subscribed?}, total -> total + byte_size(uri) end)
+  end
 
   defp metadata(params) when is_map(params) do
     case Map.get(params, "_meta") do

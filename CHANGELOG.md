@@ -63,6 +63,13 @@
   limited to 16,384 bytes of encoded JSON (or `max_json_bytes`, when lower);
   a larger object returns `-32602` with reason `invalid_initialize_params`
   and leaves the session unnegotiated.
+- Session-bound `resources/subscribe` allowed 128 URIs of up to 4,096 bytes
+  each, all stored in the session record. A session holding 128 maximal
+  URIs cost the server process the same two million reductions per request
+  as the oversized capabilities above. The URIs a session subscribes to are
+  now also limited to 32,768 bytes in total; a subscription beyond that
+  returns `-32602` with reason `resource_subscription_limit`, as the count
+  limit already did. Existing session records are loaded unchanged.
 
 ## 3.1.2 - 2026-11-05
 

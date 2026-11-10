@@ -1148,7 +1148,10 @@ delivery reauthorizes catalog events with their generic category scope;
 resource-update notifications also require any matched definition scopes.
 Resource subscriptions for session-bound revisions and modern resource filters per
 subscription have fixed defensive bounds of 128 unique URIs and 4,096 bytes
-per URI. Repeating an existing session-bound subscription is idempotent,
+per URI. Session-bound subscriptions are stored in the session record and are
+also limited to 32,768 URI bytes in total per session; a subscription beyond
+either session limit returns `resource_subscription_limit`. Repeating an
+existing session-bound subscription is idempotent,
 unsubscribing releases its entry, and modern filters preserve the first
 occurrence of each URI. Invalid or over-limit session-bound changes do not refresh
 the session idle deadline.
