@@ -1342,19 +1342,28 @@ defmodule AttestoMCP.Server.Plug do
     |> send_resp(429, Jason.encode!(%{"error" => "rate_limited"}))
   end
 
+  # A request that presents no credential is answered with the challenge
+  # without verifying anything, and MCP clients send one to discover the
+  # authorization server. It does not consume authentication-failure
+  # capacity, which every client behind the same address shares and which
+  # is checked before a valid token is verified.
   defp record_auth_failure(conn, auth_conn, state, reservation_key) do
     :ok = Server.refund_rate(state.server, reservation_key, :auth_checks)
 
-    case Server.allow_rate(state.server, reservation_key, :auth_failures) do
-      :ok ->
-        auth_failure_response(conn, auth_conn, state)
+    if anonymous_authentication?(conn, state.auth_opts) do
+      auth_failure_response(conn, auth_conn, state)
+    else
+      case Server.allow_rate(state.server, reservation_key, :auth_failures) do
+        :ok ->
+          auth_failure_response(conn, auth_conn, state)
 
-      {:error, :rate_limited} ->
-        cond do
-          conn.state in [:sent, :chunked] -> conn
-          auth_conn.state in [:sent, :chunked] -> auth_conn
-          true -> auth_rate_limited(conn)
-        end
+        {:error, :rate_limited} ->
+          cond do
+            conn.state in [:sent, :chunked] -> conn
+            auth_conn.state in [:sent, :chunked] -> auth_conn
+            true -> auth_rate_limited(conn)
+          end
+      end
     end
   rescue
     _ -> auth_rate_limited(conn)

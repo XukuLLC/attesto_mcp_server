@@ -1155,7 +1155,12 @@ the session idle deadline.
 600/60s, 300/60s, 100/60s, 1,024/60s, and 120/60s respectively.
 `auth_checks` is a refundable concurrent-verification bound: its token is
 returned after either success or failure. `auth_failures` records only failed
-authentication and is checked before signature verification. A category can
+authentication and is checked before signature verification. A request that
+presents no credential (no `Authorization` or `DPoP` header, no body token,
+and no host `credential_from_conn` extractor) receives the `401` challenge
+without consuming `auth_failures`, so unauthenticated discovery requests from
+a shared address cannot exhaust the bucket that valid tokens from that address
+are checked against. A category can
 be set to `false` only when the host explicitly accepts unlimited traffic for
 that category; malformed settings fail closed. Rejections use HTTP 429 and
 JSON-RPC `-33029` (outside the reserved protocol range), and are isolated by principal plus client address. If

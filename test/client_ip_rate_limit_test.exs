@@ -182,6 +182,33 @@ defmodule AttestoMCP.Server.ClientIPRateLimitTest do
     stop_server(server)
   end
 
+  test "requests without credentials do not consume authentication-failure capacity", %{
+    config: config
+  } do
+    {:ok, server} = start_server()
+    plug = init_plug(server, config, client_ip: &Callbacks.client_ip/1)
+    ip = {192, 0, 2, 50}
+    token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+
+    for _ <- 1..3 do
+      response = anonymous_request(plug, ip)
+      assert response.status == 401
+      assert [challenge] = get_resp_header(response, "www-authenticate")
+      assert challenge =~ "resource_metadata="
+    end
+
+    assert authenticated_request(plug, token, ip).status == 200
+
+    # A presented credential that fails is still counted, and an exhausted
+    # bucket still refuses every request from that address before
+    # verification.
+    assert failed_request(plug, ip).status == 401
+    assert failed_request(plug, ip).status == 429
+    assert anonymous_request(plug, ip).status == 429
+
+    stop_server(server)
+  end
+
   test "an exhausted authentication-failure bucket skips credential extraction", %{
     config: config
   } do
@@ -541,6 +568,17 @@ defmodule AttestoMCP.Server.ClientIPRateLimitTest do
         }
       }
     })
+  end
+
+  defp anonymous_request(plug, remote_peer) do
+    conn(:post, "/mcp", authenticated_request_body())
+    |> then(fn conn -> %{conn | remote_ip: remote_peer} end)
+    |> put_private(:test_client_ip, remote_peer)
+    |> put_req_header("content-type", "application/json")
+    |> put_req_header("accept", "application/json, text/event-stream")
+    |> put_req_header("mcp-protocol-version", @modern)
+    |> put_req_header("mcp-method", "tools/list")
+    |> Server.Plug.call(plug)
   end
 
   defp failed_request(plug, remote_peer) do

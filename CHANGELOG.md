@@ -43,6 +43,16 @@
   report for IPv4 peers, are now keyed on the IPv4 address; before, the
   fixed `/64` grouping put every such peer into one shared
   authentication-failure bucket.
+- A request with no credential at all counted against the per-address
+  `auth_failures` bucket, which is checked before any token is verified.
+  MCP clients send such a request to discover the authorization server, so
+  about two of them per second from a shared NAT, IPv6 `/64` or proxy
+  address (with the default 120 per 60 seconds) kept every valid token from
+  that address at HTTP 429. A request without an `Authorization` or `DPoP`
+  header, body token or host `credential_from_conn` extractor now receives
+  the `401` challenge without consuming `auth_failures`. Presented
+  credentials that fail are still counted, and an exhausted bucket still
+  refuses every request from that address.
 
 ## 3.1.2 - 2026-11-05
 
