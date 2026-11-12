@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [3.3.0] - 2026-11-11
 
 Requires attesto_mcp >= 2.4.0 (was >= 1.3.0).
 

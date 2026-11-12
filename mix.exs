@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "3.2.1"
+  @version "3.3.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do

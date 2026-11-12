@@ -479,7 +479,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.2"},
+    {:attesto_mcp_server, "~> 3.3"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -582,7 +582,7 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 1.3.0 and < 3.0.0` and calls the public
+The package requires `attesto_mcp >= 2.4.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 
