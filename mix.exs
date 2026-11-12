@@ -89,7 +89,7 @@ defmodule AttestoMCP.Server.MixProject do
     end
   end
 
-  defp hex_attesto_mcp_dep, do: {:attesto_mcp, ">= 1.3.0 and < 3.0.0"}
+  defp hex_attesto_mcp_dep, do: {:attesto_mcp, ">= 2.4.0 and < 3.0.0"}
 
   defp source_checkout?(path) when is_binary(path) do
     marker = Path.join(path, ".git")

@@ -1,15 +1,17 @@
 defmodule AttestoMCP.Server.DependencyRequirementsTest do
   use ExUnit.Case, async: true
 
-  test "AttestoMCP retains its 1.3 floor and admits the coordinated 2.x line" do
+  # 2.4.0 is the first AttestoMCP whose metadata takes `:authenticate`; an
+  # older one would publish that option as a metadata member.
+  test "AttestoMCP requires the 2.4 floor and stays on the 2.x line" do
     case dependency!(:attesto_mcp) do
       {:attesto_mcp, requirement} when is_binary(requirement) ->
-        for version <- ~w(1.3.0 1.99.0 2.0.0 2.99.0) do
+        for version <- ~w(2.4.0 2.99.0) do
           assert Version.match?(version, requirement),
                  "expected #{inspect(requirement)} to admit #{version}"
         end
 
-        for version <- ~w(1.2.99 3.0.0) do
+        for version <- ~w(1.3.0 1.99.0 2.0.0 2.3.0 3.0.0) do
           refute Version.match?(version, requirement),
                  "expected #{inspect(requirement)} to reject #{version}"
         end

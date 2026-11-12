@@ -3162,7 +3162,10 @@ defmodule AttestoMCP.Server.Plug do
         scopes_supported:
           state.auth_opts[:scopes_supported] || state.opts[:scopes_supported] ||
             AttestoMCP.Scopes.all(),
-        bearer_methods_supported: ["header"]
+        bearer_methods_supported: ["header"],
+        # The DPoP algorithm list follows what the mount's authentication
+        # accepts, so a mount with no replay check does not advertise DPoP.
+        authenticate: state.auth_opts
       )
 
     send_json(conn, 200, doc)

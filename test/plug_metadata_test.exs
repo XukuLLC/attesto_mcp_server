@@ -56,6 +56,27 @@ defmodule AttestoMCP.Server.PlugMetadataTest do
     assert %{"resource" => "https://www.example.com/mcp"} = Jason.decode!(conn.resp_body)
   end
 
+  test "metadata advertises DPoP algorithms only when the mount accepts DPoP", %{server: server} do
+    auth = [issuer: "https://issuer.example", resource: "https://www.example.com/mcp"]
+
+    metadata = fn auth ->
+      opts = AttestoMCP.Server.Plug.init(server: server, path: "/mcp", auth: auth)
+
+      conn(:get, "/.well-known/oauth-protected-resource/mcp")
+      |> AttestoMCP.Server.Plug.call(opts)
+      |> Map.fetch!(:resp_body)
+      |> Jason.decode!()
+    end
+
+    refute Map.has_key?(metadata.(auth), "dpop_signing_alg_values_supported")
+
+    with_replay_check = Keyword.put(auth, :replay_check, fn _key, _ttl -> :ok end)
+    assert [_ | _] = metadata.(with_replay_check)["dpop_signing_alg_values_supported"]
+
+    acknowledged = Keyword.put(auth, :dpop_replay_unprotected_acknowledged?, true)
+    assert [_ | _] = metadata.(acknowledged)["dpop_signing_alg_values_supported"]
+  end
+
   test "protected-resource metadata bypasses mount authorization", %{server: server} do
     parent = self()
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+Requires attesto_mcp >= 2.4.0 (was >= 1.3.0).
+
+### Changed
+
+- Protected-resource metadata publishes `dpop_signing_alg_values_supported`
+  only when the mount's `auth:` options can accept a DPoP request: a
+  `:replay_check`, or `dpop_replay_unprotected_acknowledged?: true`. A mount
+  with neither refuses every DPoP request, and until now its metadata
+  advertised DPoP anyway (RFC 9728 §2).
+
+  **Behaviour change.** A mount without a replay check stops publishing the
+  member. A client that chose DPoP from that metadata was already refused at
+  the resource with `replay_check_unconfigured`.
+
 ## [3.2.1] - 2026-11-09
 
 ### Documentation
