@@ -70,7 +70,7 @@ The [CHANGELOG](CHANGELOG.md) has the full 3.0 entry.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 2.14.1 and < 5.0.0`:
+version compatible with `>= 3.0.0 and < 5.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -96,9 +96,7 @@ The installer:
 
 If one Phoenix host serves multiple named authorization profiles, use
 `attesto_phoenix` 3.x or 4.x. The automatic integration keeps each profile's runtime
-callbacks isolated. The 2.14 compatibility path supports one globally
-configured profile; using it for multiple profiles can route persistent replay
-or revocation reads through that global profile's store.
+callbacks isolated.
 
 Review every installer notice, including any migration command and exact manual
 verification emitted when endpoint source is unavailable. When the installer

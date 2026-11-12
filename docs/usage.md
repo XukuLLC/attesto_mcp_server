@@ -50,10 +50,7 @@ package to `attesto_phoenix`.
 Use `attesto_phoenix` 3.x or 4.x when one Phoenix host serves multiple named profiles.
 It binds each automatic protected-resource callback to the named profile
 loaded from the `otp_app` passed to the helper, keeping those profiles
-isolated. It does not select a profile from `conn.private`. The 2.14
-compatibility path supports one globally configured profile; using it for
-multiple profiles can route persistent replay or revocation reads through that
-global profile's store.
+isolated. It does not select a profile from `conn.private`.
 
 These bindings cover the DPoP, mTLS, URL, revocation, and principal callbacks
 listed above. Token signature verification uses the keystore carried by the
@@ -175,7 +172,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 2.14.1 and < 5.0.0` and Req requirements that overlap
+overlap `>= 3.0.0 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages

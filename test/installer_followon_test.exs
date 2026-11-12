@@ -1659,7 +1659,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
   end
 
   defp mix_source(attesto_phoenix?, req_source, app_name) do
-    attesto = if attesto_phoenix?, do: "{:attesto_phoenix, \"~> 2.0\"},", else: ""
+    attesto = if attesto_phoenix?, do: "{:attesto_phoenix, \"~> 3.0\"},", else: ""
     req = if is_binary(req_source), do: req_source <> ",", else: ""
 
     """

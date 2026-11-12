@@ -588,6 +588,8 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
 
         def to_attesto_config(%{config: config}), do: config
 
+        def with_request_config(_config, fun), do: fun.()
+
         def load_principal_fun(%{owner: owner}),
           do: {__MODULE__, :load_principal, [owner]}
 

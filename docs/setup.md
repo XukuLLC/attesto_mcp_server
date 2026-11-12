@@ -88,7 +88,7 @@ covers both forms and catalog replacement.
 The shortest deployed HTTP path assumes a working Phoenix application with
 AttestoPhoenix already issuing tokens. Run inside the Phoenix child application,
 with Igniter available and a direct Hex dependency on `attesto_phoenix`
-compatible with `>= 2.14.1 and < 5.0.0`.
+compatible with `>= 3.0.0 and < 5.0.0`.
 
 If the Igniter task is not available, add it to the host's development
 dependencies and run `mix deps.get` first:

@@ -2,7 +2,18 @@
 
 ## [3.3.0] - 2026-11-11
 
-Requires attesto_mcp >= 2.4.0 (was >= 1.3.0).
+Requires attesto_mcp >= 2.4.0 (was >= 1.3.0), which requires attesto >=
+2.13.0.
+
+### Removed
+
+- Support for `attesto_phoenix` 2.x. `attesto_phoenix` 2.x requires attesto
+  1.x, which the new attesto_mcp floor excludes, so the two can no longer be
+  installed together. `mix attesto_mcp_server.install` now accepts a direct
+  `attesto_phoenix` requirement that overlaps `>= 3.0.0 and < 5.0.0` (was
+  `>= 2.14.1 and < 5.0.0`) and refuses one that does not. A host on
+  `attesto_phoenix` 2.x upgrades `attesto_phoenix` first, or stays on
+  attesto_mcp_server 3.2.1.
 
 ### Changed
 
