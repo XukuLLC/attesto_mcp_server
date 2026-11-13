@@ -456,6 +456,58 @@ defmodule AttestoMCP.Server.PlugAuthResolverTest do
     assert fixture_calls(fixture) == 2
   end
 
+  describe "verify_auth!/1" do
+    test "runs the resolver once and accepts a configuration that pins the resource", %{
+      config: config,
+      server: server
+    } do
+      fixture =
+        start_fixture(%{
+          calls: 0,
+          config: config,
+          replay_check: AttestoMCP.Test.DPoPReplay.callback()
+        })
+
+      opts = [server: server, path: "/mcp", auth: {Resolver, :runtime_origin_options, [fixture]}]
+
+      assert :ok = Server.Plug.verify_auth!(opts)
+      assert fixture_calls(fixture) == 1
+    end
+
+    test "refuses at startup a resolver that pins no resource, before any request", %{
+      config: config,
+      server: server
+    } do
+      fixture =
+        start_fixture(%{
+          calls: 0,
+          config: config,
+          replay_check: AttestoMCP.Test.DPoPReplay.callback()
+        })
+
+      opts = [
+        server: server,
+        path: "/mcp",
+        auth: {Resolver, :protected_resource_options, [fixture]}
+      ]
+
+      # init/1 alone accepts it: the resolver is deferred to request time.
+      assert %{} = Server.Plug.init(opts)
+      assert fixture_calls(fixture) == 0
+
+      assert_raise ArgumentError, ~r/auth must pin :resource/, fn ->
+        Server.Plug.verify_auth!(opts)
+      end
+
+      assert fixture_calls(fixture) == 1
+    end
+
+    test "refuses a resolver that returns something other than options", %{server: server} do
+      opts = [server: server, path: "/mcp", auth: {Resolver, :invalid_options, []}]
+      assert_raise ArgumentError, fn -> Server.Plug.verify_auth!(opts) end
+    end
+  end
+
   test "resolver accepts only external zero-arity callbacks or MFA and remains deferred", %{
     server: server
   } do

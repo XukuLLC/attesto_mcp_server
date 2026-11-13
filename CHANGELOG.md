@@ -59,6 +59,14 @@ to start without an explicit token audience policy.
 - Validate resource registration keys as bounded UTF-8 text. Host aliases may
   still differ from the separately validated wire URI.
 
+### Added
+
+- `AttestoMCP.Server.Plug.verify_auth!/1` checks a Plug configuration once at
+  application start, including an `auth:` resolver, which is otherwise only
+  called per request. Called from `start/2` with the router's options, it
+  refuses to boot when the resolver returns no pinned resource or no token
+  audience policy, instead of the MCP route failing on its first request.
+
 ## [3.3.0] - 2026-11-11
 
 Requires attesto_mcp >= 2.4.0 (was >= 1.3.0), which requires attesto >=

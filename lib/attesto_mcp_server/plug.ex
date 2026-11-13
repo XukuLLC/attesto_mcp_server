@@ -185,6 +185,40 @@ defmodule AttestoMCP.Server.Plug do
           | {:stream_all_tools, boolean()}
           | {:stream_tools, [String.t()]}
 
+  @doc """
+  Checks, once, that `opts` give this Plug a complete authentication
+  configuration, raising `ArgumentError` when they do not.
+
+  `init/1` already validates static options, which Phoenix runs at compile
+  time in test and production. An `auth:` resolver (a function or
+  `{module, function, args}`) is only called per request, so a resolver that
+  returns no pinned resource or no token audience policy would otherwise
+  surface as an error on the first request to the MCP route, in any
+  environment. Call this from your application's `start/2`, after the
+  supervision tree (including the MCP server) has started, with the same
+  options the router passes to this Plug:
+
+      def start(_type, _args) do
+        with {:ok, pid} <- Supervisor.start_link(children, opts) do
+          AttestoMCP.Server.Plug.verify_auth!(MyAppWeb.Router.mcp_options())
+          {:ok, pid}
+        end
+      end
+
+  It runs the resolver once and applies the checks a request applies,
+  including the token audience policy `AttestoMCP.Plug.ProtectResource`
+  requires. A resolver that depends on request data cannot be checked this
+  way.
+  """
+  @spec verify_auth!([plug_option()]) :: :ok
+  def verify_auth!(opts) when is_list(opts) do
+    opts
+    |> init()
+    |> resolve_authentication!()
+
+    :ok
+  end
+
   @doc "Initializes a Plug state for an already-supervised server and pinned auth boundary."
   @spec init([plug_option()]) :: map()
   @impl Plug
