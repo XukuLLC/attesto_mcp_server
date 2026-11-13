@@ -200,7 +200,18 @@ defmodule AttestoMCP.Server.API do
   @spec child_spec(server_opts()) :: Supervisor.child_spec()
   defdelegate child_spec(opts \\ []), to: AttestoMCP.Server
 
-  @doc "Registers a tool definition and publishes a modern catalog invalidation."
+  @doc """
+  Registers a tool definition and publishes a modern catalog invalidation.
+
+  The stored definition must fit the server's `:max_definition_bytes` (default
+  1,000,000 bytes), and the count includes every variable an anonymous
+  `:handler`, `:authorize` or `:cache` function captures, plus MFA arguments.
+  A handler that captures a large value returns
+  `{:error, :definition_too_large}`. Use a named function such as
+  `&MyApp.Tools.handle/2` and load large data at call time instead. The same
+  limit applies to every `register_*` function, `register_all/2` and
+  `replace_catalog/2`.
+  """
   @spec register_tool(server(), String.t(), definition()) :: :ok | {:error, term()}
   defdelegate register_tool(server, name, definition), to: AttestoMCP.Server
 

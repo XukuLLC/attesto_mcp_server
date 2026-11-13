@@ -152,6 +152,9 @@ defmodule AttestoMCP.Server.HardeningTextTest do
     assert {:error, :definition_too_large} =
              Registry.register(registry, :tool, "closure", handler: fn _ -> captured end)
 
+    # The documented alternative: a named function that loads the data per call.
+    assert :ok = Registry.register(registry, :tool, "named", handler: &__MODULE__.large_lookup/2)
+
     # Replace/batch rejection must preserve the complete old catalog and revision.
     before = Registry.snapshot(registry)
     revision = Registry.revision(registry)
@@ -250,4 +253,7 @@ defmodule AttestoMCP.Server.HardeningTextTest do
     assert %{"error" => _} = Client.discover(strict)
     assert %{"error" => _} = Client.list_tools(strict)
   end
+
+  def large_lookup(_arguments, _context),
+    do: {:ok, %{"bytes" => byte_size(String.duplicate("x", 1_501))}}
 end

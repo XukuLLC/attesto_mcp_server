@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.4.1] - 2026-11-12
+
+### Documentation
+
+- State that the 3.4.0 `max_definition_bytes` (1,000,000) and
+  `max_catalog_bytes` (8,000,000) limits count data a definition's `handler`,
+  `authorize` and `cache` functions hold: every variable an anonymous function
+  captures, and MFA arguments. A tool whose `fn` captures a large value, such
+  as a loaded file or lookup table, fails to register with
+  `{:error, :definition_too_large}` even when its name, description and
+  schemas are small. Use a named function (`&MyApp.Tools.handle/2`) and load
+  the data at call time from a module attribute, `:persistent_term`, ETS or a
+  process, or raise `max_definition_bytes`. The registry keeps each definition,
+  captured data included, and sends it to the request process on every
+  lookup. Documented in `register_tool/3` and the usage guide's Registration
+  section.
+
 ## [3.4.0] - 2026-11-12
 
 Requires attesto_mcp >= 2.5.0 (was >= 2.4.0), whose authentication plugs refuse
@@ -10,8 +27,9 @@ to start without an explicit token audience policy.
 - Validate catalog descriptions, titles, prompt argument text, schema annotations,
   and server name, version, and instructions at registration or startup. Reject
   invalid UTF-8 and text over its field limit. Optional descriptions and titles
-  accept absent, nil, and empty values. Each complete stored definition defaults
-  to at most 1,000,000 bytes and the catalog to 8,000,000 bytes; the existing
+  accept absent, nil, and empty values. Each complete stored definition,
+  including variables its anonymous callbacks capture and MFA arguments,
+  defaults to at most 1,000,000 bytes and the catalog to 8,000,000 bytes; the existing
   1,000-definition and wire limits still apply. The new `max_definition_bytes`
   and `max_catalog_bytes` options can set explicit finite budgets. This supports
   MCP 2026-07-28 Tools, Security Considerations item 1, and Prompts,

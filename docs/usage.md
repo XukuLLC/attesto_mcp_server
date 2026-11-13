@@ -695,6 +695,28 @@ by identity and pagination cursors are opaque, signed, expiring, and bound to
 the principal, tenant, scopes, visible catalog content, page size, and
 negotiated era.
 
+Each stored definition must fit `max_definition_bytes` (default 1,000,000
+bytes). The count includes data the definition's `handler`, `authorize` and
+`cache` functions hold: every variable an anonymous function captures from the
+surrounding code, and the arguments of an MFA tuple. A tool whose `fn` captures
+a large value fails with `{:error, :definition_too_large}` even when its name,
+description and schemas are small:
+
+```elixir
+rates = File.read!("priv/rates.json") |> JSON.decode!()
+
+# Refused when `rates` is large: the closure carries the whole map.
+{:tool, "rate", %{handler: fn arguments, _context -> MyApp.Rates.find(rates, arguments) end}}
+
+# Registers: the handler is a named function that reads the data per call.
+{:tool, "rate", %{handler: &MyApp.Rates.handle/2}}
+```
+
+Load large data at call time from a module attribute, `:persistent_term`, ETS
+or a process, or raise `max_definition_bytes`. The registry keeps each
+definition, captured data included, and sends it to the request process on
+every lookup. See [text and catalog bounds](#text-and-catalog-bounds).
+
 Resource templates use bounded reverse matching for an RFC 6570 subset. A
 template may contain up to 16 separated named or reserved path expressions and
 32 globally unique variables, including prefix modifiers such as `{id:3}`.
@@ -2206,8 +2228,9 @@ Optional catalog descriptions and titles accept absent, nil and empty strings.
 Descriptions supplied as nil are stored as empty strings. Schema annotation
 values must also satisfy the JSON Schema dialect's rules. URI and MIME syntax
 checks still apply. Every complete definition, including extension metadata,
-schemas, callbacks and captured/MFA arguments, must fit `max_definition_bytes`
-(default 1,000,000). The complete catalog must fit `max_catalog_bytes` (default
+schemas, callbacks, the variables an anonymous callback captures, and MFA
+arguments, must fit `max_definition_bytes` (default 1,000,000); see
+[Registration](#registration) for keeping large captured data out of a handler. The complete catalog must fit `max_catalog_bytes` (default
 8,000,000) and at most 1,000 definitions. Byte accounting uses uncompressed
 Erlang external-term size, including keys and containers; it is a retained-data
 budget, not an exact BEAM heap quota. Both settings accept integers from 1 through

@@ -33,7 +33,7 @@ the boundary without setting up a login flow.
 In an existing Elixir project, add the dependency and fetch it:
 
 ```elixir
-{:attesto_mcp_server, "~> 3.2"}
+{:attesto_mcp_server, "~> 3.4"}
 ```
 
 ```sh
