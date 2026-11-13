@@ -65,7 +65,8 @@ defmodule AttestoMCP.Server.Text do
 
   defp arguments(arguments, opts) when is_list(arguments) do
     Enum.reduce_while(arguments, :ok, fn argument, :ok ->
-      with :ok <- field(argument["name"], :arguments, 256, opts, required: true, multiline: false),
+      with :ok <-
+             field(argument["name"], :arguments, 256, opts, required: true, multiline: false),
            :ok <- field(argument["description"], :description, 4_096, opts) do
         {:cont, :ok}
       else
