@@ -70,6 +70,69 @@ defmodule AttestoMCP.Server.HardeningElicitationTest do
     end
   end
 
+  test "form requests accept the 2025-11-25 enum forms, including multi-select, and nothing nested" do
+    form = fn property ->
+      %{
+        "message" => "Pick",
+        "requestedSchema" => %{"type" => "object", "properties" => %{"choice" => property}}
+      }
+    end
+
+    accepted = [
+      %{"type" => "string", "enum" => ["a", "b"]},
+      %{
+        "type" => "string",
+        "oneOf" => [%{"const" => "a", "title" => "A"}, %{"const" => "b", "title" => "B"}]
+      },
+      %{"type" => "string", "enum" => ["a", "b"], "enumNames" => ["A", "B"]},
+      %{
+        "type" => "array",
+        "items" => %{"type" => "string", "enum" => ["a", "b"]},
+        "minItems" => 1,
+        "maxItems" => 2
+      },
+      %{
+        "type" => "array",
+        "items" => %{
+          "anyOf" => [%{"const" => "a", "title" => "A"}, %{"const" => "b", "title" => "B"}]
+        }
+      }
+    ]
+
+    for property <- accepted do
+      assert Elicitation.valid_request?(form.(property), []),
+             "expected #{inspect(property)} to be accepted"
+    end
+
+    refused = [
+      %{"type" => "array", "items" => %{"type" => "object", "properties" => %{}}},
+      %{"type" => "array", "items" => %{"type" => "string"}},
+      %{"type" => "array", "items" => %{"anyOf" => [%{"type" => "object"}]}},
+      %{"type" => "array", "items" => %{"anyOf" => [%{"const" => "a", "properties" => %{}}]}},
+      %{"type" => "array"},
+      %{"type" => "object", "properties" => %{}}
+    ]
+
+    for property <- refused do
+      refute Elicitation.valid_request?(form.(property), []),
+             "expected #{inspect(property)} to be refused"
+    end
+
+    multi = form.(Enum.at(accepted, 3))
+
+    assert Elicitation.valid_response?(
+             multi,
+             %{"action" => "accept", "content" => %{"choice" => ["a"]}},
+             []
+           )
+
+    refute Elicitation.valid_response?(
+             multi,
+             %{"action" => "accept", "content" => %{"choice" => ["c"]}},
+             []
+           )
+  end
+
   test "both outbound paths reject unsafe URLs and allow only explicit loopback HTTP" do
     server = start_supervised!({Server, []})
     {session, _stream} = legacy_session(server, "2025-11-25")

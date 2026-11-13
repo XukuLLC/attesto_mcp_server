@@ -73,6 +73,16 @@ defmodule AttestoMCP.Server.Elicitation do
 
   defp valid_schema?(_schema, _opts), do: false
 
+  # MCP 2025-11-25 elicitation `requestedSchema` properties are primitive:
+  # string (including single-select enums, titled through `oneOf`), number,
+  # integer and boolean. The one non-primitive form is the multi-select enum
+  # (SEP-1330): an array whose `items` is an untitled string enum or a titled
+  # `anyOf` of `{const, title}` options. No other nesting is allowed.
+  defp valid_property?(%{"type" => "array"} = schema, opts) do
+    Schema.validate_schema(schema, opts) == :ok and not Map.has_key?(schema, "properties") and
+      multi_select_items?(schema["items"])
+  end
+
   defp valid_property?(schema, opts) when is_map(schema) do
     schema["type"] in ["string", "number", "integer", "boolean"] and
       Schema.validate_schema(schema, opts) == :ok and
@@ -80,6 +90,23 @@ defmodule AttestoMCP.Server.Elicitation do
   end
 
   defp valid_property?(_schema, _opts), do: false
+
+  defp multi_select_items?(%{"type" => "string", "enum" => [_ | _] = values} = items) do
+    Enum.all?(values, &is_binary/1) and not Map.has_key?(items, "anyOf")
+  end
+
+  defp multi_select_items?(%{"anyOf" => [_ | _] = options} = items) do
+    not Map.has_key?(items, "enum") and
+      Enum.all?(options, fn
+        %{"const" => value} = option when is_binary(value) ->
+          option |> Map.keys() |> Enum.all?(&(&1 in ["const", "title"]))
+
+        _other ->
+          false
+      end)
+  end
+
+  defp multi_select_items?(_items), do: false
 
   defp budget(opts),
     do: [max_bytes: opts[:max_json_bytes] || opts[:max_bytes] || Schema.default_instance_bytes()]
