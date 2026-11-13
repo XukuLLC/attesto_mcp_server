@@ -305,9 +305,9 @@ digest_tree() {
   mix deps.get
   mix run --no-start -e '
     expected = [
-      {:attesto, ">= 2.0.0 and < 3.0.0"},
-      {:attesto_mcp, ">= 1.3.0 and < 3.0.0"},
-      {:attesto_phoenix, ">= 4.0.0 and < 5.0.0"}
+      {:attesto, ">= 2.19.0 and < 3.0.0"},
+      {:attesto_mcp, ">= 2.6.0 and < 3.0.0"},
+      {:attesto_phoenix, ">= 4.15.1 and < 5.0.0"}
     ]
 
     for {app, requirement} <- expected do

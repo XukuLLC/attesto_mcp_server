@@ -70,7 +70,7 @@ The [CHANGELOG](CHANGELOG.md) has the full 3.0 entry.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 3.0.0 and < 5.0.0`:
+version compatible with `>= 4.15.1 and < 5.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -94,9 +94,9 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
-If one Phoenix host serves multiple named authorization profiles, use
-`attesto_phoenix` 3.x or 4.x. The automatic integration keeps each profile's runtime
-callbacks isolated.
+With `attesto_phoenix >= 4.15.1 and < 5.0.0`, one Phoenix host can serve
+multiple named authorization profiles. The automatic integration keeps each
+profile's runtime callbacks isolated.
 
 Review every installer notice, including any migration command and exact manual
 verification emitted when endpoint source is unavailable. When the installer
@@ -435,7 +435,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 3.4"}]
+  [{:attesto_mcp_server, "~> 3.5"}]
 end
 ```
 

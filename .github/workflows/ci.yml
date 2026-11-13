@@ -47,16 +47,16 @@ jobs:
           elixir-version: "1.18.3"
           otp-version: "27.3.4.19"
           version-type: strict
-      - name: Pin the package test graph to AttestoMCP 2.5.0
+      - name: Pin the package test graph to AttestoMCP 2.6.0
         run: |
-          sed -i 's/>= 2.5.0 and < 3.0.0/== 2.5.0/' mix.exs
+          sed -i 's/>= 2.6.0 and < 3.0.0/== 2.6.0/' mix.exs
           mix deps.unlock attesto_mcp attesto
           mix deps.get
       - name: Verify and exercise the retained minimum
         run: |
           mix run --no-start -e '
             actual = Application.spec(:attesto_mcp, :vsn) |> to_string()
-            unless actual == "2.5.0", do: raise("expected attesto_mcp 2.5.0, resolved #{actual}")
+            unless actual == "2.6.0", do: raise("expected attesto_mcp 2.6.0, resolved #{actual}")
           '
           mix compile --warnings-as-errors
           mix test test/header_name_test.exs test/scope_map_test.exs test/plug_auth_test.exs
@@ -74,7 +74,7 @@ jobs:
         run: |
           mix deps.get
           mix run --no-start -e '
-            expected = [attesto: ">= 2.13.0 and < 3.0.0", attesto_mcp: ">= 2.5.0 and < 3.0.0"]
+            expected = [attesto: ">= 2.19.0 and < 3.0.0", attesto_mcp: ">= 2.6.0 and < 3.0.0"]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
               unless Version.match?(actual, requirement),
@@ -93,7 +93,7 @@ jobs:
         env:
           ATTESTO_REF: 93c22d255cc1148aa80c0ae877d0caef3b9f0987
           ATTESTO_PHOENIX_REF: 4c041cf10fdeb7549185538b34b8d11913afb092
-          ATTESTO_MCP_REF: 03c9e80ef39f16df0411226ce8e8256fd19b0a03
+          ATTESTO_MCP_REF: 848e98b86cdee866c415d7e821bda1dff5510d2e
         run: |
           for ref in "$ATTESTO_REF" "$ATTESTO_PHOENIX_REF" "$ATTESTO_MCP_REF"; do
             if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -116,14 +116,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 03c9e80ef39f16df0411226ce8e8256fd19b0a03
+          ref: 848e98b86cdee866c415d7e821bda1dff5510d2e
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated checkout commits
         env:
           ATTESTO_REF: 93c22d255cc1148aa80c0ae877d0caef3b9f0987
           ATTESTO_PHOENIX_REF: 4c041cf10fdeb7549185538b34b8d11913afb092
-          ATTESTO_MCP_REF: 03c9e80ef39f16df0411226ce8e8256fd19b0a03
+          ATTESTO_MCP_REF: 848e98b86cdee866c415d7e821bda1dff5510d2e
         run: |
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "$ATTESTO_REF"
           test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "$ATTESTO_PHOENIX_REF"
@@ -141,7 +141,7 @@ jobs:
           ATTESTO_PHOENIX_SOURCE_PATH: ${{ github.workspace }}/coordinated/attesto_phoenix
           ATTESTO_REF: 93c22d255cc1148aa80c0ae877d0caef3b9f0987
           ATTESTO_PHOENIX_REF: 4c041cf10fdeb7549185538b34b8d11913afb092
-          ATTESTO_MCP_REF: 03c9e80ef39f16df0411226ce8e8256fd19b0a03
+          ATTESTO_MCP_REF: 848e98b86cdee866c415d7e821bda1dff5510d2e
         run: scripts/check_installer_coordinated.sh
 
   verify:
@@ -185,7 +185,7 @@ jobs:
       - name: verify released Attesto dependency ranges
         run: |
           mix run --no-start -e '
-            expected = [attesto: ">= 2.13.0 and < 3.0.0", attesto_mcp: ">= 2.5.0 and < 3.0.0"]
+            expected = [attesto: ">= 2.19.0 and < 3.0.0", attesto_mcp: ">= 2.6.0 and < 3.0.0"]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
               unless Version.match?(actual, requirement),
@@ -292,7 +292,7 @@ jobs:
       - name: verify released Attesto dependency ranges
         run: |
           mix run --no-start -e '
-            expected = [attesto: ">= 2.13.0 and < 3.0.0", attesto_mcp: ">= 2.5.0 and < 3.0.0"]
+            expected = [attesto: ">= 2.19.0 and < 3.0.0", attesto_mcp: ">= 2.6.0 and < 3.0.0"]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
               unless Version.match?(actual, requirement),
@@ -367,7 +367,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: 03c9e80ef39f16df0411226ce8e8256fd19b0a03
+          ref: 848e98b86cdee866c415d7e821bda1dff5510d2e
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated OAuth source commits
@@ -375,7 +375,7 @@ jobs:
           test "$(git -C coordinated/attesto rev-parse HEAD)" = "93c22d255cc1148aa80c0ae877d0caef3b9f0987"
           test "$(git -C coordinated/attesto_client rev-parse HEAD)" = "24275738707842fd0d03de5c5afc0695fc00947a"
           test "$(git -C coordinated/attesto_phoenix rev-parse HEAD)" = "4c041cf10fdeb7549185538b34b8d11913afb092"
-          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "03c9e80ef39f16df0411226ce8e8256fd19b0a03"
+          test "$(git -C coordinated/attesto_mcp rev-parse HEAD)" = "848e98b86cdee866c415d7e821bda1dff5510d2e"
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.4"

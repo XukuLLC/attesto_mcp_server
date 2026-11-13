@@ -18,13 +18,13 @@ the dedicated runtime also ends these processes.
 
 ## Install the released packages
 
-The `~> 2.8` requirement admits 2.8.0 and later compatible 2.x releases. To
-repeat this walkthrough against exactly 2.8.0, replace it with `"2.8.0"`.
+The `~> 3.5` requirement admits 3.5.0 and later compatible 3.x releases. To
+repeat this walkthrough against exactly 3.5.0, replace it with `"3.5.0"`.
 
 ```elixir
 Mix.install(
   [
-    {:attesto_mcp_server, "~> 2.8"},
+    {:attesto_mcp_server, "~> 3.5"},
     {:bandit, "~> 1.6"},
     {:jason, "~> 1.4"},
     {:jose, "~> 1.11"}

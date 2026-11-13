@@ -1,17 +1,16 @@
 defmodule AttestoMCP.Server.DependencyRequirementsTest do
   use ExUnit.Case, async: true
 
-  # 2.5.0 is the first AttestoMCP whose authentication plugs refuse to start
-  # without an explicit token audience policy.
-  test "AttestoMCP requires the 2.5 floor and stays on the 2.x line" do
+  # AttestoMCP 2.6.0 raises its Attesto dependency floor to 2.19.0.
+  test "AttestoMCP requires the 2.6 floor and stays on the 2.x line" do
     case dependency!(:attesto_mcp) do
       {:attesto_mcp, requirement} when is_binary(requirement) ->
-        for version <- ~w(2.5.0 2.99.0) do
+        for version <- ~w(2.6.0 2.99.0) do
           assert Version.match?(version, requirement),
                  "expected #{inspect(requirement)} to admit #{version}"
         end
 
-        for version <- ~w(1.3.0 1.99.0 2.0.0 2.4.0 3.0.0) do
+        for version <- ~w(1.3.0 1.99.0 2.0.0 2.4.0 2.5.0 2.5.99 3.0.0) do
           refute Version.match?(version, requirement),
                  "expected #{inspect(requirement)} to reject #{version}"
         end

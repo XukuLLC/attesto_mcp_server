@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.5.0] - 2026-11-13
+
+Requires attesto_mcp >= 2.6.0 (was >= 2.5.0).
+
+- The installer now adds attesto_phoenix >= 4.15.1 (was >= 3.0.0), retaining
+  the < 5.0.0 ceiling.
+
 ## [3.4.1] - 2026-11-12
 
 ### Documentation

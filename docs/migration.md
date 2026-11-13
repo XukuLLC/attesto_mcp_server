@@ -1,5 +1,13 @@
 # Migration runbook
 
+## 3.5 dependency floors
+
+Version 3.5 requires `attesto_mcp >= 2.6.0 and < 3.0.0`, which requires
+`attesto >= 2.19.0 and < 3.0.0`. The installer now requires a direct Hex
+`attesto_phoenix` requirement overlapping `>= 4.15.1 and < 5.0.0`. Upgrade
+older Phoenix hosts to that range before running the installer, then run
+`mix deps.get`.
+
 ## Unreleased hardening
 
 Registration now checks all catalog display text and server identity text.

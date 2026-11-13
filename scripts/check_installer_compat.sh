@@ -9,7 +9,6 @@ temp_root=${TMPDIR:-/tmp}
 host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-host.XXXXXX")
 phoenix_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-host.XXXXXX")
 phoenix_floor_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-floor-host.XXXXXX")
-phoenix_three_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-three-host.XXXXXX")
 phoenix_four_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-four-host.XXXXXX")
 phoenix_postgres_floor_host_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-phoenix-postgres-floor-host.XXXXXX")
 outside_config_dir=$(mktemp -d "$temp_root/attesto-mcp-installer-outside-config.XXXXXX")
@@ -18,7 +17,7 @@ generated_root=$(mktemp -d "$temp_root/attesto-mcp-installer-generated.XXXXXX")
 generated_host_dir="$generated_root/installer_host"
 
 cleanup() {
-  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$phoenix_three_host_dir" "$phoenix_four_host_dir" "$phoenix_postgres_floor_host_dir" "$outside_config_dir" "$absent_dir" "$generated_root"
+  rm -rf -- "$host_dir" "$phoenix_host_dir" "$phoenix_floor_host_dir" "$phoenix_four_host_dir" "$phoenix_postgres_floor_host_dir" "$outside_config_dir" "$absent_dir" "$generated_root"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -32,10 +31,6 @@ cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_floor_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_floor_host_dir/mix.exs"
 cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_floor_host_dir/lib/installer_host_web/router.ex"
 cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_floor_host_dir/lib/installer_host_web/parsed_body_probe.ex"
-cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_three_host_dir"
-cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_three_host_dir/mix.exs"
-cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_three_host_dir/lib/installer_host_web/router.ex"
-cp "$repo_dir/fixtures/installer_phoenix_host/parsed_body_probe.ex" "$phoenix_three_host_dir/lib/installer_host_web/parsed_body_probe.ex"
 cp -R "$repo_dir/fixtures/installer_host/." "$phoenix_four_host_dir"
 cp "$repo_dir/fixtures/installer_phoenix_host/mix.exs" "$phoenix_four_host_dir/mix.exs"
 cp "$repo_dir/fixtures/installer_phoenix_host/router.ex" "$phoenix_four_host_dir/lib/installer_host_web/router.ex"
@@ -336,13 +331,13 @@ installed_http_smoke() {
   elixir -e '
     path = "mix.exs"
     source = File.read!(path)
-    marker = ~s({:attesto_phoenix, "~> 3.0"})
+    marker = ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0"})
 
     unless length(:binary.matches(source, marker)) == 1 do
       raise("attesto_phoenix floor dependency marker was not unique")
     end
 
-    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "== 3.0.0"})))
+    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "== 4.15.1"})))
   '
 
   mix deps.get
@@ -361,7 +356,7 @@ installed_http_smoke() {
              not Keyword.has_key?(default_protected, :nonce_check) and
              not Keyword.has_key?(default_protected, :nonce_issue) and
              not Keyword.has_key?(default_protected, :cert_der) do
-      raise("attesto_phoenix 3.0.0 default protected-resource callbacks failed")
+      raise("attesto_phoenix 4.15.1 default protected-resource callbacks failed")
     end
 
     current = Application.fetch_env!(:installer_host, AttestoPhoenix.Config)
@@ -382,8 +377,8 @@ installed_http_smoke() {
 
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
-    unless to_string(Application.spec(:attesto_phoenix, :vsn)) == "3.0.0" do
-      raise("attesto_phoenix floor lane did not resolve exactly 3.0.0")
+    unless to_string(Application.spec(:attesto_phoenix, :vsn)) == "4.15.1" do
+      raise("attesto_phoenix floor lane did not resolve exactly 4.15.1")
     end
 
     unless match?(%Attesto.Config{}, protected[:config]) and
@@ -393,12 +388,12 @@ installed_http_smoke() {
              is_function(protected[:cert_der], 1) and
              is_function(protected[:htu], 1) and
              is_function(protected[:principal], 2) do
-      raise("attesto_phoenix 3.0.0 protected-resource integration failed")
+      raise("attesto_phoenix 4.15.1 protected-resource integration failed")
     end
 
     unless protected[:replay_check].("fresh", 60) == :ok and
              protected[:replay_check].("replay", 60) == {:error, :replay} do
-      raise("attesto_phoenix 3.0.0 replay callback result/failure behavior failed")
+      raise("attesto_phoenix 4.15.1 replay callback result/failure behavior failed")
     end
 
     nonce = protected[:nonce_issue].()
@@ -406,7 +401,7 @@ installed_http_smoke() {
     unless nonce == "compat-nonce" and
              protected[:nonce_check].(nonce) == :ok and
              protected[:nonce_check].("invalid-nonce") == {:error, :use_dpop_nonce} do
-      raise("attesto_phoenix 3.0.0 nonce callback result/failure behavior failed")
+      raise("attesto_phoenix 4.15.1 nonce callback result/failure behavior failed")
     end
 
     cert_conn =
@@ -415,7 +410,7 @@ installed_http_smoke() {
 
     unless protected[:cert_der].(cert_conn) == nil and
              protected[:htu].(Plug.Test.conn(:get, "/mcp")) == "https://mcp.example.com/mcp" do
-      raise("attesto_phoenix 3.0.0 certificate or URL callback behavior failed")
+      raise("attesto_phoenix 4.15.1 certificate or URL callback behavior failed")
     end
 
     unless protected[:principal].(
@@ -423,125 +418,10 @@ installed_http_smoke() {
              %{binding: :bearer}
            ) == {:ok, %{id: "svc_installer"}} and
              protected[:principal].(%{}, %{binding: :bearer}) == {:error, :principal_load_failed} do
-      raise("attesto_phoenix 3.0.0 principal callback result/failure behavior failed")
+      raise("attesto_phoenix 4.15.1 principal callback result/failure behavior failed")
     end
   '
 
-)
-
-(
-  cd "$phoenix_three_host_dir"
-  export ATTESTO_MCP_SERVER_PATH="$repo_dir"
-  INSTALLER_HOST_SIGNING_PEM=$(openssl genpkey -algorithm ED25519 2>/dev/null)
-  export INSTALLER_HOST_SIGNING_PEM
-
-  write_compatibility_callback_probe "$phoenix_three_host_dir"
-
-  elixir -e '
-    path = "mix.exs"
-    source = File.read!(path)
-    marker = ~s({:attesto_phoenix, "~> 3.0"})
-
-    unless length(:binary.matches(source, marker)) == 1 do
-      raise("attesto_phoenix 3.x dependency marker was not unique")
-    end
-
-    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "~> 3.0"})))
-  '
-
-  mix deps.get
-  mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
-  grep -Fq 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex
-  test "$(grep -F -c 'attesto_routes(protected_resource_paths: ["/mcp"])' lib/installer_host_web/router.ex)" -eq 1
-  test "$(grep -F -c 'Elixir.Phoenix.Router.forward("/mcp"' lib/installer_host_web/router.ex)" -eq 1
-  if grep -Fq 'oauth-protected-resource' lib/installer_host_web/router.ex; then
-    echo "reused Phoenix 3 metadata route was duplicated" >&2
-    exit 1
-  fi
-
-  first_digest=$(digest_tree)
-  mix format --check-formatted
-  mix compile --warnings-as-errors
-  mix test
-  mix run -e '
-    default_protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
-
-    unless is_function(default_protected[:replay_check], 2) and
-             is_function(default_protected[:htu], 1) and
-             is_function(default_protected[:principal], 2) and
-             not Keyword.has_key?(default_protected, :nonce_check) and
-             not Keyword.has_key?(default_protected, :nonce_issue) and
-             not Keyword.has_key?(default_protected, :cert_der) do
-      raise("attesto_phoenix 3.x default protected-resource callbacks failed")
-    end
-
-    current = Application.fetch_env!(:installer_host, AttestoPhoenix.Config)
-
-    Application.put_env(
-      :installer_host,
-      AttestoPhoenix.Config,
-      Keyword.merge(current,
-        replay_check: {InstallerHost.CompatibilityCallbacks, :replay},
-        nonce_store: InstallerHost.CompatibilityNonceStore,
-        dpop_nonce_required: true,
-        mtls_enabled: true,
-        trusted_proxies: ["127.0.0.1/32"],
-        cert_der: {InstallerHost.CompatibilityCallbacks, :cert_der},
-        htu: {InstallerHost.CompatibilityCallbacks, :htu}
-      )
-    )
-
-    version = Application.spec(:attesto_phoenix, :vsn) |> to_string()
-    protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
-
-    unless Version.match?(version, ">= 3.0.0 and < 4.0.0") do
-      raise("attesto_phoenix 3.x lane resolved an unsupported version")
-    end
-
-    unless match?(%Attesto.Config{}, protected[:config]) and
-             is_function(protected[:replay_check], 2) and
-             is_function(protected[:nonce_check], 1) and
-             is_function(protected[:nonce_issue], 0) and
-             is_function(protected[:cert_der], 1) and
-             is_function(protected[:htu], 1) and
-             is_function(protected[:principal], 2) do
-      raise("attesto_phoenix 3.x protected-resource integration failed")
-    end
-
-    unless protected[:replay_check].("fresh", 60) == :ok and
-             protected[:replay_check].("replay", 60) == {:error, :replay} do
-      raise("attesto_phoenix 3.x replay callback result/failure behavior failed")
-    end
-
-    nonce = protected[:nonce_issue].()
-
-    unless nonce == "compat-nonce" and
-             protected[:nonce_check].(nonce) == :ok and
-             protected[:nonce_check].("invalid-nonce") == {:error, :use_dpop_nonce} do
-      raise("attesto_phoenix 3.x nonce callback result/failure behavior failed")
-    end
-
-    cert_conn =
-      Plug.Test.conn(:get, "/mcp")
-      |> Plug.Test.put_peer_data(%{address: {127, 0, 0, 1}})
-
-    unless protected[:cert_der].(cert_conn) == nil and
-             protected[:htu].(Plug.Test.conn(:get, "/mcp")) == "https://mcp.example.com/mcp" do
-      raise("attesto_phoenix 3.x certificate or URL callback behavior failed")
-    end
-
-    unless protected[:principal].(
-             %{"sub" => "svc_installer", "client_id" => "installer"},
-             %{binding: :bearer}
-           ) == {:ok, %{id: "svc_installer"}} and
-             protected[:principal].(%{}, %{binding: :bearer}) == {:error, :principal_load_failed} do
-      raise("attesto_phoenix 3.x principal callback result/failure behavior failed")
-    end
-  '
-
-  mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
-  second_digest=$(digest_tree)
-  test "$first_digest" = "$second_digest"
 )
 
 (
@@ -551,18 +431,6 @@ installed_http_smoke() {
   export INSTALLER_HOST_SIGNING_PEM
 
   write_compatibility_callback_probe "$phoenix_four_host_dir"
-
-  elixir -e '
-    path = "mix.exs"
-    source = File.read!(path)
-    marker = ~s({:attesto_phoenix, "~> 3.0"})
-
-    unless length(:binary.matches(source, marker)) == 1 do
-      raise("attesto_phoenix 4.x dependency marker was not unique")
-    end
-
-    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "~> 4.0"})))
-  '
 
   mix deps.get
   mix attesto_mcp_server.install --base-url https://mcp.example.com --enable-cimd --reuse-metadata-route --yes
@@ -609,7 +477,7 @@ installed_http_smoke() {
     version = Application.spec(:attesto_phoenix, :vsn) |> to_string()
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
-    unless Version.match?(version, ">= 4.0.0 and < 5.0.0") do
+    unless Version.match?(version, ">= 4.15.1 and < 5.0.0") do
       raise("attesto_phoenix 4.x lane resolved an unsupported version")
     end
 
@@ -689,7 +557,7 @@ mix phx.new "$generated_host_dir" \
 
     dependencies = """
           {:attesto_mcp_server, path: System.fetch_env!("ATTESTO_MCP_SERVER_PATH")},
-          {:attesto_phoenix, ">= 4.7.1 and < 5.0.0"},
+          {:attesto_phoenix, ">= 4.15.1 and < 5.0.0"},
           {:igniter, "== 0.6.0", override: true},
     """
 

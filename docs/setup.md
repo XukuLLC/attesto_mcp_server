@@ -33,7 +33,7 @@ the boundary without setting up a login flow.
 In an existing Elixir project, add the dependency and fetch it:
 
 ```elixir
-{:attesto_mcp_server, "~> 3.4"}
+{:attesto_mcp_server, "~> 3.5"}
 ```
 
 ```sh
@@ -88,7 +88,7 @@ covers both forms and catalog replacement.
 The shortest deployed HTTP path assumes a working Phoenix application with
 AttestoPhoenix already issuing tokens. Run inside the Phoenix child application,
 with Igniter available and a direct Hex dependency on `attesto_phoenix`
-compatible with `>= 3.0.0 and < 5.0.0`.
+compatible with `>= 4.15.1 and < 5.0.0`.
 
 If the Igniter task is not available, add it to the host's development
 dependencies and run `mix deps.get` first:

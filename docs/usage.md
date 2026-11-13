@@ -47,10 +47,10 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
-Use `attesto_phoenix` 3.x or 4.x when one Phoenix host serves multiple named profiles.
-It binds each automatic protected-resource callback to the named profile
-loaded from the `otp_app` passed to the helper, keeping those profiles
-isolated. It does not select a profile from `conn.private`.
+With `attesto_phoenix >= 4.15.1 and < 5.0.0`, one Phoenix host can serve
+multiple named profiles. It binds each automatic protected-resource callback
+to the named profile loaded from the `otp_app` passed to the helper, keeping
+those profiles isolated. It does not select a profile from `conn.private`.
 
 These bindings cover the DPoP, mTLS, URL, revocation, and principal callbacks
 listed above. Token signature verification uses the keystore carried by the
@@ -172,7 +172,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 3.0.0 and < 5.0.0` and Req requirements that overlap
+overlap `>= 4.15.1 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -476,7 +476,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.4"},
+    {:attesto_mcp_server, "~> 3.5"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -579,7 +579,7 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 2.5.0 and < 3.0.0` and calls the public
+The package requires `attesto_mcp >= 2.6.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 
@@ -592,15 +592,12 @@ If that URI follows the request `Host`, a server that answers more than one
 server. `AttestoMCP.Plug.Authenticate` chooses the URI in this order:
 
 1. an `:htu` callback in the `auth` options, unchanged;
-2. with `attesto_mcp` 2.3.0 and later, the mount's pinned origin
-   (`base_url`/`origin`, or the origin of an absolute `resource`) followed
-   by the request path;
-3. with `attesto_mcp` 2.2.4 and earlier, Attesto core's default, built from
-   the request scheme, `Host` header, and port.
+2. the mount's pinned origin (`base_url`/`origin`, or the origin of an
+   absolute `resource`) followed by the request path.
 
-Every mount pins its origin, so on the static `auth: [config: ...]` path an
-`attesto_mcp` upgrade pins the `htu` with no configuration change. With
-`allow_dynamic_origin: true` the origin is the request's own, so the `htu`
+Every mount pins its origin, so the static `auth: [config: ...]` path pins
+the `htu` with no additional configuration. With `allow_dynamic_origin: true`
+the origin is the request's own, so the `htu`
 follows the request `Host`; `:allowed_hosts` bounds which hosts are answered.
 
 On the AttestoPhoenix path
@@ -608,9 +605,8 @@ On the AttestoPhoenix path
 the derived options always carry AttestoPhoenix's `:htu` callback. It counts
 as step 1, so the mount's `base_url` does not choose the `htu` there. The
 callback uses AttestoPhoenix's own configuration: its `:htu` when set, else
-`:resource_origin` followed by the request path (`attesto_phoenix` 4.6.0
-and later), else the request `Host` (or the forwarded host from a peer in
-`:trusted_proxies`). Pin it with one value, the same origin as the mount's
+`:resource_origin` followed by the request path, else the request `Host`
+(or the forwarded host from a peer in `:trusted_proxies`). Pin it with one value, the same origin as the mount's
 `base_url`:
 
 ```elixir

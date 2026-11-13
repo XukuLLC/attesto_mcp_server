@@ -72,8 +72,8 @@ defmodule AttestoMCP.Server.Phoenix do
   to the mount's public origin to pin it; see "DPoP target URI" in the usage
   guide.
 
-  `attesto_phoenix` 3.x and 4.x bind each callback to the named profile loaded from
-  the `otp_app` argument, so multiple named host profiles remain isolated.
+  `attesto_phoenix` 4.15.1 and later bind each callback to the named profile
+  loaded from the `otp_app` argument, so multiple named host profiles remain isolated.
   This helper does not select a profile from `conn.private`.
 
   This helper fails closed when the optional package or its supported public
