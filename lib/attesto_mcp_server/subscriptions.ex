@@ -335,23 +335,26 @@ defmodule AttestoMCP.Server.Subscriptions do
   defp deliver(state, id, subscription, notification, opts) do
     event = event_for(notification, id)
     current_authorizer = Keyword.get(opts, :authorize)
-    authorizers = Enum.reject([subscription.authorize, current_authorizer], &is_nil/1)
     required_scopes = List.wrap(opts[:required_scopes])
     required_scope_sets = notification_scope_sets(opts, required_scopes)
 
-    allowed =
+    owner = %{
+      principal: subscription.principal,
+      tenant: subscription.tenant,
+      event: event,
+      required_scopes: required_scopes,
+      required_scope_sets: required_scope_sets
+    }
+
+    # Host callbacks run only for an event this subscription may receive: the
+    # filter matches and the captured scopes grant it. A scope set the
+    # subscription cannot satisfy fails closed before any host code runs.
+    deliverable =
       matches?(subscription.filter, event) and
-        ScopePolicy.scope_sets_grant?(required_scope_sets, subscription.scopes) and
-        Enum.all?(
-          authorizers,
-          &authorized?(&1, %{
-            principal: subscription.principal,
-            tenant: subscription.tenant,
-            event: event,
-            required_scopes: required_scopes,
-            required_scope_sets: required_scope_sets
-          })
-        )
+        ScopePolicy.scope_sets_grant?(required_scope_sets, subscription.scopes)
+
+    owner_allowed = not deliverable or authorized?(subscription.authorize, owner)
+    allowed = deliverable and owner_allowed and authorized?(current_authorizer, owner)
 
     cond do
       not allowed ->
@@ -362,7 +365,13 @@ defmodule AttestoMCP.Server.Subscriptions do
               transport: :core
             })
 
-        state
+        if owner_allowed do
+          state
+        else
+          send(subscription.sink, {:mcp_subscription_close, id})
+          telemetry(state, [:subscription, :close], %{count: 1}, %{transport: :core})
+          remove(state, {subscription.sink, id})
+        end
 
       subscription.queue_size >= (state.opts[:max_queue] || @max_queue) ->
         if not subscription.overflowed do

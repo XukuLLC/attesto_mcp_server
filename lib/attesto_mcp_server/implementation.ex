@@ -6,7 +6,7 @@ defmodule AttestoMCP.Server.Implementation do
   # display metadata only; nothing in the server routes, authorizes, or
   # partitions caches by it.
 
-  alias AttestoMCP.Server.Icons
+  alias AttestoMCP.Server.{Icons, Text}
 
   @legacy_2025_06_18 "2025-06-18"
   @max_text_bytes 1_024
@@ -59,12 +59,12 @@ defmodule AttestoMCP.Server.Implementation do
   end
 
   defp text?(value, max_bytes) when is_binary(value),
-    do: byte_size(value) in 1..max_bytes and String.valid?(value)
+    do: Text.valid?(value, max_bytes, required: true)
 
   defp text?(_value, _max_bytes), do: false
 
   defp optional_text?(value, max_bytes) when is_binary(value),
-    do: byte_size(value) <= max_bytes and String.valid?(value)
+    do: Text.valid?(value, max_bytes)
 
   defp optional_text?(_value, _max_bytes), do: false
 

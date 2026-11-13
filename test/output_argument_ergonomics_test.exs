@@ -141,6 +141,7 @@ defmodule AttestoMCP.Server.OutputArgumentErgonomicsTest do
     server =
       start_server(
         max_json_bytes: 2_100_000,
+        max_definition_bytes: 2_100_000,
         output_canonicalization: :jason,
         registrations: [
           {:tool, "context-result",

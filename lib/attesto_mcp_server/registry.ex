@@ -10,7 +10,16 @@ defmodule AttestoMCP.Server.Registry do
   @type registration :: {primitive(), String.t(), map() | keyword()}
   use GenServer
 
-  alias AttestoMCP.Server.{CachePolicy, HeaderName, HostCallback, Icons, Schema, UriTemplate}
+  alias AttestoMCP.Server.{
+    CachePolicy,
+    HeaderName,
+    HostCallback,
+    Icons,
+    Output,
+    Schema,
+    Text,
+    UriTemplate
+  }
 
   @types [:tool, :resource, :template, :prompt, :completion]
   @max_identity_bytes 256
@@ -56,9 +65,9 @@ defmodule AttestoMCP.Server.Registry do
   @doc "Validates and registers one primitive, rejecting duplicate identities."
   @spec register(pid(), primitive(), String.t(), map() | keyword()) :: :ok | {:error, term()}
   def register(pid, type, identity, definition) when type in @types do
-    max_bytes = max_json_bytes(pid)
+    opts = GenServer.call(pid, :validation_options)
 
-    with {:ok, normalized} <- normalize(type, identity, definition, max_bytes) do
+    with {:ok, normalized} <- normalize(type, identity, definition, opts) do
       GenServer.call(pid, {:register, type, identity, normalized})
     end
   end
@@ -70,9 +79,9 @@ defmodule AttestoMCP.Server.Registry do
           {:ok, [{primitive(), String.t(), definition()}]} | {:error, term()}
   def register_all(pid, registrations)
       when is_pid(pid) and is_list(registrations) and length(registrations) <= @max_batch_size do
-    max_bytes = max_json_bytes(pid)
+    opts = GenServer.call(pid, :validation_options)
 
-    with {:ok, normalized} <- normalize_registrations(registrations, max_bytes) do
+    with {:ok, normalized} <- normalize_registrations(registrations, opts) do
       GenServer.call(pid, {:register_all, normalized})
     end
   end
@@ -88,9 +97,9 @@ defmodule AttestoMCP.Server.Registry do
           | {:error, term()}
   def replace_all(pid, registrations)
       when is_pid(pid) and is_list(registrations) and length(registrations) <= @max_batch_size do
-    max_bytes = max_json_bytes(pid)
+    opts = GenServer.call(pid, :validation_options)
 
-    with {:ok, normalized} <- normalize_registrations(registrations, max_bytes) do
+    with {:ok, normalized} <- normalize_registrations(registrations, opts) do
       GenServer.call(pid, {:replace_all, normalized})
     end
   end
@@ -106,9 +115,9 @@ defmodule AttestoMCP.Server.Registry do
       when is_pid(pid) and is_list(registrations) and
              length(registrations) <= @max_catalog_size and is_integer(revision) and
              revision >= 0 do
-    max_bytes = max_json_bytes(pid)
+    opts = GenServer.call(pid, :validation_options)
 
-    with {:ok, normalized} <- normalize_registrations(registrations, max_bytes) do
+    with {:ok, normalized} <- normalize_registrations(registrations, opts) do
       GenServer.call(pid, {:restore_all, normalized, revision})
     end
   end
@@ -158,10 +167,29 @@ defmodule AttestoMCP.Server.Registry do
 
   def scope_sets(_definition), do: []
 
-  defp max_json_bytes(pid), do: GenServer.call(pid, :max_json_bytes)
+  @doc false
+  def validate_options!(opts) do
+    unless Keyword.get(opts, :display_text_policy, :off) in [:off, :reject],
+      do: raise(ArgumentError, ":display_text_policy must be :off or :reject")
+
+    Enum.each([:max_definition_bytes, :max_catalog_bytes], fn key ->
+      value = Keyword.get(opts, key, 1_000_000)
+
+      unless is_integer(value) and value in 1..64_000_000,
+        do: raise(ArgumentError, "#{key} must be between 1 and 64000000 bytes")
+    end)
+  end
 
   @impl true
   def init(opts) do
+    validate_options!(opts)
+
+    opts =
+      opts
+      |> Keyword.put_new(:max_definition_bytes, 1_000_000)
+      |> Keyword.put_new(:max_catalog_bytes, 8_000_000)
+      |> Keyword.put_new(:display_text_policy, :off)
+
     max_bytes = Keyword.get(opts, :max_json_bytes, Schema.default_instance_bytes())
 
     unless is_integer(max_bytes) and max_bytes >= Schema.min_allowed_instance_bytes() and
@@ -182,7 +210,7 @@ defmodule AttestoMCP.Server.Registry do
 
   @impl true
   def handle_call({:register, type, identity, definition}, _from, state) do
-    case put_registration(state.items, {type, identity, definition}) do
+    case put_registration(state.items, {type, identity, definition}, state.opts) do
       {:ok, items} ->
         {:reply, :ok,
          %{
@@ -200,7 +228,7 @@ defmodule AttestoMCP.Server.Registry do
   def handle_call({:register_all, registrations}, _from, state) do
     result =
       Enum.reduce_while(registrations, {:ok, state.items}, fn registration, {:ok, items} ->
-        case put_registration(items, registration) do
+        case put_registration(items, registration, state.opts) do
           {:ok, items} -> {:cont, {:ok, items}}
           {:error, reason} -> {:halt, {:error, reason}}
         end
@@ -222,7 +250,7 @@ defmodule AttestoMCP.Server.Registry do
   end
 
   def handle_call({:replace_all, registrations}, _from, state) do
-    case build_catalog(registrations) do
+    case build_catalog(registrations, state.opts) do
       {:ok, items} ->
         affected = Enum.filter(@types, &(state.items[&1] !== items[&1]))
 
@@ -247,7 +275,7 @@ defmodule AttestoMCP.Server.Registry do
     empty = Map.new(@types, &{&1, %{}})
 
     if state.items == empty and state.revision == 0 do
-      case build_catalog(registrations) do
+      case build_catalog(registrations, state.opts) do
         {:ok, items} ->
           {:reply, :ok,
            %{
@@ -267,7 +295,9 @@ defmodule AttestoMCP.Server.Registry do
 
   def handle_call(:snapshot, _from, state), do: {:reply, state.items, state}
   def handle_call(:revision, _from, state), do: {:reply, state.revision, state}
-  def handle_call(:max_json_bytes, _from, state), do: {:reply, state.max_json_bytes, state}
+
+  def handle_call(:validation_options, _from, state),
+    do: {:reply, Keyword.put(state.opts, :max_json_bytes, state.max_json_bytes), state}
 
   def handle_call({:list, type}, _from, state) do
     {:reply, state.items[type] |> Map.values() |> Enum.sort_by(& &1.identity), state}
@@ -300,10 +330,10 @@ defmodule AttestoMCP.Server.Registry do
     end)
   end
 
-  defp normalize_registrations(registrations, max_bytes) do
+  defp normalize_registrations(registrations, opts) do
     Enum.reduce_while(registrations, {:ok, []}, fn
       {type, identity, definition}, {:ok, normalized} when type in @types ->
-        case normalize(type, identity, definition, max_bytes) do
+        case normalize(type, identity, definition, opts) do
           {:ok, definition} ->
             {:cont, {:ok, [{type, identity, definition} | normalized]}}
 
@@ -320,17 +350,17 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
-  defp build_catalog(registrations) do
+  defp build_catalog(registrations, opts) do
     Enum.reduce_while(registrations, {:ok, Map.new(@types, &{&1, %{}})}, fn registration,
                                                                             {:ok, items} ->
-      case put_registration(items, registration) do
+      case put_registration(items, registration, opts) do
         {:ok, items} -> {:cont, {:ok, items}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp put_registration(items, {type, identity, definition}) do
+  defp put_registration(items, {type, identity, definition}, opts) do
     type_items = items[type]
     ref = definition[:ref] || definition["ref"]
 
@@ -353,6 +383,10 @@ defmodule AttestoMCP.Server.Registry do
       catalog_size(items) >= @max_catalog_size ->
         {:error, :too_many_registrations}
 
+      :erlang.external_size(put_in(items, [type, identity], definition)) >
+          opts[:max_catalog_bytes] ->
+        {:error, :catalog_too_large}
+
       true ->
         {:ok, put_in(items, [type, identity], definition)}
     end
@@ -362,16 +396,38 @@ defmodule AttestoMCP.Server.Registry do
     Enum.reduce(@types, 0, fn type, count -> count + map_size(Map.get(items, type, %{})) end)
   end
 
-  defp normalize(type, identity, definition, max_bytes) do
-    with :ok <- valid_identity(type, identity),
+  defp normalize(type, identity, definition, opts) do
+    max_bytes = opts[:max_json_bytes]
+
+    with :ok <- definition_size(definition, opts),
+         :ok <- valid_identity(type, identity),
          {:ok, definition} <- map_definition(definition),
          {:ok, value} <- defaults(type, identity, definition),
+         value =
+           Map.update(value, :description, "", fn value ->
+             if is_nil(value), do: "", else: value
+           end),
          {:ok, value} <- normalize_definition_values(value),
          {:ok, value} <- normalize_nested(type, value),
+         :ok <- Text.catalog(value, opts),
          :ok <- validate_common(value, max_bytes),
-         :ok <- validate_type(type, value, max_bytes) do
+         :ok <- validate_type(type, value, max_bytes),
+         :ok <- definition_size(value, opts),
+         {:ok, _json} <-
+           Output.canonicalize(Map.drop(value, [:handler, :authorize, :cache]),
+             max_bytes: opts[:max_definition_bytes]
+           ) do
       {:ok, value}
+    else
+      {:error, :not_json} -> {:error, {:invalid_definition, :not_json}}
+      error -> error
     end
+  end
+
+  defp definition_size(value, opts) do
+    if :erlang.external_size(value) <= opts[:max_definition_bytes],
+      do: :ok,
+      else: {:error, :definition_too_large}
   end
 
   defp map_definition(definition) when is_map(definition),
@@ -689,14 +745,6 @@ defmodule AttestoMCP.Server.Registry do
     end
   end
 
-  defp valid_description(value) when is_binary(value) and byte_size(value) in 1..4_096 do
-    if String.valid?(value) and String.trim(value) != "",
-      do: :ok,
-      else: {:error, {:invalid_definition, :description}}
-  end
-
-  defp valid_description(_), do: {:error, {:invalid_definition, :description}}
-
   defp valid_annotations(value, max_bytes) when is_map(value) do
     case Schema.json_value(value, max_bytes: max_bytes) do
       :ok -> valid_annotation_fields(value)
@@ -707,25 +755,16 @@ defmodule AttestoMCP.Server.Registry do
   defp valid_annotations(_, _max_bytes), do: {:error, {:invalid_definition, :annotations}}
 
   defp valid_metadata(value, max_bytes) do
-    title = value[:title] || value["title"]
     icons = value[:icons] || value["icons"]
     meta = value[:_meta] || value["_meta"]
     size = value[:size] || value["size"]
 
-    with :ok <- optional_metadata_string(title, :title),
-         :ok <- optional_icons(icons),
+    with :ok <- optional_icons(icons),
          :ok <- optional_json_metadata(meta, max_bytes),
          :ok <- optional_size(size) do
       :ok
     end
   end
-
-  defp optional_metadata_string(nil, _field), do: :ok
-
-  defp optional_metadata_string(value, _field) when is_binary(value) and byte_size(value) > 0,
-    do: :ok
-
-  defp optional_metadata_string(_, field), do: {:error, {:invalid_definition, field}}
 
   defp optional_icons(icons) do
     if Icons.component_list?(icons),
@@ -775,7 +814,6 @@ defmodule AttestoMCP.Server.Registry do
 
   defp validate_type(:tool, value, max_bytes) do
     with :ok <- valid_name(value[:name], :name),
-         :ok <- valid_description(value[:description]),
          :ok <- valid_tool_input_schema(value[:input_schema], max_bytes),
          :ok <- optional_schema(value[:output_schema], max_bytes) do
       :ok
@@ -941,7 +979,9 @@ defmodule AttestoMCP.Server.Registry do
   defp valid_identity(type, identity) do
     case type do
       :resource ->
-        if valid_uri(identity), do: :ok, else: {:error, {:invalid_definition, :uri}}
+        # The registration key may be a host alias distinct from the wire URI.
+        # Validate its text, then validate the actual URI in validate_type/3.
+        valid_text(identity, :identity)
 
       :template ->
         if valid_template(identity), do: :ok, else: {:error, {:invalid_definition, :uri_template}}
@@ -1071,13 +1111,15 @@ defmodule AttestoMCP.Server.Registry do
 
     # URI validation here is syntactic hardening. A host that dereferences a
     # registered identifier must apply its own destination policy.
-    String.valid?(uri) and not String.contains?(uri, ["..", "\\", "\u0000", "\r", "\n"]) and
-      is_nil(parsed.userinfo) and
-      host not in ["localhost", "127.0.0.1", "::1", "0.0.0.0"] and
-      scheme not in ["javascript", "data", "vbscript"] and
-      (String.starts_with?(uri, ["http://", "https://", "urn:", "file:", "/"]) or
-         parsed.scheme not in [nil, ""])
-      |> bool_ok(:uri)
+    valid =
+      String.valid?(uri) and not String.contains?(uri, ["..", "\\", "\u0000", "\r", "\n"]) and
+        is_nil(parsed.userinfo) and
+        host not in ["localhost", "127.0.0.1", "::1", "0.0.0.0"] and
+        scheme not in ["javascript", "data", "vbscript"] and
+        (String.starts_with?(uri, ["http://", "https://", "urn:", "file:", "/"]) or
+           parsed.scheme not in [nil, ""])
+
+    bool_ok(valid, :uri)
   end
 
   defp valid_uri(_), do: {:error, {:invalid_definition, :uri}}
@@ -1101,7 +1143,7 @@ defmodule AttestoMCP.Server.Registry do
     description = argument[:description] || argument["description"]
 
     is_binary(name) and name != "" and is_boolean(required) and
-      (is_nil(description) or valid_description(description) == :ok)
+      (is_nil(description) or Text.valid?(description, 4_096))
   end
 
   defp valid_argument?(_), do: false

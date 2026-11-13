@@ -129,6 +129,15 @@ defmodule AttestoMCP.Server.LegacyBanditTest do
     assert String.starts_with?(content_type, "text/event-stream")
     {initial, _} = HTTPClient.recv_until(stream_socket, ": keepalive", initial)
 
+    {:ok, claims} =
+      Attesto.Token.verify(config, token, expected_typ: "access", trusted_audiences: [@resource])
+
+    owner =
+      AttestoMCP.Server.InteractionOwner.from_context(%{
+        principal_binding: "usr_123",
+        attesto_mcp_claims: claims
+      })
+
     spawn(fn ->
       result =
         Server.dispatch(
@@ -139,7 +148,7 @@ defmodule AttestoMCP.Server.LegacyBanditTest do
             method: "tools/call",
             params: %{"name" => "bandit_client_request", "arguments" => %{}}
           },
-          %{principal: "usr_123", tenant: nil, session_id: session_id},
+          %{principal: "usr_123", tenant: nil, session_id: session_id, session_binding: owner},
           version: @legacy
         )
 

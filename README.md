@@ -435,7 +435,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 3.3"}]
+  [{:attesto_mcp_server, "~> 3.4"}]
 end
 ```
 
@@ -521,3 +521,8 @@ configuration.
 - [Migration runbook](docs/migration.md)
 - [Security policy](SECURITY.md)
 - [Conformance evidence](CONFORMANCE.md)
+
+See [text and catalog bounds](docs/usage.md#text-and-catalog-bounds) for the opt-in
+`display_text_policy: :reject` policy and registration budgets. The
+[hardening migration notes](docs/migration.md#unreleased-hardening) cover stricter
+elicitation validation, complete interaction ownership, and subscription closure.

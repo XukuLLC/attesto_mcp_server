@@ -1,5 +1,64 @@
 # Changelog
 
+## [3.4.0] - 2026-11-12
+
+Requires attesto_mcp >= 2.5.0 (was >= 2.4.0), whose authentication plugs refuse
+to start without an explicit token audience policy.
+
+### Breaking changes
+
+- Validate catalog descriptions, titles, prompt argument text, schema annotations,
+  and server name, version, and instructions at registration or startup. Reject
+  invalid UTF-8 and text over its field limit. Optional descriptions and titles
+  accept absent, nil, and empty values. Each complete stored definition defaults
+  to at most 1,000,000 bytes and the catalog to 8,000,000 bytes; the existing
+  1,000-definition and wire limits still apply. The new `max_definition_bytes`
+  and `max_catalog_bytes` options can set explicit finite budgets. This supports
+  MCP 2026-07-28 Tools, Security Considerations item 1, and Prompts,
+  Implementation Considerations item 1 and Security; those sections do not
+  prescribe these byte limits.
+- Validate accepted form answers against the requested schema on both legacy
+  protocol revisions, using the same validator as modern retries. Invalid
+  outbound forms are refused before sending them. Decline and cancel retain
+  their meaning (MCP 2026-07-28 Elicitation, Response Actions items 1–3 and Form
+  Mode Security item 3).
+- Require HTTPS elicitation URLs without userinfo, fragments, or control
+  characters. `elicitation_allow_loopback_http: true` permits HTTP only for
+  literal `localhost`, `127.0.0.1`, and `::1` development hosts. URLs must not
+  contain secrets or grant pre-authenticated access (MCP 2026-07-28 Elicitation,
+  Safe URL Handling items 1, 2, and 4).
+- Bind continuation tokens, URL approvals, and HTTP legacy session interactions
+  to issuer, subject, OAuth client, tenant, and the custom principal binding.
+  Browser completions must supply a matching `InteractionOwner` reconstructed
+  from verified identity. Bare bindings match only approvals created without
+  additional identity fields. Existing continuation tokens, approval records,
+  and HTTP legacy sessions fail closed after upgrading; start fresh interactions.
+  No database column changes are needed (MCP 2026-07-28 Elicitation, Security
+  Considerations item 1 and Identifying the User).
+- End a modern subscription when its stored authorization callback refuses a
+  delivery or its recomputed principal binding differs from the owner. A
+  refreshed principal that maps to the same binding may continue. Per-event
+  publication policy can still suppress an event without ending the subscription
+  (MCP 2026-07-28 Tools, Security Considerations item 1).
+
+### Changed
+
+- Add `display_text_policy: :reject` to refuse terminal controls in static and
+  dynamic display text, including text results, resources, prompts, instructions,
+  and explicit public errors. It rejects C0, DEL, and C1, including ESC and the
+  OSC/CSI introducers; tab and LF remain permitted in multiline text. The default
+  is `:off`. Binary/base64 media and structured application data are untouched
+  (MCP 2026-07-28 Tools, Security Considerations item 1).
+- Give the stdio reader one frame of credit, including oversized-frame notices.
+  It waits until dispatch admission or rejection and any immediate write finish
+  before reading again. Pending dispatcher workers are bounded by `max_queue`;
+  excess requests receive `concurrency_limit` and excess ordinary notifications
+  are dropped. Responses and cancellation notifications still pass through.
+  Newline framing is unchanged (MCP 2026-07-28 stdio, Receiving Messages items
+  1–3; the credit window is a library policy).
+- Validate resource registration keys as bounded UTF-8 text. Host aliases may
+  still differ from the separately validated wire URI.
+
 ## [3.3.0] - 2026-11-11
 
 Requires attesto_mcp >= 2.4.0 (was >= 1.3.0), which requires attesto >=

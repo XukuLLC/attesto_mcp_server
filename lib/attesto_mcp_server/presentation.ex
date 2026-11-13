@@ -56,7 +56,7 @@ defmodule AttestoMCP.Server.Presentation do
   authorization mechanism.
   """
 
-  alias AttestoMCP.Server.{Error, HostCallback, Icons, RequestMeta, Schema, Telemetry}
+  alias AttestoMCP.Server.{Error, HostCallback, Icons, RequestMeta, Schema, Telemetry, Text}
 
   @max_instructions_bytes 65_536
   @max_title_bytes 1_024
@@ -102,9 +102,13 @@ defmodule AttestoMCP.Server.Presentation do
         try do
           case HostCallback.invoke(provider, [context]) do
             {:ok, instructions} when is_binary(instructions) ->
-              if valid_text?(instructions, @max_instructions_bytes),
-                do: {:ok, instructions},
-                else: instructions_failure(context, :error, :invalid_instructions, [])
+              if Text.valid?(
+                   instructions,
+                   @max_instructions_bytes,
+                   Keyword.put(opts, :required, true)
+                 ),
+                 do: {:ok, instructions},
+                 else: instructions_failure(context, :error, :invalid_instructions, [])
 
             :omit ->
               {:ok, nil}
@@ -186,16 +190,21 @@ defmodule AttestoMCP.Server.Presentation do
     end)
   end
 
-  defp apply_field("title", value, descriptor, _opts) do
-    if valid_text?(value, @max_title_bytes),
-      do: {:ok, Map.put(descriptor, "title", value)},
-      else: {:error, :invalid_title}
+  defp apply_field("title", value, descriptor, opts) do
+    if Text.valid?(
+         value,
+         @max_title_bytes,
+         Keyword.merge(opts, required: true, multiline: false)
+       ),
+       do: {:ok, Map.put(descriptor, "title", value)},
+       else: {:error, :invalid_title}
   end
 
-  defp apply_field("description", value, descriptor, _opts) do
-    if valid_text?(value, @max_description_bytes) and String.trim(value) != "",
-      do: {:ok, Map.put(descriptor, "description", value)},
-      else: {:error, :invalid_description}
+  defp apply_field("description", value, descriptor, opts) do
+    if Text.valid?(value, @max_description_bytes, Keyword.put(opts, :required, true)) and
+         String.trim(value) != "",
+       do: {:ok, Map.put(descriptor, "description", value)},
+       else: {:error, :invalid_description}
   end
 
   defp apply_field("icons", value, descriptor, _opts) do
@@ -222,11 +231,6 @@ defmodule AttestoMCP.Server.Presentation do
   end
 
   defp apply_field("_meta", _value, _descriptor, _opts), do: {:error, :invalid_meta}
-
-  defp valid_text?(value, max_bytes) when is_binary(value),
-    do: byte_size(value) in 1..max_bytes and String.valid?(value)
-
-  defp valid_text?(_value, _max_bytes), do: false
 
   defp instructions_failure(context, kind, reason, stacktrace) do
     report(context, :instructions_provider, kind, reason, stacktrace)

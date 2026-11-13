@@ -761,7 +761,7 @@ defmodule AttestoMCP.Server do
     normalized_opts = Options.normalize(opts)
 
     {:ok, registry} =
-      Registry.start_link(max_json_bytes: normalized_opts[:max_json_bytes])
+      Registry.start_link(registry_options(normalized_opts))
 
     normalized_registrations =
       case Registry.register_all(registry, normalized_opts[:registrations] || []) do
@@ -1273,7 +1273,9 @@ defmodule AttestoMCP.Server do
            session_for(state, session_id, principal, tenant, require_initialized: true),
          capability when is_binary(capability) <- client_capability(method),
          true <- Map.has_key?(session.client_capabilities, capability),
+         {:ok, params} <- canonical_client_request(params, state.opts),
          :ok <- validate_client_request_revision(session.version, method, params),
+         :ok <- validate_elicitation_request(method, params, state.opts),
          {:ok, _stream_ref, stream} <-
            newest_live_legacy_stream(state.legacy_streams, session_id) do
       request_ref = make_ref()
@@ -1309,6 +1311,9 @@ defmodule AttestoMCP.Server do
 
       nil ->
         {:reply, {:error, :unsupported}, state}
+
+      {:error, :invalid_input_request} ->
+        {:reply, {:error, :invalid_input_request}, state}
 
       {:error, :unsupported} ->
         {:reply, {:error, :unsupported}, state}
@@ -1808,7 +1813,7 @@ defmodule AttestoMCP.Server do
   def handle_info({:EXIT, pid, _reason}, state) do
     cond do
       pid == state.registry ->
-        case Registry.start_link(max_json_bytes: state.opts[:max_json_bytes]) do
+        case Registry.start_link(registry_options(state.opts)) do
           {:ok, registry} ->
             case restore_registry(registry, state.definitions, state.catalog_revision) do
               :ok ->
@@ -2420,7 +2425,7 @@ defmodule AttestoMCP.Server do
           session_logging_level(
             runtime.server,
             session_id,
-            principal(context),
+            session_principal(context),
             tenant(context)
           )
 
@@ -2617,7 +2622,7 @@ defmodule AttestoMCP.Server do
       request_client(
         server,
         Map.get(context, :session_id),
-        principal(context),
+        session_principal(context),
         tenant(context),
         method,
         params,
@@ -2725,16 +2730,8 @@ defmodule AttestoMCP.Server do
       is_binary(error[:message] || error["message"])
   end
 
-  defp valid_client_result?("elicitation/create", result, params, _opts) when is_map(result) do
-    action = result["action"] || result[:action]
-    content = result["content"] || result[:content]
-
-    action in ["accept", "decline", "cancel"] and
-      if(params["mode"] == "url",
-        do: not Map.has_key?(result, "content"),
-        else: action != "accept" or is_map(content)
-      )
-  end
+  defp valid_client_result?("elicitation/create", result, params, opts),
+    do: AttestoMCP.Server.Elicitation.valid_response?(params, result, json_budget_opts(opts))
 
   defp valid_client_result?("sampling/createMessage", result, _params, opts)
        when is_map(result) do
@@ -4338,6 +4335,23 @@ defmodule AttestoMCP.Server do
   defp client_capability("roots/list"), do: "roots"
   defp client_capability(_), do: nil
 
+  defp canonical_client_request(params, opts) do
+    with {:ok, params} <- canonical_wire_value(params, opts),
+         :ok <- AttestoMCP.Server.Text.wire(params, opts) do
+      {:ok, params}
+    else
+      _ -> {:error, :invalid_input_request}
+    end
+  end
+
+  defp validate_elicitation_request("elicitation/create", params, opts) do
+    if AttestoMCP.Server.Elicitation.valid_request?(params, opts),
+      do: :ok,
+      else: {:error, :invalid_input_request}
+  end
+
+  defp validate_elicitation_request(_method, _params, _opts), do: :ok
+
   defp validate_client_request_revision(
          @legacy_2025_06_18,
          "elicitation/create",
@@ -4358,6 +4372,7 @@ defmodule AttestoMCP.Server do
     result = stamp_server_info(result, opts)
 
     with {:ok, result} <- canonical_wire_value(result, budget_opts),
+         :ok <- AttestoMCP.Server.Text.wire(result, opts),
          true <- Map.has_key?(result, "resultType"),
          :ok <- Schema.validate_modern_result(result, budget_opts) do
       JSONRPC.response(id, result)
@@ -4374,23 +4389,29 @@ defmodule AttestoMCP.Server do
 
     case canonical_wire_value(result, budget_opts) do
       {:ok, result} ->
-        if Schema.json_value(result, budget_opts) == :ok,
-          do: JSONRPC.response(id, result),
-          else: JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
+        if Schema.json_value(result, budget_opts) == :ok and
+             AttestoMCP.Server.Text.wire(result, opts) == :ok,
+           do: JSONRPC.response(id, result),
+           else: JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
 
       _ ->
         JSONRPC.error_response(id, Error.internal(%{"reason" => "invalid_result"}))
     end
   end
 
-  defp encode_outcome(id, {:error, %Error{} = error}, _era, _opts) do
+  defp encode_outcome(id, {:error, %Error{} = error}, _era, opts) do
     Telemetry.execute([:protocol, :error], %{count: 1}, %{
       status: error.http_status,
       outcome: error.code,
       correlation_id: Telemetry.correlation(id)
     })
 
-    JSONRPC.error_response(id, error)
+    response = JSONRPC.error_response(id, error)
+
+    if AttestoMCP.Server.Text.wire(response, opts) == :ok,
+      do: response,
+      else:
+        JSONRPC.error_response(id, Error.internal(%{"reason" => "terminal_control_character"}))
   end
 
   defp encode_outcome(id, {:error, _reason}, _era, _opts),
@@ -4874,7 +4895,7 @@ defmodule AttestoMCP.Server do
         negotiate_session(
           runtime.server,
           context[:session_id],
-          principal(context),
+          session_principal(context),
           tenant(context),
           selected,
           params["capabilities"]
@@ -5032,7 +5053,7 @@ defmodule AttestoMCP.Server do
         case set_session_logging_level(
                runtime.server,
                session_id,
-               principal(context),
+               session_principal(context),
                tenant(context),
                level
              ) do
@@ -5062,7 +5083,7 @@ defmodule AttestoMCP.Server do
           subscribe_resource(
             runtime.server,
             context[:session_id],
-            principal(context),
+            session_principal(context),
             tenant(context),
             uri
           )
@@ -5071,7 +5092,7 @@ defmodule AttestoMCP.Server do
           unsubscribe_resource(
             runtime.server,
             context[:session_id],
-            principal(context),
+            session_principal(context),
             tenant(context),
             uri
           )
@@ -6596,16 +6617,27 @@ defmodule AttestoMCP.Server do
     )
   end
 
+  defp session_principal(context), do: Map.get(context, :session_binding, principal(context))
+
   defp tenant(context), do: Map.get(context, :tenant, Map.get(context, "tenant"))
 
   defp retry_binding(context, era) do
     %{
-      principal: principal(context),
+      principal: AttestoMCP.Server.InteractionOwner.from_context(context),
       tenant: tenant(context),
       era: era,
       request_id: context[:request_id]
     }
   end
+
+  defp registry_options(opts),
+    do:
+      Keyword.take(opts, [
+        :max_json_bytes,
+        :display_text_policy,
+        :max_definition_bytes,
+        :max_catalog_bytes
+      ])
 
   defp json_budget_opts(opts) when is_list(opts) do
     max_bytes =

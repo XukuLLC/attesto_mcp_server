@@ -17,7 +17,7 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, server} =
       DynamicSupervisor.start_child(
         AttestoMCP.Server.DynamicSupervisor,
-        {Server, []}
+        {Server, [max_definition_bytes: 16_000_000, max_catalog_bytes: 32_000_000]}
       )
 
     on_exit(fn ->
@@ -169,6 +169,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     large_server =
       start_server(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         max_body_bytes: @large_budget,
         max_message_bytes: @large_budget
       )
@@ -231,6 +233,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     server =
       start_server(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         max_body_bytes: nil,
         max_message_bytes: nil
       )
@@ -326,6 +330,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     server =
       start_server(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         max_body_bytes: @large_budget,
         max_message_bytes: @large_budget
       )
@@ -422,6 +428,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, server} =
       Server.start_link(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         capabilities: capabilities
       )
 
@@ -464,6 +472,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, startup_server} =
       Server.start_link(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         registrations: [registration]
       )
 
@@ -472,7 +482,13 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     assert [%{name: "startup-large-schema"}] =
              Server.snapshot(startup_server).tool |> Map.values()
 
-    {:ok, dynamic_server} = Server.start_link(max_json_bytes: @large_budget)
+    {:ok, dynamic_server} =
+      Server.start_link(
+        max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000
+      )
+
     on_exit(fn -> stop_if_running(dynamic_server) end)
 
     assert :ok =
@@ -497,7 +513,14 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
   test "registry restart preserves the configured schema budget" do
     const_value = String.duplicate("r", Schema.max_instance_bytes() + 100_000)
     input_schema = %{"type" => "object", "properties" => %{"value" => %{"const" => const_value}}}
-    {:ok, server} = Server.start_link(max_json_bytes: @large_budget)
+
+    {:ok, server} =
+      Server.start_link(
+        max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000
+      )
+
     on_exit(fn -> stop_if_running(server) end)
 
     assert :ok =
@@ -530,7 +553,9 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, _server} =
       Server.start_link(
         name: name,
-        max_json_bytes: @large_budget
+        max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000
       )
 
     on_exit(fn -> stop_if_running(name) end)
@@ -587,7 +612,9 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, large_server} =
       Server.start_link(
         name: name,
-        max_json_bytes: @large_budget
+        max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000
       )
 
     large_output = String.duplicate("o", Schema.max_instance_bytes() + 100_000)
@@ -660,6 +687,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, server} =
       Server.start_link(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         capabilities: %{"logging" => %{}}
       )
 
@@ -706,6 +735,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     {:ok, server} =
       Server.start_link(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         server_name: String.duplicate("n", 1_000)
       )
 
@@ -893,6 +924,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
     server =
       start_server(
         max_json_bytes: @large_budget,
+        max_definition_bytes: 16_000_000,
+        max_catalog_bytes: 32_000_000,
         max_body_bytes: @large_budget,
         max_message_bytes: @large_budget
       )
@@ -921,23 +954,12 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
              )
   end
 
-  test "oversized server identity and instructions fail closed at final assembly" do
-    oversized = String.duplicate("x", Schema.max_instance_bytes() + 1)
-    server_with_name = start_server(server_name: oversized)
-
-    assert {30, %{"error" => %{"code" => -32603, "data" => %{"reason" => "invalid_result"}}}} =
-             dispatch(server_with_name, 30, "server/discover", modern(%{}), @version)
-
-    server_with_instructions = start_server(instructions: oversized)
-
-    initialize = %{
-      "protocolVersion" => @legacy,
-      "capabilities" => %{},
-      "clientInfo" => %{"name" => "client", "version" => "1"}
-    }
-
-    assert {31, %{"error" => %{"code" => -32603, "data" => %{"reason" => "invalid_result"}}}} =
-             dispatch(server_with_instructions, 31, "initialize", initialize, @legacy)
+  test "oversized server identity and instructions fail at startup" do
+    for {key, limit} <- [server_name: 1_024, server_version: 1_024, instructions: 65_536] do
+      assert_raise ArgumentError, ~r/valid UTF-8 text/, fn ->
+        AttestoMCP.Server.Options.normalize([{key, String.duplicate("x", limit + 1)}])
+      end
+    end
   end
 
   test "aggregate catalog pages fail closed in both protocol eras", %{server: server} do
@@ -1022,6 +1044,8 @@ defmodule AttestoMCP.Server.MessageLimitConsistencyTest do
   end
 
   defp start_server(opts) do
+    opts = Keyword.merge([max_definition_bytes: 16_000_000, max_catalog_bytes: 32_000_000], opts)
+
     {:ok, server} =
       DynamicSupervisor.start_child(
         AttestoMCP.Server.DynamicSupervisor,

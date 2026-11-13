@@ -1139,11 +1139,15 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp resolve_principal_binding(conn, state) do
-    principal = principal(conn)
+    with {:ok, binding} <- resolve_binding(principal(conn), state) do
+      {:ok, assign(conn, @principal_binding_assign_key, binding)}
+    end
+  end
 
+  defp resolve_binding(principal, state) do
     case state.opts[:principal_binding] do
       nil ->
-        {:ok, assign(conn, @principal_binding_assign_key, principal)}
+        {:ok, principal}
 
       callback ->
         try do
@@ -1154,7 +1158,7 @@ defmodule AttestoMCP.Server.Plug do
               principal_binding_failure(state, :invalid_return)
 
             {_binding, :ok} ->
-              {:ok, assign(conn, @principal_binding_assign_key, binding)}
+              {:ok, binding}
 
             {_binding, {:error, reason}} ->
               principal_binding_failure(state, reason)
@@ -1525,7 +1529,7 @@ defmodule AttestoMCP.Server.Plug do
     case AttestoMCP.Server.deliver_client_response(
            state.server,
            session_id,
-           principal_binding(conn),
+           session_binding(conn),
            tenant(conn),
            request
          ) do
@@ -2214,7 +2218,7 @@ defmodule AttestoMCP.Server.Plug do
            AttestoMCP.Server.get_session(
              state.server,
              session_id,
-             principal_binding(conn),
+             session_binding(conn),
              tenant(conn)
            ) do
       cond do
@@ -2237,7 +2241,7 @@ defmodule AttestoMCP.Server.Plug do
     case AttestoMCP.Server.open_legacy_stream(
            state.server,
            session_id,
-           principal_binding(conn),
+           session_binding(conn),
            tenant(conn),
            self(),
            legacy_stream_authorizer(conn, state),
@@ -2301,7 +2305,7 @@ defmodule AttestoMCP.Server.Plug do
           initial_context,
           owner,
           required_scope_sets,
-          state.auth_opts
+          state
         )
       else
         _ -> false
@@ -2369,7 +2373,7 @@ defmodule AttestoMCP.Server.Plug do
            AttestoMCP.Server.get_session(
              state.server,
              session_id,
-             principal_binding(conn),
+             session_binding(conn),
              tenant(conn)
            ) do
       case validate_legacy_version(conn, session) do
@@ -2390,7 +2394,7 @@ defmodule AttestoMCP.Server.Plug do
 
   defp maybe_initialize_session(conn, request, state, @legacy)
        when request.kind == :request and request.method == "initialize" do
-    case AttestoMCP.Server.new_session(state.server, principal_binding(conn), tenant(conn)) do
+    case AttestoMCP.Server.new_session(state.server, session_binding(conn), tenant(conn)) do
       {:ok, session} ->
         {:ok, put_private(conn, @legacy_session_private, session), session.id}
 
@@ -2463,7 +2467,7 @@ defmodule AttestoMCP.Server.Plug do
       case LegacySession.lookup(
              state.server,
              id,
-             principal_binding(conn),
+             session_binding(conn),
              tenant(conn),
              request,
              touch: not streaming_request?(request, state)
@@ -2476,7 +2480,7 @@ defmodule AttestoMCP.Server.Plug do
                    session,
                    state,
                    id,
-                   principal_binding(conn),
+                   session_binding(conn),
                    tenant(conn)
                  ) do
             {:ok, put_private(conn, @legacy_session_private, session)}
@@ -3488,6 +3492,9 @@ defmodule AttestoMCP.Server.Plug do
       attesto_mcp_principal: conn.assigns[:attesto_mcp_principal],
       attesto_context: conn.assigns[:attesto_context]
     })
+    |> then(fn context ->
+      Map.put(context, :session_binding, AttestoMCP.Server.InteractionOwner.from_context(context))
+    end)
   end
 
   defp handler_context(conn, state) do
@@ -3599,7 +3606,7 @@ defmodule AttestoMCP.Server.Plug do
           context,
           owner,
           required_scope_sets,
-          state.auth_opts
+          state
         )
       else
         _ -> false
@@ -3620,7 +3627,7 @@ defmodule AttestoMCP.Server.Plug do
          initial_context,
          owner,
          required_scope_sets,
-         auth_opts
+         state
        )
        when is_binary(token) do
     claims = Map.get(initial_context, :attesto_mcp_claims) || %{}
@@ -3637,8 +3644,11 @@ defmodule AttestoMCP.Server.Plug do
          ^initial_actor <- token_actor(current_claims),
          current_tenant <- current_claims["tenant"],
          current_scopes when is_list(current_scopes) <- token_scopes(current_claims),
-         :ok <- reauthorize_principal(auth_opts, current_claims, sender),
-         true <- context_principal_binding(initial_context) == owner_value(owner, :principal),
+         {:ok, principal} <- reauthorize_principal(state.auth_opts, current_claims, sender),
+         {:ok, binding} <- resolve_binding(principal, state),
+         true <-
+           delivery_binding(binding, current_claims, current_tenant, owner) ==
+             owner_value(owner, :principal),
          true <- current_tenant == owner_value(owner, :tenant),
          true <- ScopePolicy.scope_sets_grant?(required_scope_sets, current_scopes) do
       true
@@ -3647,18 +3657,34 @@ defmodule AttestoMCP.Server.Plug do
     end
   rescue
     _ -> false
+  catch
+    _, _ -> false
   end
 
   defp reauthorize_delivery?(_, _, _, _, _, _, _), do: false
 
+  defp delivery_binding(binding, claims, tenant, owner) do
+    case owner_value(owner, :principal) do
+      %AttestoMCP.Server.InteractionOwner{} ->
+        AttestoMCP.Server.InteractionOwner.from_context(%{
+          principal_binding: binding,
+          attesto_mcp_claims: claims,
+          tenant: tenant
+        })
+
+      _ ->
+        binding
+    end
+  end
+
   defp reauthorize_principal(auth_opts, claims, sender) when is_list(auth_opts) do
     case Keyword.get(auth_opts, :principal) do
       nil ->
-        :ok
+        default_principal(claims, sender)
 
       callback ->
         case HostCallback.invoke(callback, [claims, sender]) do
-          {:ok, principal} when not is_nil(principal) -> :ok
+          {:ok, principal} when not is_nil(principal) -> {:ok, principal}
           _rejected_or_invalid -> :error
         end
     end
@@ -3742,18 +3768,6 @@ defmodule AttestoMCP.Server.Plug do
 
   defp owner_value(_owner, _key), do: nil
 
-  defp context_principal_binding(context) when is_map(context) do
-    Map.get(
-      context,
-      :principal_binding,
-      Map.get(
-        context,
-        "principal_binding",
-        Map.get(context, :principal, Map.get(context, "principal"))
-      )
-    )
-  end
-
   defp auth_config(auth_opts) do
     case Keyword.get(auth_opts, :config) do
       config when is_function(config, 0) ->
@@ -3798,6 +3812,8 @@ defmodule AttestoMCP.Server.Plug do
       claim_value(conn, :subject) || claim_value(conn, "subject") ||
       claim_value(conn, :client_id) || claim_value(conn, "client_id")
   end
+
+  defp session_binding(conn), do: auth_context(conn).session_binding
 
   defp principal_binding(conn) do
     case Map.fetch(conn.assigns, @principal_binding_assign_key) do

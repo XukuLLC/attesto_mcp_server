@@ -4,16 +4,21 @@ defmodule AttestoMCP.Server.UrlElicitation do
 
   A link with `mode: "url"` must carry the operation the human is approving by
   its opaque staged-record ID rather than as a bare route. The staged record is
-  bound to the calling subject hash, contains the exact fields that the action
+  bound to the calling interaction owner hash, contains the exact fields that the action
   will execute with, is single-use with a short TTL, renders an explicit dead
   end when expired, consumed, or foreign, and is periodically swept.
 
-  The raw principal binding is never persisted in the store; only its
-  deterministic SHA-256 digest is stored.
+  The raw owner is never persisted in the approval store; only a versioned
+  deterministic SHA-256 digest is stored. `InteractionOwner.from_context/1`
+  includes issuer, subject, client, tenant and the custom principal binding.
+  Completion callers must reconstruct it from independently verified identity.
+  A bare binding matches only records staged without additional identity fields.
+  IDs and URL parameters are never authentication. URLs must not carry secrets
+  or pre-authenticated access.
   """
 
   alias AttestoMCP.Server
-  alias AttestoMCP.Server.Schema
+  alias AttestoMCP.Server.{InteractionOwner, Schema, Session}
 
   @default_ttl_ms 600_000
   @min_ttl_ms 1_000
@@ -34,6 +39,7 @@ defmodule AttestoMCP.Server.UrlElicitation do
   @type stage_error ::
           {:error,
            :principal_binding_required
+           | :invalid_owner
            | :invalid_action
            | :invalid_fields
            | :invalid_ttl
@@ -91,8 +97,8 @@ defmodule AttestoMCP.Server.UrlElicitation do
   @doc """
   Resolves a staged URL elicitation record for display on an approval page.
 
-  Returns `{:error, :foreign}` if the principal binding does not match the
-  staged subject hash before revealing any action or field content. Returns
+  Pass an `AttestoMCP.Server.InteractionOwner` built from verified browser identity.
+  Returns `{:error, :foreign}` if that owner does not match the staged hash before revealing any action or field content. Returns
   `{:error, :consumed}` if already consumed, or `{:error, :expired}` if expired.
   Malformed or unknown IDs return `{:error, :not_found}`.
   """
@@ -146,7 +152,8 @@ defmodule AttestoMCP.Server.UrlElicitation do
   @doc """
   Atomically consumes a staged URL elicitation record upon confirmation.
 
-  Can be consumed at most once. Returns `{:error, :foreign}` if the subject
+  Pass the same verified owner used for resolve. Can be consumed at most once.
+  Returns `{:error, :foreign}` if the owner
   does not match, `{:error, :consumed}` if already consumed, and `{:error, :expired}`
   if expired. Malformed or unknown IDs return `{:error, :not_found}`.
   """
@@ -195,14 +202,20 @@ defmodule AttestoMCP.Server.UrlElicitation do
   end
 
   @doc """
-  Computes the deterministic SHA-256 hex digest for a principal binding.
+  Computes the deterministic SHA-256 hex digest for a versioned interaction owner.
+  A bare binding denotes an owner with no additional identity fields.
 
   Only this hash is stored by the URL elicitation store; the raw binding is
   never persisted in the store record.
   """
   @spec subject_hash(term()) :: String.t()
   def subject_hash(principal_binding) do
-    :crypto.hash(:sha256, :erlang.term_to_binary(principal_binding, [:deterministic]))
+    owner = InteractionOwner.from_binding(principal_binding)
+
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({:interaction_owner_v1, owner}, [:deterministic])
+    )
     |> Base.encode16(case: :lower)
   end
 
@@ -219,8 +232,14 @@ defmodule AttestoMCP.Server.UrlElicitation do
 
   # ----- internal -----
 
-  defp validate_context(%{principal_binding: binding}) when not is_nil(binding),
-    do: {:ok, binding}
+  defp validate_context(%{principal_binding: binding} = context) when not is_nil(binding) do
+    owner = InteractionOwner.from_context(context)
+
+    case Session.validate_binding(owner) do
+      :ok -> {:ok, owner}
+      _ -> {:error, :invalid_owner}
+    end
+  end
 
   defp validate_context(_context), do: {:error, :principal_binding_required}
 

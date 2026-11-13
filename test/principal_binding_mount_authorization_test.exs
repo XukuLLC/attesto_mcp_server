@@ -56,6 +56,37 @@ defmodule AttestoMCP.Server.PrincipalBindingMountAuthorizationTest do
     %{config: AttestoMCP.Test.Factory.config(), server: server}
   end
 
+  test "legacy sessions reject another OAuth client even with the same custom binding", %{
+    server: server,
+    config: config
+  } do
+    plug = build_plug(server, config, principal_binding: {Callbacks, :shared_binding})
+
+    token = fn client ->
+      {:ok, minted} =
+        Attesto.Token.mint(
+          config,
+          %{
+            claims: %{"client_id" => client},
+            kind: "user",
+            sub: "usr_123",
+            scopes: AttestoMCP.Scopes.all()
+          },
+          audience: @resource
+        )
+
+      minted.access_token
+    end
+
+    first = token.("client-a")
+    other = token.("client-b")
+    initialized = legacy_initialize(plug, first)
+    assert initialized.status == 200
+    [session_id] = get_resp_header(initialized, "mcp-session-id")
+    assert :ok = Server.mark_initialized(server, session_id)
+    assert legacy_tool_call(plug, other, session_id, "missing").status == 404
+  end
+
   test "a stable binding owns legacy sessions while handlers receive each loaded principal", %{
     config: config,
     server: server
@@ -87,8 +118,18 @@ defmodule AttestoMCP.Server.PrincipalBindingMountAuthorizationTest do
 
     assert initialized.status == 200
     [session_id] = get_resp_header(initialized, "mcp-session-id")
-    assert {:ok, session} = Server.get_session(server, session_id, "usr_123")
-    assert session.principal == "usr_123"
+
+    {:ok, claims} =
+      Attesto.Token.verify(config, token, expected_typ: "access", trusted_audiences: [@resource])
+
+    owner =
+      AttestoMCP.Server.InteractionOwner.from_context(%{
+        principal_binding: "usr_123",
+        attesto_mcp_claims: claims
+      })
+
+    assert {:ok, session} = Server.get_session(server, session_id, owner)
+    assert session.principal == owner
     assert :ok = Server.mark_initialized(server, session_id)
 
     called = legacy_tool_call(plug, token, session_id, "identity")

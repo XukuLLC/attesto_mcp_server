@@ -333,6 +333,8 @@ defmodule AttestoMCP.Server.API do
 
   @doc """
   Resolves a staged URL elicitation record for the host's approval page.
+  Supply `InteractionOwner.from_context/1` from verified browser identity;
+  a bare binding matches only records staged without other identity fields.
   """
   @spec resolve_url_elicitation(server(), String.t(), term()) ::
           {:ok, %{action: String.t(), fields: map(), expires_at_ms: non_neg_integer()}}
@@ -342,6 +344,7 @@ defmodule AttestoMCP.Server.API do
 
   @doc """
   Atomically consumes a staged URL elicitation record upon confirmation.
+  Supply the independently authenticated, matching `InteractionOwner`.
   """
   @spec consume_url_elicitation(server(), String.t(), term()) ::
           {:ok, %{action: String.t(), fields: map(), expires_at_ms: non_neg_integer()}}

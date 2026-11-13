@@ -611,8 +611,17 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     plug = plug(server, config)
     session_id = initialize_session(plug, token)
 
+    {:ok, claims} =
+      Attesto.Token.verify(config, token, expected_typ: "access", trusted_audiences: [@resource])
+
+    owner =
+      AttestoMCP.Server.InteractionOwner.from_context(%{
+        principal_binding: "usr_123",
+        attesto_mcp_claims: claims
+      })
+
     assert {:ok, before_initialized_rejection} =
-             Server.peek_session(server, session_id, "usr_123", nil)
+             Server.peek_session(server, session_id, owner, nil)
 
     Process.sleep(5)
 
@@ -637,18 +646,18 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
              "initialized_notification_required"
 
     assert {:ok, after_initialized_rejection} =
-             Server.peek_session(server, session_id, "usr_123", nil)
+             Server.peek_session(server, session_id, owner, nil)
 
     assert after_initialized_rejection.last_seen == before_initialized_rejection.last_seen
     assert :ok = Server.mark_initialized(server, session_id)
 
     for index <- 1..128 do
       assert :ok =
-               Server.subscribe_resource(server, session_id, "usr_123", nil, "urn:#{index}")
+               Server.subscribe_resource(server, session_id, owner, nil, "urn:#{index}")
     end
 
     assert {:ok, before_rejections} =
-             Server.peek_session(server, session_id, "usr_123", nil)
+             Server.peek_session(server, session_id, owner, nil)
 
     Process.sleep(5)
 
@@ -672,7 +681,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     assert Jason.decode!(at_limit.resp_body)["error"]["data"]["reason"] ==
              "resource_subscription_limit"
 
-    assert {:ok, after_limit} = Server.peek_session(server, session_id, "usr_123", nil)
+    assert {:ok, after_limit} = Server.peek_session(server, session_id, owner, nil)
     assert after_limit.last_seen == before_rejections.last_seen
 
     Process.sleep(5)
@@ -697,7 +706,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     assert Jason.decode!(oversized.resp_body)["error"]["data"]["reason"] ==
              "invalid_resource_uri"
 
-    assert {:ok, after_oversized} = Server.peek_session(server, session_id, "usr_123", nil)
+    assert {:ok, after_oversized} = Server.peek_session(server, session_id, owner, nil)
     assert after_oversized.last_seen == before_rejections.last_seen
 
     Process.sleep(5)
@@ -719,7 +728,7 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
 
     assert duplicate.status == 200
     assert Jason.decode!(duplicate.resp_body)["result"] == %{}
-    assert {:ok, after_success} = Server.peek_session(server, session_id, "usr_123", nil)
+    assert {:ok, after_success} = Server.peek_session(server, session_id, owner, nil)
     assert after_success.last_seen > after_oversized.last_seen
   end
 

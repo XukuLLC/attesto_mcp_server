@@ -1,5 +1,59 @@
 # Migration runbook
 
+## Unreleased hardening
+
+Registration now checks all catalog display text and server identity text.
+Descriptions may be absent, nil, or empty across primitive types; nil descriptions
+are stored as empty strings. Titles may be absent, nil, or empty (nil titles are
+omitted on the wire). See [text and catalog bounds](usage.md#text-and-catalog-bounds)
+for the field limits. Invalid UTF-8 and excessive static text fail at registration
+or startup instead of at the first response. `max_definition_bytes` and
+`max_catalog_bytes` bound retained data independently from `max_json_bytes`.
+Large captured handler environments and MFA extra arguments count too; build
+large responses inside a handler or explicitly raise the registration budget.
+The existing response limits still apply after assembly.
+
+`display_text_policy: :reject` is an opt-in policy. Its default is `:off` because
+resource and tool text can represent exact application data. Use it for servers
+whose display text does not need terminal controls. It rejects CR as well as ESC,
+C0/C1 and DEL; tab and LF are allowed in multiline fields. Normalize CRLF content
+in the host if LF is the intended representation. Nothing is silently rewritten.
+
+Both legacy elicitation revisions now require a valid outbound form schema and
+validate accepted content against it. Existing calls that omitted the schema must
+supply `requestedSchema`, such as `%{"type" => "object"}` for an unconstrained
+object. Decline and cancel need no content. HTTPS is now required for URL mode;
+`elicitation_allow_loopback_http: true` permits only literal loopback development
+hosts. This setting is independent of the HTTP mount's authentication `allow_http`
+option and never enables HTTP to an arbitrary host.
+
+Continuation tokens and URL approvals now include issuer, subject, client and
+tenant independently of `principal_binding`. HTTP legacy sessions store that
+same complete owner in their existing principal field. Drain existing sessions
+and restart pending interactions when upgrading: old records/tokens fail closed,
+without a database migration. Upgrade replicas together; do not redeem old
+approvals by falling back to the old hash. Custom stores keep the same callbacks
+and columns; the `subject_hash` value now hashes a versioned complete owner.
+
+Custom `principal_binding` callbacks keep their existing argument and return
+contract. Their result is preserved inside the owner; it does not replace the
+verified issuer/subject/client/tenant fields. If a callback already includes those
+fields in a tuple, it can remain unchanged. Keep that tuple stable across request
+and browser authentication. Reconstruct browser completion owners using
+`AttestoMCP.Server.InteractionOwner.from_context/1` from verified identity and pass
+the result to `resolve_url_elicitation/3` and `consume_url_elicitation/3`. A bare
+binding still works for approvals originally staged without any additional
+identity fields; it cannot redeem an HTTP-owned approval. Direct core/stdio
+integrations must supply trusted `issuer`, `subject`, `client_id`, and `tenant`
+when available. Never obtain these values from request parameters or the approval
+URL. Possession of an ID authenticates nobody.
+
+Modern subscriptions now end when the stored authorization callback refuses a
+matching delivery, including when principal loading returns nil or the binding
+callback fails. Mapping a fresh principal to the same stable owner remains valid.
+The separate per-publication authorizer still permits event-only suppression.
+
+
 This guide maps an existing MCP catalog and deployment onto
 `AttestoMCP.Server`. It focuses on choices that affect compatibility,
 authorization, and rollout safety. The [usage guide](usage.md) contains the

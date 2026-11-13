@@ -91,14 +91,14 @@ Invalid returns and callback failures stop the request with a generic internal
 error before a POST body is read. The derived value is available to handlers as
 `context.principal_binding`; the complete principal is not replaced.
 
-The durable record format remains version 1 and retains its existing
-`"principal"` field, which stores the binding. Existing 0.14 records therefore
-need no database migration and continue to decode. With `principal_binding`
-omitted, their comparison behavior is unchanged. Enabling a new binding on a
-mount fails closed for an existing row unless that row's stored principal is
-equal to the newly derived binding. Drain those session-bound clients or allow
-their sessions to expire and reconnect when changing this policy; modern
-session-free clients are unaffected.
+The durable record format remains version 1. HTTP sessions now store a complete
+`AttestoMCP.Server.InteractionOwner` in the existing `"principal"` field: the
+custom binding plus verified issuer, subject, OAuth client and tenant. A new
+owner does not match an older principal-only row. Drain those clients or let
+their sessions expire and reconnect when upgrading; see
+[the migration notes](migration.md#unreleased-hardening). Modern continuation
+tokens and URL approvals also use the complete owner. Handlers still receive
+the original loaded principal and the separate custom binding.
 
 With `attesto_phoenix` already declared directly by the host, run:
 
@@ -476,7 +476,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.3"},
+    {:attesto_mcp_server, "~> 3.4"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -579,7 +579,7 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 2.4.0 and < 3.0.0` and calls the public
+The package requires `attesto_mcp >= 2.5.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 
@@ -1695,13 +1695,26 @@ topology, so the library does not refuse the mode by principal type. Decide it
 in the handler before staging.
 
 `AttestoMCP.Server.API.stage_url_elicitation/5` stores a record bound to a
-SHA-256 digest of the handler context's `:principal_binding` (the binding
-itself is never persisted), the action name, and the exact fields, with a TTL
-that defaults to ten minutes and may be set between one second and 24 hours.
-It returns an opaque 256-bit id to embed in the URL. The stored fields must be
-a JSON object within the server's `max_json_bytes` budget. Staging fails with
-`{:error, :principal_binding_required}` when the context has no binding, which
-is the case for a transport that supplies none.
+SHA-256 digest of a versioned `AttestoMCP.Server.InteractionOwner`: the handler's
+`:principal_binding`, verified issuer, subject, client and tenant. The raw owner
+is never persisted in the approval store. The record also holds the action name
+and exact fields, with a TTL that defaults to ten minutes and may be set between
+one second and 24 hours. It returns an opaque 256-bit ID to embed in the URL.
+Fields must be a JSON object within `max_json_bytes`. Staging returns
+`{:error, :principal_binding_required}` without a binding, or
+`{:error, :invalid_owner}` for a nonportable or oversized owner.
+
+Elicitation URLs pass the same validator on legacy requests and modern retries:
+HTTPS, no userinfo, fragments, raw controls or whitespace, and valid authority
+and percent escapes. `elicitation_allow_loopback_http: true` on the server permits
+HTTP only to literal `localhost`, `127.0.0.1` and `::1`; it does not resolve DNS or
+permit arbitrary HTTP hosts. This is separate from mount authentication options.
+The URL must contain no secrets, personal information, or pre-authenticated
+access. An opaque record ID is a locator, not a credential. The client must obtain
+consent before opening it, and the browser integration must authenticate the user
+independently, verify the initiating client/tenant, and protect confirmations
+against CSRF. Signed continuation state is not encrypted; keep secrets out of it
+and out of approval fields returned to a client.
 
 ```elixir
 def publish(arguments, context) do
@@ -1746,26 +1759,31 @@ exactly one succeeds and the rest see `{:error, :consumed}`.
 
 ```elixir
 def show(conn, %{"id" => id}) do
-  binding = conn.assigns.current_user.id
+  owner = AttestoMCP.Server.InteractionOwner.from_context(conn.assigns.verified_mcp_owner_context)
 
-  case AttestoMCP.Server.API.resolve_url_elicitation(MyApp.MCPServer, id, binding) do
+  case AttestoMCP.Server.API.resolve_url_elicitation(MyApp.MCPServer, id, owner) do
     {:ok, %{action: action, fields: fields}} -> render(conn, :review, action: action, fields: fields)
     {:error, reason} -> render(conn, :dead_end, reason: reason)
   end
 end
 
 def confirm(conn, %{"id" => id}) do
-  binding = conn.assigns.current_user.id
+  owner = AttestoMCP.Server.InteractionOwner.from_context(conn.assigns.verified_mcp_owner_context)
 
-  case AttestoMCP.Server.API.consume_url_elicitation(MyApp.MCPServer, id, binding) do
+  case AttestoMCP.Server.API.consume_url_elicitation(MyApp.MCPServer, id, owner) do
     {:ok, %{action: "publish_site", fields: fields}} -> MyApp.Publishing.run(fields)
     {:error, reason} -> render(conn, :dead_end, reason: reason)
   end
 end
 ```
 
-The browser-side binding must be derived from the same source as the
-transport's `:principal_binding`; otherwise every link resolves as foreign.
+`verified_mcp_owner_context` is supplied by the host's authentication integration,
+not by this library. It must contain the same `principal_binding`, `issuer`,
+`subject`, `client_id`, and `tenant` as the initiating context. If it contains
+verified `attesto_mcp_claims`, `iss`, `sub`, and `client_id` come from those claims.
+These must describe the initiating OAuth client, not a different browser client.
+Never copy identity fields from the URL or trust client-provided display metadata.
+A bare principal binding matches only records staged without additional fields.
 
 Records live in the server's `url_elicitation_store`. The default is an
 in-process store owned by the server, suitable for a single node. It defaults
@@ -2169,3 +2187,65 @@ For session-bound requests, handler context exposes the session's exact negotiat
 revision as `context.protocol_version`. This is `2025-11-25` or `2025-06-18`,
 not a generic marker, so handlers can make revision-aware decisions
 without re-reading transport headers.
+
+## Text and catalog bounds
+
+All static catalog text and server identity text use one UTF-8 validator. Limits
+are bytes, independent of `max_json_bytes` and the transport frame limits:
+
+| Field | Maximum bytes | Empty/absent value |
+| --- | ---: | --- |
+| Tool, prompt, completion name | 64 | Required; existing ASCII grammar |
+| Resource/template name and prompt argument name | 256 | Required |
+| Title, including schema/annotation title | 1,024 | Optional |
+| Description, including argument/schema description | 4,096 | Optional |
+| Server name and version | 1,024 each | Nonempty when supplied; absent/nil uses default |
+| Server instructions | 65,536 | Optional |
+
+Optional catalog descriptions and titles accept absent, nil and empty strings.
+Descriptions supplied as nil are stored as empty strings. Schema annotation
+values must also satisfy the JSON Schema dialect's rules. URI and MIME syntax
+checks still apply. Every complete definition, including extension metadata,
+schemas, callbacks and captured/MFA arguments, must fit `max_definition_bytes`
+(default 1,000,000). The complete catalog must fit `max_catalog_bytes` (default
+8,000,000) and at most 1,000 definitions. Byte accounting uses uncompressed
+Erlang external-term size, including keys and containers; it is a retained-data
+budget, not an exact BEAM heap quota. Both settings accept integers from 1 through
+64,000,000. Batch registration, replacement and registry recovery enforce the
+same limits atomically. A failed operation leaves the prior catalog/revision.
+
+Use `display_text_policy: :reject` to refuse terminal controls in catalog titles,
+descriptions, schema annotations, server identity/instructions, dynamic
+presentation, prompt messages, tool text, resource text (including embedded
+resources), elicitation messages, and public error messages. It rejects U+0000
+through U+001F, U+007F, and U+0080 through U+009F, including ESC, CSI (U+009B), and
+OSC (U+009D). Tab and LF are allowed in multiline text, but not names, versions,
+or titles. Static failures are registration errors or startup `ArgumentError`s;
+runtime failures return a controlled protocol error without the offending text.
+Binary/base64 media, `structuredContent`, application `_meta`, and schema
+const/default/enum/example data remain untouched. Existing JSON validation and
+wire budgets still apply. The setting is not a promise that every opaque data
+field is safe to print; clients must render untrusted data safely.
+
+The default is `:off`: many resources and tool results are exact application data.
+An unconditional rejection default for static catalog display text is safe for
+protocol behavior—terminal controls have no required meaning there—but would
+reject catalogs containing literal control examples. This release keeps one
+explicit opt-in across static and dynamic display text. It never edits byte-exact
+data silently. Text validation does not prevent semantic prompt injection,
+bidirectional text deception, or malicious instructions in ordinary prose.
+
+## Stdio admission and slow output
+
+The reader has a one-frame credit window. It waits for dispatch admission or
+rejection, including any immediate output write, before reading another frame.
+Oversized-frame notices use the same credit. A stopped or failed dispatcher ends
+a reader waiting for credit. Slow stdout propagates backpressure to stdin instead
+of accumulating a mailbox of input frames. Input callbacks must honor the
+configured frame bound themselves; the built-in reader already does so.
+
+At most `max_queue` (default 128) dispatcher workers are pending. When full,
+requests receive `invalid_params` with reason `concurrency_limit`; ordinary
+notifications are dropped. Client responses and cancellation notifications are
+still routed so existing work can finish. Server concurrency, request deadlines,
+notification queue budgets, rate limits, and output budgets remain independent.

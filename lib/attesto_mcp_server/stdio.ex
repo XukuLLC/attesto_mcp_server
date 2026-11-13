@@ -22,10 +22,20 @@ defmodule AttestoMCP.Server.Stdio do
     Telemetry.execute([:stdio, :start], %{system_time: System.system_time()}, %{transport: :stdio})
 
     context = Keyword.get(opts, :context, stdio_context(opts))
+    owner = AttestoMCP.Server.InteractionOwner.from_context(context)
+
+    session_binding =
+      if Enum.any?([owner.issuer, owner.subject, owner.client_id], &(not is_nil(&1))),
+        do: owner,
+        else: context_principal(context)
+
+    context = Map.put(context, :session_binding, session_binding)
     # The default stays conservative because the live-pipe fallback reads one
     # byte at a time to guarantee prompt newline delivery without retaining an
     # unterminated peer frame. Hosts handling larger bounded frames must opt in.
-    json_budget = Server.options(server)[:max_json_bytes] || Schema.default_instance_bytes()
+    server_options = Server.options(server)
+    json_budget = server_options[:max_json_bytes] || Schema.default_instance_bytes()
+    opts = Keyword.put(opts, :pending_limit, server_options[:max_queue] || 128)
     max = Keyword.get(opts, :max_message_bytes, min(64_000, json_budget))
 
     unless is_integer(max) and max >= Schema.min_allowed_instance_bytes() and max <= json_budget do
@@ -42,13 +52,15 @@ defmodule AttestoMCP.Server.Stdio do
     with {:ok, legacy_session} <-
            AttestoMCP.Server.new_session(
              server,
-             context_principal(context),
+             context.session_binding,
              Map.get(context, :tenant) || Map.get(context, "tenant")
            ) do
       context = Map.put(context, :legacy_session_id, legacy_session.id)
       parent = self()
 
-      {reader, reader_monitor} = spawn_monitor(fn -> read_loop(parent, input) end)
+      {reader, reader_monitor} =
+        spawn_monitor(fn -> read_loop(parent, input, Process.monitor(parent)) end)
+
       Process.put(:attesto_mcp_stdio_pending, %{})
       # A stdio frame has its own transport ceiling.  Keep output under the
       # declared frame bound even when the server's value/schema budget is
@@ -122,31 +134,43 @@ defmodule AttestoMCP.Server.Stdio do
     end
   end
 
-  defp read_loop(parent, input) do
-    try do
-      case input.() do
-        :eof ->
-          send(parent, :stdio_eof)
+  defp read_loop(parent, input, monitor) do
+    case read_input(input) do
+      :eof ->
+        send(parent, :stdio_eof)
 
-        {:error, reason} ->
-          send(parent, {:stdio_error, reason})
+      {:error, reason} ->
+        send(parent, {:stdio_error, reason})
 
-        {:oversized, reason} ->
-          send(parent, {:stdio_oversized, reason})
-          read_loop(parent, input)
+      {:oversized, reason} ->
+        send(parent, {:stdio_oversized, reason})
+        await_credit(parent, input, monitor)
 
-        line when is_binary(line) ->
-          send(parent, {:stdio_line, line})
-          read_loop(parent, input)
+      line when is_binary(line) ->
+        send(parent, {:stdio_line, line})
+        await_credit(parent, input, monitor)
 
-        _other ->
-          send(parent, {:stdio_error, :invalid_reader_result})
-      end
-    rescue
-      _ -> send(parent, {:stdio_error, :reader_failure})
-    catch
-      :exit, _ -> send(parent, {:stdio_error, :reader_failure})
-      _, _ -> send(parent, {:stdio_error, :reader_failure})
+      _other ->
+        send(parent, {:stdio_error, :invalid_reader_result})
+    end
+  end
+
+  # Keep the exception boundary out of the tail-recursive credit loop so a
+  # long stream does not retain one catch frame per message.
+  defp read_input(input) do
+    input.()
+  rescue
+    _ -> {:error, :reader_failure}
+  catch
+    _, _ -> {:error, :reader_failure}
+  end
+
+  # One frame (including an oversized-frame notice) may be outstanding. The
+  # dispatcher returns credit only after admission/rejection and any write.
+  defp await_credit(parent, input, monitor) do
+    receive do
+      {:stdio_credit, ^parent} -> read_loop(parent, input, monitor)
+      {:DOWN, ^monitor, :process, ^parent, _reason} -> :ok
     end
   end
 
@@ -196,6 +220,7 @@ defmodule AttestoMCP.Server.Stdio do
     receive do
       {:stdio_line, line} ->
         pending = handle_line(server, context, opts, max, line, pending)
+        send(reader, {:stdio_credit, self()})
         loop(server, context, opts, max, reader, reader_monitor, pending)
 
       {:stdio_event, work_ref, event} ->
@@ -276,6 +301,7 @@ defmodule AttestoMCP.Server.Stdio do
 
       {:stdio_oversized, reason} ->
         write(JSONRPC.error_response(nil, Error.parse(%{"reason" => to_string(reason)})))
+        send(reader, {:stdio_credit, self()})
         loop(server, context, opts, max, reader, reader_monitor, pending)
     end
   end
@@ -308,6 +334,23 @@ defmodule AttestoMCP.Server.Stdio do
   end
 
   defp start_worker(server, context, opts, request, pending) do
+    if map_size(pending) >= opts[:pending_limit] do
+      if not is_nil(Map.get(request, :id)),
+        do:
+          write(
+            JSONRPC.error_response(
+              request.id,
+              Error.invalid_params(%{"reason" => "concurrency_limit"})
+            )
+          )
+
+      pending
+    else
+      admit_worker(server, context, opts, request, pending)
+    end
+  end
+
+  defp admit_worker(server, context, opts, request, pending) do
     parent = self()
     work_ref = make_ref()
     id = Map.get(request, :id)
@@ -627,7 +670,7 @@ defmodule AttestoMCP.Server.Stdio do
       case AttestoMCP.Server.LegacySession.lookup(
              server,
              session_id,
-             context_principal(context),
+             context.session_binding,
              tenant,
              request
            ) do
@@ -722,7 +765,7 @@ defmodule AttestoMCP.Server.Stdio do
       AttestoMCP.Server.deliver_client_response(
         server,
         context[:legacy_session_id],
-        context_principal(context),
+        context.session_binding,
         Map.get(context, :tenant) || Map.get(context, "tenant"),
         response
       )

@@ -42,6 +42,10 @@ defmodule AttestoMCP.Server.Options do
     :max_legacy_streams_per_session,
     :max_json_bytes,
     :schema_formats,
+    :display_text_policy,
+    :max_definition_bytes,
+    :max_catalog_bytes,
+    :elicitation_allow_loopback_http,
     :output_canonicalization,
     :tool_argument_keys,
     :max_body_bytes,
@@ -129,6 +133,10 @@ defmodule AttestoMCP.Server.Options do
       )
       |> Keyword.put_new(:max_json_bytes, Schema.default_instance_bytes())
       |> Keyword.put_new(:schema_formats, true)
+      |> Keyword.put_new(:display_text_policy, :off)
+      |> Keyword.put_new(:max_definition_bytes, 1_000_000)
+      |> Keyword.put_new(:max_catalog_bytes, 8_000_000)
+      |> Keyword.put_new(:elicitation_allow_loopback_http, false)
       |> Keyword.put_new(:output_canonicalization, :strict)
       |> Keyword.put_new(:tool_argument_keys, :strings)
       |> Keyword.put_new(:stream_keepalive_ms, 15_000)
@@ -274,6 +282,7 @@ defmodule AttestoMCP.Server.Options do
       _other -> raise ArgumentError, ":name must be an atom when present"
     end
 
+    AttestoMCP.Server.Registry.validate_options!(opts)
     validate_numeric_options!(opts)
     json_budget = validate_json_budget!(opts)
 
@@ -285,6 +294,9 @@ defmodule AttestoMCP.Server.Options do
 
     unless is_boolean(opts[:schema_formats]),
       do: raise(ArgumentError, ":schema_formats must be boolean")
+
+    unless is_boolean(opts[:elicitation_allow_loopback_http]),
+      do: raise(ArgumentError, ":elicitation_allow_loopback_http must be boolean")
 
     validate_transport_budgets!(opts, json_budget)
     validate_paging_and_cache!(opts)
@@ -432,13 +444,7 @@ defmodule AttestoMCP.Server.Options do
       raise ArgumentError, ":protocol_versions must be a non-empty list of supported versions"
     end
 
-    Enum.each([:server_name, :server_version, :instructions], fn key ->
-      case Keyword.get(opts, key) do
-        nil -> :ok
-        value when is_binary(value) and byte_size(value) > 0 -> :ok
-        _ -> raise ArgumentError, "#{key} must be a non-empty string"
-      end
-    end)
+    AttestoMCP.Server.Text.server_options!(opts)
   end
 
   defp validate_default_scopes!(nil), do: :ok

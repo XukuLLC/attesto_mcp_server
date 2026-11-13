@@ -135,7 +135,12 @@ defmodule AttestoMCP.Server.Retry do
 
   @doc false
   def normalize_requests(input, opts) do
-    budget_opts = json_budget_opts(opts)
+    budget_opts =
+      json_budget_opts(opts) ++
+        [
+          elicitation_allow_loopback_http: opts[:elicitation_allow_loopback_http] == true,
+          display_text_policy: opts[:display_text_policy] || :off
+        ]
 
     with {:ok, input} <- Output.canonicalize(input, budget_opts) do
       cond do
@@ -272,46 +277,16 @@ defmodule AttestoMCP.Server.Retry do
     end
   end
 
-  defp valid_response?("elicitation/create:url", response, _opts) when is_map(response) do
-    response["action"] in ["accept", "decline", "cancel"] and
-      not Map.has_key?(response, "content")
-  end
+  defp valid_response?("elicitation/create:url", response, opts),
+    do: AttestoMCP.Server.Elicitation.valid_response?(%{"mode" => "url"}, response, opts)
 
-  defp valid_response?("elicitation/create", response, _opts) when is_map(response) do
-    action = response["action"]
+  # Old untyped state cannot establish a requested form schema. Decline/cancel
+  # remain usable, but accepted content must have a schema to validate against.
+  defp valid_response?("elicitation/create", response, opts),
+    do: AttestoMCP.Server.Elicitation.valid_response?(%{}, response, opts)
 
-    action in ["accept", "decline", "cancel"] and
-      (action != "accept" or is_map(response["content"]))
-  end
-
-  defp valid_response?(
-         %{"method" => "elicitation/create", "params" => params},
-         response,
-         opts
-       )
-       when is_map(response) and is_map(params) do
-    action = response["action"]
-
-    action in ["accept", "decline", "cancel"] and
-      case {params["mode"] || "form", action} do
-        {"url", _} ->
-          not Map.has_key?(response, "content")
-
-        {"form", "accept"} ->
-          is_map(response["content"]) and
-            Schema.validate(
-              response["content"],
-              params["requestedSchema"],
-              Keyword.put(json_budget_opts(opts), :formats, true)
-            ) == :ok
-
-        {"form", _} ->
-          true
-
-        _ ->
-          false
-      end
-  end
+  defp valid_response?(%{"method" => "elicitation/create", "params" => params}, response, opts),
+    do: AttestoMCP.Server.Elicitation.valid_response?(params, response, opts)
 
   defp valid_response?("sampling/createMessage", response, opts) when is_map(response) do
     response["role"] == "assistant" and valid_sampling_content?(response["content"], opts) and
@@ -363,7 +338,8 @@ defmodule AttestoMCP.Server.Retry do
            request["method"],
          params when is_map(params) <- Map.get(request, "params", %{}),
          :ok <- validate_request_json(params, opts),
-         true <- valid_request_params?(method, params, opts) do
+         true <- valid_request_params?(method, params, opts),
+         :ok <- AttestoMCP.Server.Text.wire(params, opts) do
       {:ok, %{"method" => method, "params" => params}}
     else
       _ -> {:error, :invalid_input_request}
@@ -372,19 +348,8 @@ defmodule AttestoMCP.Server.Retry do
 
   defp normalize_request(_request, _opts), do: {:error, :invalid_input_request}
 
-  defp valid_request_params?("elicitation/create", params, opts) do
-    message = params["message"]
-    mode = params["mode"] || "form"
-
-    is_binary(message) and byte_size(message) in 1..10_000 and
-      ((mode == "form" and valid_requested_schema?(params["requestedSchema"], opts)) or
-         (mode == "url" and is_binary(params["url"]) and
-            Schema.validate(
-              params["url"],
-              %{"type" => "string", "format" => "uri"},
-              Keyword.put(opts, :formats, true)
-            ) == :ok))
-  end
+  defp valid_request_params?("elicitation/create", params, opts),
+    do: AttestoMCP.Server.Elicitation.valid_request?(params, opts)
 
   defp valid_request_params?("sampling/createMessage", params, opts) do
     is_list(params["messages"]) and
@@ -395,28 +360,6 @@ defmodule AttestoMCP.Server.Retry do
   end
 
   defp valid_request_params?("roots/list", _params, _opts), do: true
-
-  defp valid_requested_schema?(schema, opts) when is_map(schema) do
-    properties = schema["properties"] || %{}
-    required = schema["required"] || []
-
-    Schema.validate_schema(schema, opts) == :ok and schema["type"] == "object" and
-      is_map(properties) and is_list(required) and
-      Enum.all?(required, &(is_binary(&1) and Map.has_key?(properties, &1))) and
-      Enum.all?(properties, fn {name, property} ->
-        is_binary(name) and valid_requested_property_schema?(property, opts)
-      end)
-  end
-
-  defp valid_requested_schema?(_schema, _opts), do: false
-
-  defp valid_requested_property_schema?(schema, opts) when is_map(schema) do
-    schema["type"] in ["string", "number", "integer", "boolean"] and
-      Schema.validate_schema(schema, opts) == :ok and
-      not Map.has_key?(schema, "properties") and not Map.has_key?(schema, "items")
-  end
-
-  defp valid_requested_property_schema?(_schema, _opts), do: false
 
   defp validate_request_json(params, opts) do
     if Schema.json_value(params, opts) == :ok, do: :ok, else: {:error, :invalid_input_request}

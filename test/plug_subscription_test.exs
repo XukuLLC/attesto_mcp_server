@@ -417,6 +417,72 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
     refute Process.alive?(pid)
   end
 
+  for outcome <- [:refused, :deleted, :different_owner, :binding_refused, :same_owner] do
+    @outcome outcome
+    test "delivery ends on #{@outcome} unless the current binding still owns the subscription" do
+      server = start_supervised!({Server, []})
+      policy = start_supervised!({Agent, fn -> :initial end})
+      config = AttestoMCP.Test.Factory.config()
+      parent = self()
+
+      loader = fn claims, _sender ->
+        case Agent.get(policy, & &1) do
+          :refused -> {:error, :revoked}
+          :deleted -> {:ok, nil}
+          :different_owner -> {:ok, %{id: "different", revision: 2}}
+          :binding_refused -> {:ok, %{id: nil, revision: 2}}
+          :same_owner -> {:ok, %{id: claims["sub"], revision: 2}}
+          :initial -> {:ok, %{id: claims["sub"], revision: 1}}
+        end
+      end
+
+      binding = fn principal ->
+        send(parent, {:bound, principal})
+        principal.id
+      end
+
+      plug =
+        AttestoMCP.Server.Plug.init(
+          server: server,
+          path: "/mcp",
+          principal_binding: binding,
+          auth: [config: config, resource: @resource, principal: loader]
+        )
+
+      token =
+        AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])
+
+      id = 996
+      pid = start_stream(parent, plug, token, id, %{"toolsListChanged" => true})
+      assert :ok = await_subscriptions(server, 1)
+      assert_receive {:bound, %{revision: 1}}
+      Agent.update(policy, fn _ -> @outcome end)
+      assert :ok = Server.publish(server, %{"type" => "toolsListChanged"})
+
+      if @outcome == :same_owner do
+        assert_receive {:bound, %{id: "usr_123", revision: 2}}, 1_000
+        assert :ok = await_subscriptions(server, 1)
+        Server.close_subscription(server, id, pid)
+        assert_receive {:subscription_done, ^id, conn}, 2_000
+
+        assert Enum.count(
+                 stream_messages(conn),
+                 &(&1["method"] == "notifications/tools/list_changed")
+               ) == 1
+      else
+        assert :ok = await_subscriptions(server, 0)
+        assert_receive {:subscription_done, ^id, conn}, 2_000
+
+        refute Enum.any?(
+                 stream_messages(conn),
+                 &(&1["method"] == "notifications/tools/list_changed")
+               )
+      end
+
+      refute Process.alive?(pid)
+    end
+  end
+
   test "mTLS subscription delivery retains the verified certificate binding" do
     {:ok, server} = Server.start_link([])
     config = AttestoMCP.Test.Factory.config()
