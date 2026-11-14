@@ -1,5 +1,43 @@
 # Changelog
 
+## [3.6.0] - 2026-11-14
+
+Requires `attesto_mcp >= 2.7.0 and < 3.0.0` (was `>= 2.6.0 and < 3.0.0`),
+which requires `attesto >= 2.20.0 and < 3.0.0`.
+
+- The installer now adds attesto_phoenix >= 4.16.0 (was >= 4.15.1). Earlier
+  4.x releases derive the DPoP target URI from the request `Host` at protected
+  resources and lack the revocation and pairwise fixes in 4.16.0.
+
+### Security
+
+- Re-run each legacy GET SSE stream's stored authorizer when selecting a legacy
+  GET SSE stream before sending server-initiated requests (elicitation,
+  sampling, roots), skipping streams whose token was revoked or expired instead
+  of routing server requests to them.
+- Expand `display_text_policy: :reject` to cover `completion.values`, `enumNames`,
+  sampling `systemPrompt`, `uri`/`uriTemplate`/`mimeType`, error `data`, and
+  logging notifications (`logger` and `data`, including runtime `notify/1` checks)
+  while preserving opaque binary media `"data"` alongside `"mimeType"`.
+- Reject undeclared keys on `"form"` `"accept"` elicitation responses (outside
+  `requestedSchema.properties`), and reject disallowed schema combinators/keys
+  (`$ref`, `$defs`, `definitions`, `patternProperties`, `allOf`, non-enum `anyOf`,
+  non-string/untitled `oneOf`, object-valued `additionalProperties`) on
+  elicitation `requestedSchema`.
+
+### Fixed
+
+- Pass `context.session_binding` instead of a bare principal identifier when
+  looking up or attaching legacy stdio sessions.
+- Parse HTTP `Authorization` headers with `Attesto.Plug.Authenticate.parse_authorization/1`
+  so empty/non-space scheme tokens or whitespace are handled consistently.
+- Delegate `Registry` URI safety validation to `Output.safe_uri?/1`, rejecting
+  mixed-case loopback hosts such as `LOCALHOST` and terminal controls across
+  definition and subscription URIs.
+- Delegate refusal classification, URI origin/issuer checks, IPv6-mapped IPv4
+  unmapping, URL control checks, and `WWW-Authenticate` formatting to `Attesto`
+  and `AttestoMCP`.
+
 ## [3.5.0] - 2026-11-13
 
 Requires attesto_mcp >= 2.6.0 (was >= 2.5.0).

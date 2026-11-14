@@ -265,7 +265,9 @@ defmodule AttestoMCP.Server do
                    progress = progress_callback(parent, ref, progress_token, on_event)
 
                    notification_context =
-                     Map.put(context, :max_json_bytes, runtime.opts[:max_json_bytes])
+                     context
+                     |> Map.put(:max_json_bytes, runtime.opts[:max_json_bytes])
+                     |> Map.put(:display_text_policy, runtime.opts[:display_text_policy])
 
                    notify =
                      notification_callback(
@@ -1277,7 +1279,11 @@ defmodule AttestoMCP.Server do
          :ok <- validate_client_request_revision(session.version, method, params),
          :ok <- validate_elicitation_request(method, params, state.opts),
          {:ok, _stream_ref, stream} <-
-           newest_live_legacy_stream(state.legacy_streams, session_id) do
+           newest_live_legacy_stream(
+             state.legacy_streams,
+             session_id,
+             %{"method" => method, "params" => params}
+           ) do
       request_ref = make_ref()
       id = "server_" <> Integer.to_string(System.unique_integer([:positive]))
       waiter_monitor = Process.monitor(waiter)
@@ -2187,18 +2193,25 @@ defmodule AttestoMCP.Server do
 
   defp normalize_rate_key(key, _opts), do: key
 
-  defp rate_key_address({0, 0, 0, 0, 0, 0xFFFF, high, low}, _opts)
-       when high in 0..0xFFFF and low in 0..0xFFFF,
-       do: {div(high, 256), rem(high, 256), div(low, 256), rem(low, 256)}
+  defp rate_key_address(address, opts) when is_tuple(address) and tuple_size(address) == 8 do
+    case Attesto.IPAddress.unmap_ipv4(address) do
+      {_, _, _, _} = ipv4 ->
+        ipv4
 
-  defp rate_key_address({a, b, c, d, e, f, g, h}, opts)
-       when a in 0..0xFFFF and b in 0..0xFFFF and c in 0..0xFFFF and d in 0..0xFFFF and
-              e in 0..0xFFFF and f in 0..0xFFFF and g in 0..0xFFFF and h in 0..0xFFFF do
-    host_bits = 128 - Keyword.get(opts, :rate_limit_ipv6_prefix, @default_rate_limit_ipv6_prefix)
-    <<address::128>> = <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
-    network = address |> Bitwise.bsr(host_bits) |> Bitwise.bsl(host_bits)
-    <<n1::16, n2::16, n3::16, n4::16, n5::16, n6::16, n7::16, n8::16>> = <<network::128>>
-    {n1, n2, n3, n4, n5, n6, n7, n8}
+      {a, b, c, d, e, f, g, h}
+      when a in 0..0xFFFF and b in 0..0xFFFF and c in 0..0xFFFF and d in 0..0xFFFF and
+             e in 0..0xFFFF and f in 0..0xFFFF and g in 0..0xFFFF and h in 0..0xFFFF ->
+        host_bits =
+          128 - Keyword.get(opts, :rate_limit_ipv6_prefix, @default_rate_limit_ipv6_prefix)
+
+        <<raw::128>> = <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+        network = raw |> Bitwise.bsr(host_bits) |> Bitwise.bsl(host_bits)
+        <<n1::16, n2::16, n3::16, n4::16, n5::16, n6::16, n7::16, n8::16>> = <<network::128>>
+        {n1, n2, n3, n4, n5, n6, n7, n8}
+
+      _invalid ->
+        address
+    end
   end
 
   defp rate_key_address(address, _opts), do: address
@@ -2459,6 +2472,12 @@ defmodule AttestoMCP.Server do
 
       Schema.json_value(event, json_budget_opts(context)) != :ok ->
         {:error, :notification_not_json}
+
+      AttestoMCP.Server.Text.wire(
+        event,
+        display_text_policy: context[:display_text_policy] || :off
+      ) != :ok ->
+        {:error, :terminal_control_character}
 
       method == "notifications/message" ->
         validate_log_params(params, json_budget_opts(context))
@@ -3650,10 +3669,11 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp newest_live_legacy_stream(streams, session_id) do
+  defp newest_live_legacy_stream(streams, session_id, request) do
     case streams
          |> Enum.filter(fn {_ref, stream} ->
-           stream.session_id == session_id and Process.alive?(stream.sink)
+           stream.session_id == session_id and Process.alive?(stream.sink) and
+             legacy_authorized?(stream, request, [[]], nil)
          end)
          |> Enum.max_by(
            fn {_ref, stream} -> stream.opened_sequence end,
@@ -5121,7 +5141,7 @@ defmodule AttestoMCP.Server do
 
   defp validate_resource_subscription_uri(uri)
        when is_binary(uri) and byte_size(uri) in 1..@max_resource_subscription_uri_bytes do
-    if String.valid?(uri) and not String.contains?(uri, ["\u0000", "\r", "\n"]),
+    if String.valid?(uri) and Attesto.Claims.no_terminal_controls?(uri, allow_multiline?: false),
       do: :ok,
       else: {:error, :invalid_uri}
   end

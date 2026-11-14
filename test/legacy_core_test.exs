@@ -875,7 +875,10 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
        %{
          "mode" => "form",
          "message" => "confirm",
-         "requestedSchema" => %{"type" => "object"}
+         "requestedSchema" => %{
+           "type" => "object",
+           "properties" => %{"answer" => %{"type" => "string"}}
+         }
        }},
       {"roots", "roots/list", %{}}
     ]

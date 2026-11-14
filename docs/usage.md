@@ -47,7 +47,7 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
-With `attesto_phoenix >= 4.15.1 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.16.0 and < 5.0.0`, one Phoenix host can serve
 multiple named profiles. It binds each automatic protected-resource callback
 to the named profile loaded from the `otp_app` passed to the helper, keeping
 those profiles isolated. It does not select a profile from `conn.private`.
@@ -172,7 +172,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 4.15.1 and < 5.0.0` and Req requirements that overlap
+overlap `>= 4.16.0 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -476,7 +476,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.5"},
+    {:attesto_mcp_server, "~> 3.6"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -579,7 +579,7 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 2.6.0 and < 3.0.0` and calls the public
+The package requires `attesto_mcp >= 2.7.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 
@@ -637,14 +637,18 @@ access token's validity, audience, sender binding, applicable scopes, and any
 matched resource definition scopes before modern or session-bound
 subscription-notification delivery.
 Comparisons with the opening token actor, principal binding, and tenant preserve
-the authenticated stream's ownership snapshot. When `:principal` is configured,
+the authenticated stream's ownership snapshot, including legacy GET SSE streams
+when selecting a live stream for server-initiated requests. When `:principal` is configured,
 the server invokes it again with the freshly verified claims and the established
 sender context before each matching event. The Phoenix integration therefore
 rechecks token revocation and reloads the principal for every delivery. Keep
 those lookups indexed and bounded; rejection, an invalid return, or a callback
 failure suppresses the event. Mount authorization still runs only when the
-stream is authenticated. An `issuer:`
-without a verifier configuration is
+stream is authenticated. An `attesto` configuration (`config:`) or dynamic verifier that serves protected
+traffic requires at least an origin/URL pin (`:base_url`, `:origin`, `:htu`, or
+`allow_dynamic_origin: true` with non-empty `:allowed_hosts`) when DPoP is enabled,
+in addition to an `issuer:` for metadata discovery:
+without a verifier configuration it is
 metadata-only: it may serve RFC 9728 metadata, but protected traffic fails
 closed until the host supplies an executable Attesto configuration.
 
@@ -1671,7 +1675,9 @@ and roots responses use a `roots` array.
 A valid retry with missing answers receives another `input_required` result
 containing only the remaining requests. The fresh signed state preserves
 validated earlier answers and the original deadline; echo the new state on
-the next retry. Unknown response keys are ignored. Tampered, expired, reused,
+the next retry. Form accept responses reject undeclared response keys outside
+`requestedSchema.properties`, and schemas accept only the flat MCP 2025-11-25 /
+SEP-1330 keywords. Unknown form action or tampered, expired, reused,
 or unbound state and malformed supplied answers are rejected.
 
 #### URL elicitations
@@ -2234,14 +2240,19 @@ budget, not an exact BEAM heap quota. Both settings accept integers from 1 throu
 same limits atomically. A failed operation leaves the prior catalog/revision.
 
 Use `display_text_policy: :reject` to refuse terminal controls in catalog titles,
-descriptions, schema annotations, server identity/instructions, dynamic
-presentation, prompt messages, tool text, resource text (including embedded
-resources), elicitation messages, and public error messages. It rejects U+0000
+descriptions, schema annotations, `enumNames`, server identity/instructions,
+dynamic presentation, prompt messages, tool text, resource text (including embedded
+resources), completion values, sampling `systemPrompt`, error `data`, logging
+notifications (`logger` and `data`), elicitation messages, and public error messages.
+It rejects U+0000
 through U+001F, U+007F, and U+0080 through U+009F, including ESC, CSI (U+009B), and
 OSC (U+009D). Tab and LF are allowed in multiline text, but not names, versions,
-or titles. Static failures are registration errors or startup `ArgumentError`s;
-runtime failures return a controlled protocol error without the offending text.
-Binary/base64 media, `structuredContent`, application `_meta`, and schema
+titles, URIs, MIME types, logger names, completion values, or `enumNames`.
+Static failures are registration errors or startup `ArgumentError`s;
+runtime failures return a controlled protocol error or suppress offending notifications
+without the offending text.
+Binary/base64 media (`"data"` paired with `"mimeType"`), `structuredContent`,
+application `_meta`, and schema
 const/default/enum/example data remain untouched. Existing JSON validation and
 wire budgets still apply. The setting is not a promise that every opaque data
 field is safe to print; clients must render untrusted data safely.

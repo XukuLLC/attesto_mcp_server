@@ -228,6 +228,7 @@ defmodule AttestoMCP.Server.AuthTelemetryTest do
             {401, %{"error" => "insufficient_user_authentication"}, :step_up_required},
             {403, %{"error" => "insufficient_scope"}, :insufficient_scope},
             {503, %{"error" => "temporarily_unavailable"}, :verifier_unavailable},
+            {503, %{"error" => "invalid_token"}, :verifier_unavailable},
             {401, nil, :invalid_token},
             {418, nil, :other}
           ] do

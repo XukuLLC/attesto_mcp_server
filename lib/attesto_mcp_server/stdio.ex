@@ -724,7 +724,7 @@ defmodule AttestoMCP.Server.Stdio do
     case AttestoMCP.Server.get_session(
            server,
            session_id,
-           context_principal(context),
+           context.session_binding,
            Map.get(context, :tenant) || Map.get(context, "tenant")
          ) do
       {:ok, %{version: version}} when version in @legacy_versions ->
@@ -734,7 +734,7 @@ defmodule AttestoMCP.Server.Stdio do
               AttestoMCP.Server.open_legacy_stream(
                 server,
                 session_id,
-                context_principal(context),
+                context.session_binding,
                 Map.get(context, :tenant) || Map.get(context, "tenant"),
                 self(),
                 nil,

@@ -1,10 +1,12 @@
 defmodule AttestoMCP.Server.Text do
   @moduledoc false
 
-  @controls ~r/[\x{0000}-\x{0008}\x{000B}-\x{001F}\x{007F}-\x{009F}]/u
-  @single_line_controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
-  @display_fields ~w(name version title description instructions message text)
-  @opaque_fields ~w(structuredContent data blob _meta default enum const examples)
+  @display_fields ~w(
+    name version title description instructions message text
+    systemPrompt logger uri uriTemplate mimeType
+  )
+  @single_line_display_fields ~w(name version title logger uri uriTemplate mimeType)
+  @opaque_fields ~w(structuredContent blob _meta default enum const examples)
 
   # Optional display fields consistently allow nil (omitted) and empty strings.
   # Required identifiers must be nonempty; protocol-specific syntax stays with
@@ -21,8 +23,10 @@ defmodule AttestoMCP.Server.Text do
   end
 
   defp controls_allowed?(value, opts) do
-    regex = if Keyword.get(opts, :multiline, true), do: @controls, else: @single_line_controls
-    Keyword.get(opts, :display_text_policy, :off) == :off or not Regex.match?(regex, value)
+    Keyword.get(opts, :display_text_policy, :off) == :off or
+      Attesto.Claims.no_terminal_controls?(value,
+        allow_multiline?: Keyword.get(opts, :multiline, true)
+      )
   end
 
   def catalog(value, opts) do
@@ -86,7 +90,8 @@ defmodule AttestoMCP.Server.Text do
   # enum, const and example data are not schema annotations.
   defp schema(value, opts) when is_map(value) do
     with :ok <- field(value["title"], :title, 1_024, opts, multiline: false),
-         :ok <- field(value["description"], :description, 4_096, opts) do
+         :ok <- field(value["description"], :description, 4_096, opts),
+         :ok <- enum_names(value["enumNames"], opts) do
       Enum.reduce_while(value, :ok, fn {key, child}, :ok ->
         result = schema_child(key, child, opts)
         if result == :ok, do: {:cont, :ok}, else: {:halt, result}
@@ -95,6 +100,21 @@ defmodule AttestoMCP.Server.Text do
   end
 
   defp schema(_value, _opts), do: :ok
+
+  defp enum_names(names, opts) when is_list(names) do
+    Enum.reduce_while(names, :ok, fn
+      name, :ok when is_binary(name) ->
+        case field(name, :enum_names, 1_024, opts, multiline: false) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+
+      _other, :ok ->
+        {:cont, :ok}
+    end)
+  end
+
+  defp enum_names(_names, _opts), do: :ok
 
   defp schema_child(key, children, opts)
        when key in ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"] and
@@ -141,9 +161,17 @@ defmodule AttestoMCP.Server.Text do
   end
 
   defp wire_safe?(value) when is_map(value) do
+    mime_present? = is_binary(value["mimeType"])
+
     Enum.all?(value, fn
       {"_meta", meta} when is_map(meta) ->
         wire_safe?(meta["io.modelcontextprotocol/serverInfo"])
+
+      {"data", _data} when mime_present? ->
+        true
+
+      {"data", data} ->
+        no_data_controls?(data)
 
       {key, _value} when key in @opaque_fields ->
         true
@@ -151,8 +179,14 @@ defmodule AttestoMCP.Server.Text do
       {key, value} when key in @display_fields and is_binary(value) ->
         valid?(value, byte_size(value),
           display_text_policy: :reject,
-          multiline: key not in ["name", "version", "title"]
+          multiline: key not in @single_line_display_fields
         )
+
+      {"enumNames", names} when is_list(names) ->
+        safe_string_list?(names, false)
+
+      {"completion", %{} = completion} ->
+        wire_safe?(completion) and safe_string_list?(completion["values"], false)
 
       {key, value} when key in ["inputSchema", "outputSchema", "requestedSchema"] ->
         schema(value, display_text_policy: :reject) == :ok
@@ -164,4 +198,29 @@ defmodule AttestoMCP.Server.Text do
 
   defp wire_safe?(values) when is_list(values), do: Enum.all?(values, &wire_safe?/1)
   defp wire_safe?(_value), do: true
+
+  defp safe_string_list?(values, multiline) when is_list(values) do
+    Enum.all?(values, fn
+      value when is_binary(value) ->
+        valid?(value, byte_size(value), display_text_policy: :reject, multiline: multiline)
+
+      _other ->
+        true
+    end)
+  end
+
+  defp safe_string_list?(_other, _multiline), do: true
+
+  defp no_data_controls?(value) when is_binary(value) do
+    valid?(value, byte_size(value), display_text_policy: :reject, multiline: true)
+  end
+
+  defp no_data_controls?(values) when is_list(values),
+    do: Enum.all?(values, &no_data_controls?/1)
+
+  defp no_data_controls?(value) when is_map(value) do
+    Enum.all?(value, fn {_key, child} -> no_data_controls?(child) end)
+  end
+
+  defp no_data_controls?(_value), do: true
 end

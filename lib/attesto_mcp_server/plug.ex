@@ -830,7 +830,7 @@ defmodule AttestoMCP.Server.Plug do
 
     conn
     |> put_authenticate_challenge(
-      ~s(Bearer resource_metadata="#{metadata_url}"),
+      Attesto.Plug.OAuthError.format_challenge(:bearer, [{"resource_metadata", metadata_url}]),
       anonymous_authentication?(conn, auth_opts)
     )
     |> put_resp_header("cache-control", "private, no-store")
@@ -3299,7 +3299,7 @@ defmodule AttestoMCP.Server.Plug do
       do: raise(ArgumentError, ":origin must be an HTTP origin without a path")
 
     if absolute_origin?(base_url) and absolute_origin?(origin) and
-         origin_key(base_url) != origin_key(origin) do
+         not Attesto.URI.same_origin?(base_url, origin) do
       raise ArgumentError, ":base_url and :origin must identify the same origin"
     end
 
@@ -3325,23 +3325,12 @@ defmodule AttestoMCP.Server.Plug do
     configured_origin = base_url || origin
 
     if not is_nil(configured_absolute) and absolute_origin?(configured_origin) and
-         origin_key(configured_absolute) != origin_key(configured_origin) do
+         not Attesto.URI.same_origin?(configured_absolute, configured_origin) do
       raise ArgumentError, "canonical resource and base origin must agree"
     end
 
     :ok
   end
-
-  defp origin_key(value) do
-    case URI.parse(value) do
-      %URI{scheme: scheme, host: host, port: port} ->
-        {String.downcase(scheme || ""), String.downcase(host || ""), effective_port(scheme, port)}
-    end
-  end
-
-  defp effective_port("http", nil), do: 80
-  defp effective_port("https", nil), do: 443
-  defp effective_port(_scheme, port), do: port
 
   defp canonical_resource(conn, opts) do
     configured =
@@ -3379,68 +3368,16 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp canonical_origin(resource) do
-    resource
-    |> URI.parse()
-    |> Map.merge(%{path: nil, query: nil, fragment: nil})
-    |> URI.to_string()
+    {:ok, origin} = Attesto.URI.origin(resource)
+    origin
   end
 
-  defp absolute_resource?(value) when is_binary(value) do
-    case URI.parse(value) do
-      %URI{scheme: scheme, host: host, userinfo: nil, query: nil, fragment: nil, path: path}
-      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
-        String.valid?(value) and safe_uri_bytes?(value) and valid_percent_encoding?(value) and
-          (is_nil(path) or String.starts_with?(path, "/"))
+  defp absolute_resource?(value), do: Attesto.URI.issuer_identifier?(value, allow_http: true)
 
-      _ ->
-        false
-    end
-  end
+  defp absolute_origin?(value), do: Attesto.URI.origin?(value, allow_http: true)
 
-  defp absolute_resource?(_), do: false
-
-  defp absolute_origin?(value) do
-    if absolute_resource?(value) do
-      URI.parse(value).path in [nil, "", "/"]
-    else
-      false
-    end
-  rescue
-    _ -> false
-  end
-
-  defp safe_uri_bytes?(value) do
-    value
-    |> :binary.bin_to_list()
-    |> Enum.all?(fn byte -> byte >= 0x21 and byte != 0x7F and byte not in [?"] end)
-  end
-
-  defp valid_percent_encoding?(value) do
-    bytes = :binary.bin_to_list(value)
-
-    bytes
-    |> Enum.with_index()
-    |> Enum.all?(fn
-      {?%, index} ->
-        case Enum.drop(bytes, index + 1) do
-          [a, b | _] -> hex_digit?(a) and hex_digit?(b)
-          _ -> false
-        end
-
-      _ ->
-        true
-    end)
-  end
-
-  defp hex_digit?(byte) when byte in ?0..?9, do: true
-  defp hex_digit?(byte) when byte in ?a..?f, do: true
-  defp hex_digit?(byte) when byte in ?A..?F, do: true
-  defp hex_digit?(_), do: false
-
-  defp metadata_path?(conn, path) do
-    expected = "/.well-known/oauth-protected-resource" <> path
-    conn.request_path == expected
-  end
+  defp metadata_path?(conn, path),
+    do: conn.request_path == Attesto.ProtectedResourceMetadata.well_known_path(path)
 
   # `allow_dynamic_origin` derives the canonical origin from the request Host,
   # which makes the Origin comparison below tautological: a browser page whose
@@ -3450,7 +3387,7 @@ defmodule AttestoMCP.Server.Plug do
   defp forbidden_host?(conn, state) do
     case dynamic_origin_hosts(state.auth_opts) do
       nil -> false
-      hosts -> not host_allowed?(conn, hosts)
+      hosts -> not AttestoMCP.Plug.Authenticate.host_allowed?(conn, hosts)
     end
   rescue
     _ -> true
@@ -3463,28 +3400,6 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp dynamic_origin_hosts(_auth_opts), do: nil
-
-  defp host_allowed?(conn, hosts) do
-    case normalize_allowed_host(conn.host) do
-      "" ->
-        false
-
-      host ->
-        authority = host <> ":" <> Integer.to_string(conn.port)
-        Enum.any?(hosts, fn allowed -> normalize_allowed_host(allowed) in [host, authority] end)
-    end
-  end
-
-  # Case-insensitive, trailing-dot-insensitive, and bracket-insensitive for
-  # IPv6 literals, so `[::1]:4000`, `::1`, and `[::1]` all name one host.
-  defp normalize_allowed_host(host) when is_binary(host) do
-    host
-    |> String.downcase(:ascii)
-    |> String.trim_trailing(".")
-    |> String.replace(["[", "]"], "")
-  end
-
-  defp normalize_allowed_host(_host), do: ""
 
   defp invalid_origin?(conn, state) do
     expected_origin = canonical_resource(conn, state.auth_opts) |> canonical_origin()
@@ -3823,9 +3738,9 @@ defmodule AttestoMCP.Server.Plug do
   defp access_token(conn) do
     case get_req_header(conn, "authorization") do
       [value] ->
-        case String.split(value, " ", parts: 2) do
-          [_scheme, token] when token != "" -> token
-          _ -> nil
+        case Attesto.Plug.Authenticate.parse_authorization(value) do
+          {:ok, _scheme, token} -> token
+          :malformed -> nil
         end
 
       _ ->
@@ -3983,18 +3898,19 @@ defmodule AttestoMCP.Server.Plug do
   defp resource_challenge(conn, auth_opts, error) do
     metadata_url = metadata_url(conn, auth_opts)
 
-    scope =
-      case error.data do
-        %{"required_scopes" => scopes} when is_list(scopes) ->
-          ~s( scope="#{Enum.join(scopes, " ")}")
+    params =
+      [{"error", "insufficient_scope"}] ++
+        case error.data do
+          %{"required_scopes" => scopes} when is_list(scopes) ->
+            [{"scope", Enum.join(scopes, " ")}]
 
-        _ ->
-          ""
-      end
+          _ ->
+            []
+        end ++ [{"resource_metadata", metadata_url}]
 
     put_authenticate_challenge(
       conn,
-      ~s(Bearer error="insufficient_scope"#{scope} resource_metadata="#{metadata_url}")
+      Attesto.Plug.OAuthError.format_challenge(:bearer, params)
     )
   rescue
     _ -> conn

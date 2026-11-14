@@ -183,6 +183,7 @@ defmodule AttestoMCP.Server.P12TransportTest do
                      %{"method" => "sampling/createMessage"} = request}},
                    1_000
 
+    assert_receive {:resource_event_scopes, []}, 1_000
     refute_receive {:stale_event, {:mcp_legacy_event, ^stale_ref, _, _}}, 100
     Server.ack_legacy_stream(server, replacement_ref)
 

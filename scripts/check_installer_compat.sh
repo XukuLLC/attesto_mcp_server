@@ -331,13 +331,13 @@ installed_http_smoke() {
   elixir -e '
     path = "mix.exs"
     source = File.read!(path)
-    marker = ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0"})
+    marker = ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0"})
 
     unless length(:binary.matches(source, marker)) == 1 do
       raise("attesto_phoenix floor dependency marker was not unique")
     end
 
-    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "== 4.15.1"})))
+    File.write!(path, String.replace(source, marker, ~s({:attesto_phoenix, "== 4.16.0"})))
   '
 
   mix deps.get
@@ -356,7 +356,7 @@ installed_http_smoke() {
              not Keyword.has_key?(default_protected, :nonce_check) and
              not Keyword.has_key?(default_protected, :nonce_issue) and
              not Keyword.has_key?(default_protected, :cert_der) do
-      raise("attesto_phoenix 4.15.1 default protected-resource callbacks failed")
+      raise("attesto_phoenix 4.16.0 default protected-resource callbacks failed")
     end
 
     current = Application.fetch_env!(:installer_host, AttestoPhoenix.Config)
@@ -377,8 +377,8 @@ installed_http_smoke() {
 
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
-    unless to_string(Application.spec(:attesto_phoenix, :vsn)) == "4.15.1" do
-      raise("attesto_phoenix floor lane did not resolve exactly 4.15.1")
+    unless to_string(Application.spec(:attesto_phoenix, :vsn)) == "4.16.0" do
+      raise("attesto_phoenix floor lane did not resolve exactly 4.16.0")
     end
 
     unless match?(%Attesto.Config{}, protected[:config]) and
@@ -388,12 +388,12 @@ installed_http_smoke() {
              is_function(protected[:cert_der], 1) and
              is_function(protected[:htu], 1) and
              is_function(protected[:principal], 2) do
-      raise("attesto_phoenix 4.15.1 protected-resource integration failed")
+      raise("attesto_phoenix 4.16.0 protected-resource integration failed")
     end
 
     unless protected[:replay_check].("fresh", 60) == :ok and
              protected[:replay_check].("replay", 60) == {:error, :replay} do
-      raise("attesto_phoenix 4.15.1 replay callback result/failure behavior failed")
+      raise("attesto_phoenix 4.16.0 replay callback result/failure behavior failed")
     end
 
     nonce = protected[:nonce_issue].()
@@ -401,7 +401,7 @@ installed_http_smoke() {
     unless nonce == "compat-nonce" and
              protected[:nonce_check].(nonce) == :ok and
              protected[:nonce_check].("invalid-nonce") == {:error, :use_dpop_nonce} do
-      raise("attesto_phoenix 4.15.1 nonce callback result/failure behavior failed")
+      raise("attesto_phoenix 4.16.0 nonce callback result/failure behavior failed")
     end
 
     cert_conn =
@@ -410,7 +410,7 @@ installed_http_smoke() {
 
     unless protected[:cert_der].(cert_conn) == nil and
              protected[:htu].(Plug.Test.conn(:get, "/mcp")) == "https://mcp.example.com/mcp" do
-      raise("attesto_phoenix 4.15.1 certificate or URL callback behavior failed")
+      raise("attesto_phoenix 4.16.0 certificate or URL callback behavior failed")
     end
 
     unless protected[:principal].(
@@ -418,7 +418,7 @@ installed_http_smoke() {
              %{binding: :bearer}
            ) == {:ok, %{id: "svc_installer"}} and
              protected[:principal].(%{}, %{binding: :bearer}) == {:error, :principal_load_failed} do
-      raise("attesto_phoenix 4.15.1 principal callback result/failure behavior failed")
+      raise("attesto_phoenix 4.16.0 principal callback result/failure behavior failed")
     end
   '
 
@@ -477,7 +477,7 @@ installed_http_smoke() {
     version = Application.spec(:attesto_phoenix, :vsn) |> to_string()
     protected = AttestoMCP.Server.Phoenix.protected_resource_options(:installer_host)
 
-    unless Version.match?(version, ">= 4.15.1 and < 5.0.0") do
+    unless Version.match?(version, ">= 4.16.0 and < 5.0.0") do
       raise("attesto_phoenix 4.x lane resolved an unsupported version")
     end
 
@@ -557,7 +557,7 @@ mix phx.new "$generated_host_dir" \
 
     dependencies = """
           {:attesto_mcp_server, path: System.fetch_env!("ATTESTO_MCP_SERVER_PATH")},
-          {:attesto_phoenix, ">= 4.15.1 and < 5.0.0"},
+          {:attesto_phoenix, ">= 4.16.0 and < 5.0.0"},
           {:igniter, "== 0.6.0", override: true},
     """
 

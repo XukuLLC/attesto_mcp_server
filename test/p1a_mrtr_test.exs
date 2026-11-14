@@ -38,7 +38,10 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
                    "method" => "elicitation/create",
                    "params" => %{
                      "message" => "choose",
-                     "requestedSchema" => %{"type" => "object"}
+                     "requestedSchema" => %{
+                       "type" => "object",
+                       "properties" => %{"choice" => %{"type" => "string"}}
+                     }
                    }
                  },
                  "client_context" => %{
@@ -859,7 +862,10 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
                    "method" => "elicitation/create",
                    "params" => %{
                      "message" => "first round",
-                     "requestedSchema" => %{"type" => "object"}
+                     "requestedSchema" => %{
+                       "type" => "object",
+                       "properties" => %{"value" => %{"type" => "string"}}
+                     }
                    }
                  }
                }}

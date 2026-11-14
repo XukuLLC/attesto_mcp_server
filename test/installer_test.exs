@@ -370,11 +370,11 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     end
 
     assert diff =~
-             ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0"})
+             ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0"})
 
     phoenix_floor =
       true
-      |> project(attesto_phoenix_requirement: "== 4.15.1")
+      |> project(attesto_phoenix_requirement: "== 4.16.0")
       |> install(["--base-url", "https://mcp.example.com"])
 
     assert phoenix_floor.issues == []
@@ -386,8 +386,8 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       |> Rewrite.source!("mix.exs")
       |> Rewrite.Source.get(:content)
 
-    assert length(:binary.matches(phoenix_floor_mix, ~s({:attesto_phoenix, "== 4.15.1"}))) == 1
-    assert phoenix_floor_mix =~ ~s({:attesto_phoenix, "== 4.15.1"})
+    assert length(:binary.matches(phoenix_floor_mix, ~s({:attesto_phoenix, "== 4.16.0"}))) == 1
+    assert phoenix_floor_mix =~ ~s({:attesto_phoenix, "== 4.16.0"})
 
     phoenix_four =
       true
@@ -404,10 +404,10 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       |> Rewrite.Source.get(:content)
 
     assert length(
-             :binary.matches(phoenix_four_mix, ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0"}))
+             :binary.matches(phoenix_four_mix, ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0"}))
            ) == 1
 
-    assert phoenix_four_mix =~ ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0"})
+    assert phoenix_four_mix =~ ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0"})
 
     phoenix_ceiling =
       true
@@ -426,7 +426,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert length(
              :binary.matches(
                phoenix_ceiling_mix,
-               ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0"})
+               ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0"})
              )
            ) == 1
 
@@ -498,15 +498,15 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       [req_dependency: ~s({:req, "~> 0.7", [:not_a_keyword_option]})],
       [attesto_phoenix_requirement: "~> 3.0"],
       [attesto_phoenix_requirement: "== 4.15.0"],
-      [attesto_phoenix_requirement: "< 4.15.1"],
+      [attesto_phoenix_requirement: "< 4.16.0"],
       [attesto_phoenix_requirement: "~> 5.0"],
       [
         attesto_phoenix_dependency:
-          ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0", git: "https://example.com/attesto_phoenix.git"})
+          ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0", git: "https://example.com/attesto_phoenix.git"})
       ],
       [
         attesto_phoenix_dependency:
-          ~s({:attesto_phoenix, ">= 4.15.1 and < 5.0.0", path: "../attesto_phoenix"})
+          ~s({:attesto_phoenix, ">= 4.16.0 and < 5.0.0", path: "../attesto_phoenix"})
       ]
     ]
 
@@ -917,7 +917,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
 
     dependencies =
       [
-        ~s({:attesto_mcp_server, "~> 3.5"}),
+        ~s({:attesto_mcp_server, "~> 3.6"}),
         phoenix_dependency,
         Keyword.get(options, :req_dependency, "")
       ] ++ Keyword.get(options, :additional_dependencies, [])

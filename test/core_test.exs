@@ -323,7 +323,10 @@ defmodule AttestoMCP.Server.CoreTest do
                           "method" => "elicitation/create",
                           "params" => %{
                             "message" => "Please provide an answer",
-                            "requestedSchema" => %{"type" => "object"}
+                            "requestedSchema" => %{
+                              "type" => "object",
+                              "properties" => %{"answer" => %{"type" => "string"}}
+                            }
                           }
                         }
                       }}

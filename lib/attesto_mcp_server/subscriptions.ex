@@ -327,7 +327,7 @@ defmodule AttestoMCP.Server.Subscriptions do
 
   defp valid_resource_uri?(uri)
        when is_binary(uri) and byte_size(uri) in 1..@max_resource_uri_bytes do
-    String.valid?(uri) and not String.contains?(uri, ["\u0000", "\r", "\n"])
+    String.valid?(uri) and Attesto.Claims.no_terminal_controls?(uri, allow_multiline?: false)
   end
 
   defp valid_resource_uri?(_uri), do: false

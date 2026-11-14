@@ -70,7 +70,7 @@ The [CHANGELOG](CHANGELOG.md) has the full 3.0 entry.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 4.15.1 and < 5.0.0`:
+version compatible with `>= 4.16.0 and < 5.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -94,7 +94,7 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
-With `attesto_phoenix >= 4.15.1 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.16.0 and < 5.0.0`, one Phoenix host can serve
 multiple named authorization profiles. The automatic integration keeps each
 profile's runtime callbacks isolated.
 
@@ -435,7 +435,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 3.5"}]
+  [{:attesto_mcp_server, "~> 3.6"}]
 end
 ```
 
@@ -524,5 +524,6 @@ configuration.
 
 See [text and catalog bounds](docs/usage.md#text-and-catalog-bounds) for the opt-in
 `display_text_policy: :reject` policy and registration budgets. The
-[hardening migration notes](docs/migration.md#unreleased-hardening) cover stricter
-elicitation validation, complete interaction ownership, and subscription closure.
+[hardening migration notes](docs/migration.md#36-dependency-floors) cover stricter
+elicitation validation, complete interaction ownership, revoked stream gating,
+and subscription closure.

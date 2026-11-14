@@ -7,10 +7,6 @@ defmodule AttestoMCP.Server.AuthOutcome do
 
   @outcome_key :attesto_mcp_auth_outcome
   @error_assign :attesto_mcp_oauth_error
-  @sender_constraint ~w(
-    invalid_dpop_jkt invalid_mtls_thumbprint dpop_proof_required dpop_proof_unexpected
-    mtls_cert_required mtls_cert_unexpected conflicting_confirmation unsupported_confirmation
-  )
 
   @type t ::
           :ok
@@ -77,43 +73,10 @@ defmodule AttestoMCP.Server.AuthOutcome do
 
   @doc false
   @spec classify(integer() | nil, term()) :: t()
-  def classify(503, _body), do: :verifier_unavailable
+  def classify(status, body) when is_integer(status),
+    do: AttestoMCP.Telemetry.refusal_outcome(status, body)
 
-  def classify(status, %{"error" => error} = body),
-    do: error_outcome(error, Map.get(body, "error_description"), status)
-
-  def classify(status, _body), do: status_outcome(status)
-
-  defp error_outcome("insufficient_scope", _description, _status), do: :insufficient_scope
-  defp error_outcome("use_dpop_nonce", _description, _status), do: :dpop_nonce_required
-  defp error_outcome("invalid_dpop_proof", "replay", _status), do: :dpop_replay
-  defp error_outcome("invalid_dpop_proof", _description, _status), do: :invalid_dpop_proof
-
-  defp error_outcome("insufficient_user_authentication", _description, _status),
-    do: :step_up_required
-
-  defp error_outcome("invalid_token", description, _status), do: token_outcome(description)
-  defp error_outcome(_error, _description, status), do: status_outcome(status)
-
-  # The core plug reports a verification failure as the verifier's reason atom
-  # in `error_description`; these are the reasons worth counting apart.
-  defp token_outcome("missing or malformed Authorization header"), do: :missing_credentials
-  defp token_outcome("expired"), do: :token_expired
-  defp token_outcome("not_yet_valid"), do: :token_not_yet_valid
-  defp token_outcome("invalid_audience"), do: :invalid_audience
-  defp token_outcome("invalid_issuer"), do: :invalid_issuer
-  defp token_outcome("request is not authenticated"), do: :unauthenticated
-
-  defp token_outcome("request was not authenticated by this protected-resource boundary"),
-    do: :unauthenticated
-
-  defp token_outcome(reason) when reason in @sender_constraint, do: :sender_constraint_mismatch
-  defp token_outcome(_reason), do: :invalid_token
-
-  defp status_outcome(401), do: :invalid_token
-  defp status_outcome(403), do: :insufficient_scope
-  defp status_outcome(503), do: :verifier_unavailable
-  defp status_outcome(_status), do: :other
+  def classify(_status, _body), do: :other
 
   defp sender_binding(conn) do
     case Map.get(conn.assigns, :attesto_mcp_sender) do

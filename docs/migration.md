@@ -1,5 +1,17 @@
 # Migration runbook
 
+## 3.6 dependency floors
+
+Version 3.6 requires `attesto_mcp >= 2.7.0 and < 3.0.0`, which requires
+`attesto >= 2.20.0 and < 3.0.0`. The installer now requires a direct Hex
+`attesto_phoenix` requirement overlapping `>= 4.16.0 and < 5.0.0` (was
+`>= 4.15.1`); earlier 4.x releases derive the DPoP target URI from the request
+`Host` at protected resources. Upgrade a Phoenix host to that range before
+running the installer, then run `mix deps.get`. See the 3.6 changelog entry for stricter legacy
+GET stream reauthorization on server-initiated requests, expanded
+`display_text_policy: :reject` coverage, strict `requestedSchema` and
+undeclared elicitation response key rejection, and lowercase URI host checking.
+
 ## 3.5 dependency floors
 
 Version 3.5 requires `attesto_mcp >= 2.6.0 and < 3.0.0`, which requires

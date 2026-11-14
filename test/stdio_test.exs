@@ -1140,7 +1140,13 @@ defmodule AttestoMCP.Server.StdioTest do
     tools = [
       {"stdio_sample", "sampling/createMessage", %{"messages" => []}},
       {"stdio_elicit", "elicitation/create",
-       %{"message" => "confirm", "requestedSchema" => %{"type" => "object"}}},
+       %{
+         "message" => "confirm",
+         "requestedSchema" => %{
+           "type" => "object",
+           "properties" => %{"answer" => %{"type" => "string"}}
+         }
+       }},
       {"stdio_roots", "roots/list", %{}}
     ]
 

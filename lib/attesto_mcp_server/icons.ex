@@ -117,8 +117,10 @@ defmodule AttestoMCP.Server.Icons do
 
   defp valid_wire_sizes?(_sizes), do: false
 
-  defp valid_wire_size?(size) when is_binary(size) and byte_size(size) <= @max_size_bytes,
-    do: String.valid?(size) and not String.match?(size, ~r/[\x00-\x1F\x7F]/u)
+  defp valid_wire_size?(size) when is_binary(size) and byte_size(size) <= @max_size_bytes do
+    String.valid?(size) and
+      Attesto.Claims.no_terminal_controls?(size, allow_multiline?: false)
+  end
 
   defp valid_wire_size?(_size), do: false
 
@@ -181,7 +183,8 @@ defmodule AttestoMCP.Server.Icons do
 
   defp valid_src(src) when is_binary(src) and byte_size(src) in 1..@max_src_bytes do
     cond do
-      not String.valid?(src) or String.match?(src, ~r/[\x00-\x20\x7F]/u) ->
+      not String.valid?(src) or String.contains?(src, " ") or
+          not Attesto.Claims.no_terminal_controls?(src, allow_multiline?: false) ->
         {:error, :invalid_icon_src}
 
       String.starts_with?(src, "data:") ->

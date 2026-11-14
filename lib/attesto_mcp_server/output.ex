@@ -139,7 +139,8 @@ defmodule AttestoMCP.Server.Output do
   @doc false
   @spec safe_uri?(term()) :: boolean()
   def safe_uri?(uri) when is_binary(uri) do
-    if String.valid?(uri) and not String.contains?(uri, ["..", "\\", "\u0000", "\r", "\n"]) do
+    if String.valid?(uri) and not String.contains?(uri, ["..", "\\"]) and
+         Attesto.Claims.no_terminal_controls?(uri, allow_multiline?: false) do
       try do
         parsed = URI.parse(uri)
         scheme = parsed.scheme && String.downcase(parsed.scheme)

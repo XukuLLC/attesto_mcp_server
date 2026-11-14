@@ -652,7 +652,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallRouterEdgeTest do
       end
 
       defp deps do
-        [{:attesto_mcp_server, "~> 3.5"}]
+        [{:attesto_mcp_server, "~> 3.6"}]
       end
     end
     """
