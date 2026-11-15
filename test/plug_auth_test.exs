@@ -430,7 +430,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
       assert response.status == 200, "got #{response.status}: #{response.resp_body}"
     end
 
-    test "an explicit :allowed_hosts list replaces the default, with or without a port", %{
+    test "an explicit host allowlist accepts HTTPS while HTTP audiences require loopback", %{
       config: config,
       server: server
     } do
@@ -443,7 +443,19 @@ defmodule AttestoMCP.Server.PlugAuthTest do
       allowed = [allowed_hosts: ["dev.internal:4000"]]
 
       response = dynamic_call(server, config, token, "dev.internal", 4000, allowed)
-      assert response.status == 200, "got #{response.status}: #{response.resp_body}"
+      assert response.status == 401
+
+      secure_token =
+        AttestoMCP.Test.Factory.access_token(config,
+          scopes: [AttestoMCP.Scopes.tools_read()],
+          audience: "https://dev.internal:4000/mcp"
+        )
+
+      secure_response =
+        dynamic_call(server, config, secure_token, "dev.internal", 4000, allowed, :https)
+
+      assert secure_response.status == 200,
+             "got #{secure_response.status}: #{secure_response.resp_body}"
 
       refused = dynamic_call(server, config, token, "localhost", 4000, allowed)
       assert refused.status == 403
@@ -477,7 +489,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     end
   end
 
-  defp dynamic_call(server, config, token, host, port, auth_overrides) do
+  defp dynamic_call(server, config, token, host, port, auth_overrides, scheme \\ :http) do
     request = %{
       "jsonrpc" => "2.0",
       "id" => 1,
@@ -494,6 +506,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
       :post
       |> conn("/mcp", Jason.encode!(request))
       |> Map.put(:host, host)
+      |> Map.put(:scheme, scheme)
       |> Map.put(:port, port)
       |> put_req_header("authorization", "Bearer " <> token)
       |> put_req_header("content-type", "application/json")

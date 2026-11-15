@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.8.0] - 2026-11-15
+
+Requires `attesto_mcp >= 2.9.0 and < 3.0.0` (was `>= 2.8.0 and < 3.0.0`),
+which requires `attesto >= 2.22.0 and < 3.0.0`.
+
+- The installer now adds attesto_phoenix >= 4.18.0 (was >= 4.17.0).
+
+### Breaking
+
+- A mount whose resource audience comes from an `http` origin on a host that
+  is not loopback is refused, including one admitted through
+  `:allow_dynamic_origin` and `:allowed_hosts`. Before, an allowed host over
+  plain HTTP was served. Use HTTPS for a host that is not loopback. The rule
+  comes from attesto 2.22.0 through attesto_mcp 2.9.0.
+
 ## [3.7.0] - 2026-11-15
 
 Requires `attesto_mcp >= 2.8.0 and < 3.0.0` (was `>= 2.7.0 and < 3.0.0`),

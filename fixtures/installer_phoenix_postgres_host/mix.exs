@@ -17,7 +17,7 @@ defmodule InstallerHost.MixProject do
   defp deps do
     [
       {:attesto_mcp_server, path: System.fetch_env!("ATTESTO_MCP_SERVER_PATH")},
-      {:attesto_phoenix, "== 4.17.0"},
+      {:attesto_phoenix, "== 4.18.0"},
       {:igniter, "== 0.6.0", override: true},
       {:phoenix, "~> 1.7.0"},
       {:ecto_sql, "~> 3.10"},

@@ -1,5 +1,16 @@
 # Migration runbook
 
+## 3.8 dependency floors
+
+Version 3.8 requires `attesto_mcp >= 2.9.0 and < 3.0.0`, which requires
+`attesto >= 2.22.0 and < 3.0.0`. The installer now requires a direct Hex
+`attesto_phoenix` requirement overlapping `>= 4.18.0 and < 5.0.0` (was
+`>= 4.17.0`). Upgrade a Phoenix host to that range before running the
+installer, then run `mix deps.get`. A mount whose resource audience comes from
+an `http` origin on a host that is not loopback is now refused, including one
+admitted through `:allow_dynamic_origin` and `:allowed_hosts`; serve that host
+over HTTPS.
+
 ## 3.7 dependency floors
 
 Version 3.7 requires `attesto_mcp >= 2.8.0 and < 3.0.0`, which requires
