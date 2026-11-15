@@ -70,7 +70,7 @@ The [CHANGELOG](CHANGELOG.md) has the full 3.0 entry.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 4.16.0 and < 5.0.0`:
+version compatible with `>= 4.17.0 and < 5.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -94,7 +94,7 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
-With `attesto_phoenix >= 4.16.0 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.17.0 and < 5.0.0`, one Phoenix host can serve
 multiple named authorization profiles. The automatic integration keeps each
 profile's runtime callbacks isolated.
 
@@ -435,7 +435,7 @@ Non-Phoenix Plug hosts can add the package directly:
 
 ```elixir
 def deps do
-  [{:attesto_mcp_server, "~> 3.6"}]
+  [{:attesto_mcp_server, "~> 3.7"}]
 end
 ```
 
@@ -494,7 +494,8 @@ principals, or tenants. The session-free `2026-07-28` transport has no server
 session IDs to list.
 
 The server prefers MCP `2026-07-28` and also negotiates `2025-11-25` and
-`2025-06-18`. The latest recorded runner and SDK evidence covers 2.4.0 in
+`2025-06-18`. Current official runner scores (`2026-07-28`: 37/37 scored,
+`2025-11-25`: 30/30 scored) and SDK smoke evidence are recorded in
 [`CONFORMANCE.md`](CONFORMANCE.md).
 
 At this package's protected HTTP boundary, clients sending a `2026-07-28` POST
@@ -524,6 +525,6 @@ configuration.
 
 See [text and catalog bounds](docs/usage.md#text-and-catalog-bounds) for the opt-in
 `display_text_policy: :reject` policy and registration budgets. The
-[hardening migration notes](docs/migration.md#36-dependency-floors) cover stricter
+[hardening migration notes](docs/migration.md#34-hardening) and [3.7 dependency floors](docs/migration.md#37-dependency-floors) cover stricter
 elicitation validation, complete interaction ownership, revoked stream gating,
 and subscription closure.

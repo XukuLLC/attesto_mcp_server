@@ -122,10 +122,7 @@ defmodule AttestoMCP.Server.RequestState do
   defp responses_valid?(%{"k" => expected}, nil), do: expected == []
   defp responses_valid?(_payload, _responses), do: true
 
-  defp digest(value),
-    do:
-      :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic]))
-      |> Base.url_encode64(padding: false)
+  defp digest(value), do: AttestoMCP.Server.Digest.base64url(value)
 
   defp secret do
     case Application.get_env(:attesto_mcp_server, :request_state_secret) do

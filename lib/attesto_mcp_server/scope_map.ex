@@ -7,6 +7,10 @@ defmodule AttestoMCP.Server.ScopeMap do
   @max_method_scope_bytes 8_192
   @max_total_scope_bytes 65_536
 
+  @doc false
+  @spec max_scope_bytes() :: pos_integer()
+  def max_scope_bytes, do: @max_scope_bytes
+
   @supported_methods MapSet.new([
                        "server/discover",
                        "initialize",

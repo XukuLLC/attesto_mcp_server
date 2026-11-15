@@ -9,9 +9,9 @@ defmodule AttestoMCP.Server.Implementation do
   alias AttestoMCP.Server.{Icons, Text}
 
   @legacy_2025_06_18 "2025-06-18"
-  @max_text_bytes 1_024
-  @max_description_bytes 4_096
-  @max_url_bytes 2_048
+  @max_text_bytes Text.max_title_bytes()
+  @max_description_bytes Text.max_description_bytes()
+  @max_url_bytes Text.max_url_bytes()
   @fields ["name", "version", "title", "description", "websiteUrl", "icons"]
 
   @doc "Builds the configured implementation value from normalized startup options."

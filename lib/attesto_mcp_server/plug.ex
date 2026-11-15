@@ -1927,12 +1927,9 @@ defmodule AttestoMCP.Server.Plug do
     result
   end
 
-  # Keepalives and events re-enter the receive, so each pass waits only for the
-  # time left before the deadline and none of them extends the stream. The
-  # deadline is checked before the receive because a receive takes a waiting
-  # message ahead of an expired `after`, so a steady flow of events would
-  # otherwise keep the stream open past it. Each delivery checks it again
-  # before writing, since the process can be descheduled between the two.
+  # Keepalives and events re-enter `DeadlineLoop.run/4`, waiting only for the
+  # remaining time before `deadline`. Each delivery also checks the deadline
+  # before writing in case the process is descheduled between receive and write.
   defp subscription_stream(
          conn,
          state,
@@ -1942,29 +1939,32 @@ defmodule AttestoMCP.Server.Plug do
          final_response,
          deadline
        ) do
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining > 0 do
-      await_subscription_message(
-        conn,
-        state,
-        subscription_id,
-        request_ref,
-        session_id,
-        final_response,
-        deadline,
-        remaining
-      )
-    else
-      end_subscription_stream_at_deadline(
-        conn,
-        state,
-        subscription_id,
-        request_ref,
-        session_id,
-        final_response
-      )
-    end
+    AttestoMCP.Server.DeadlineLoop.run(
+      deadline,
+      conn,
+      fn current_conn, remaining ->
+        await_subscription_message(
+          current_conn,
+          state,
+          subscription_id,
+          request_ref,
+          session_id,
+          final_response,
+          deadline,
+          remaining
+        )
+      end,
+      fn current_conn ->
+        end_subscription_stream_at_deadline(
+          current_conn,
+          state,
+          subscription_id,
+          request_ref,
+          session_id,
+          final_response
+        )
+      end
+    )
   end
 
   defp await_subscription_message(
@@ -1988,49 +1988,43 @@ defmodule AttestoMCP.Server.Plug do
       {:mcp_subscription_keepalive, ^request_ref} ->
         Process.delete({:mcp_subscription_keepalive, request_ref})
 
-        if past_deadline?(deadline) do
-          end_subscription_stream_at_deadline(
-            conn,
-            state,
-            subscription_id,
-            request_ref,
-            session_id,
-            final_response
-          )
+        if AttestoMCP.Server.DeadlineLoop.past?(deadline) do
+          {:done,
+           end_subscription_stream_at_deadline(
+             conn,
+             state,
+             subscription_id,
+             request_ref,
+             session_id,
+             final_response
+           )}
         else
           case chunk(conn, ": keepalive\n\n") do
             {:ok, conn} ->
               if is_integer(keepalive_ms) and keepalive_ms > 0,
                 do: schedule_subscription_keepalive(request_ref, keepalive_ms)
 
-              subscription_stream(
-                conn,
-                state,
-                subscription_id,
-                request_ref,
-                session_id,
-                final_response,
-                deadline
-              )
+              {:cont, conn}
 
             {:error, _reason} ->
               cancel_subscription_keepalive(request_ref)
               close_owned_subscription(state.server, subscription_id)
               drain_subscription_messages(request_ref, subscription_id)
-              conn
+              {:done, conn}
           end
         end
 
       {:mcp_subscription, ^request_ref, ^subscription_id, event} ->
-        if past_deadline?(deadline) do
-          end_subscription_stream_at_deadline(
-            conn,
-            state,
-            subscription_id,
-            request_ref,
-            session_id,
-            final_response
-          )
+        if AttestoMCP.Server.DeadlineLoop.past?(deadline) do
+          {:done,
+           end_subscription_stream_at_deadline(
+             conn,
+             state,
+             subscription_id,
+             request_ref,
+             session_id,
+             final_response
+           )}
         else
           case emit_subscription(conn, state.server, subscription_id, event) do
             {:ok, conn} ->
@@ -2038,63 +2032,40 @@ defmodule AttestoMCP.Server.Plug do
                 AttestoMCP.Server.ack_subscription(state.server, subscription_id, self())
               end
 
-              subscription_stream(
-                conn,
-                state,
-                subscription_id,
-                request_ref,
-                session_id,
-                final_response,
-                deadline
-              )
+              {:cont, conn}
 
             {:closed, conn} ->
               cancel_subscription_keepalive(request_ref)
               drain_subscription_messages(request_ref, subscription_id)
-              conn
+              {:done, conn}
           end
         end
 
       {:mcp_subscription_pre_ack, ^request_ref, event} ->
-        if past_deadline?(deadline) do
-          end_subscription_stream_at_deadline(
-            conn,
-            state,
-            subscription_id,
-            request_ref,
-            session_id,
-            final_response
-          )
+        if AttestoMCP.Server.DeadlineLoop.past?(deadline) do
+          {:done,
+           end_subscription_stream_at_deadline(
+             conn,
+             state,
+             subscription_id,
+             request_ref,
+             session_id,
+             final_response
+           )}
         else
           case emit_subscription(conn, state.server, subscription_id, event) do
             {:ok, conn} ->
-              subscription_stream(
-                conn,
-                state,
-                subscription_id,
-                request_ref,
-                session_id,
-                final_response,
-                deadline
-              )
+              {:cont, conn}
 
             {:closed, conn} ->
               cancel_subscription_keepalive(request_ref)
               drain_subscription_messages(request_ref, subscription_id)
-              conn
+              {:done, conn}
           end
         end
 
       {:mcp_subscription_backpressure, ^subscription_id} ->
-        subscription_stream(
-          conn,
-          state,
-          subscription_id,
-          request_ref,
-          session_id,
-          final_response,
-          deadline
-        )
+        {:cont, conn}
 
       {:mcp_subscription_cancel, ^subscription_id} ->
         cancel_subscription_keepalive(request_ref)
@@ -2103,28 +2074,30 @@ defmodule AttestoMCP.Server.Plug do
 
         Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :cancelled})
 
-        emit_final_subscription_response(conn, state.server, subscription_id, final_response)
+        {:done,
+         emit_final_subscription_response(conn, state.server, subscription_id, final_response)}
 
       {:mcp_subscription_close, ^subscription_id} ->
         cancel_subscription_keepalive(request_ref)
         close_owned_subscription(state.server, subscription_id)
         maybe_touch(state.server, session_id)
         Telemetry.execute([:stream, :close], %{count: 1}, %{transport: :http, outcome: :closed})
-        emit_final_subscription_response(conn, state.server, subscription_id, final_response)
+
+        {:done,
+         emit_final_subscription_response(conn, state.server, subscription_id, final_response)}
     after
       remaining ->
-        end_subscription_stream_at_deadline(
-          conn,
-          state,
-          subscription_id,
-          request_ref,
-          session_id,
-          final_response
-        )
+        {:done,
+         end_subscription_stream_at_deadline(
+           conn,
+           state,
+           subscription_id,
+           request_ref,
+           session_id,
+           final_response
+         )}
     end
   end
-
-  defp past_deadline?(deadline), do: System.monotonic_time(:millisecond) >= deadline
 
   defp end_subscription_stream_at_deadline(
          conn,

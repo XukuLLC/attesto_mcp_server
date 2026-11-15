@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.7.0] - 2026-11-15
+
+Requires `attesto_mcp >= 2.8.0 and < 3.0.0` (was `>= 2.7.0 and < 3.0.0`),
+which requires `attesto >= 2.21.0 and < 3.0.0`.
+
+- The installer now adds attesto_phoenix >= 4.17.0 (was >= 4.16.0). 4.17.0 is
+  the first attesto_phoenix release on attesto 2.21.0, which attesto_mcp 2.8.0
+  requires.
+
+### Changed
+
+- attesto_mcp 2.8.0 raises at boot when `offline_access` is a required scope
+  or is listed in `scopes_supported` (MCP 2026-07-28). A server configured
+  that way has to drop it.
+- The listen deadline loop, the binding digest, the Ecto store checks and the
+  text limits each have one definition. Protocol behaviour is unchanged.
+
+### Documentation
+
+- `CONFORMANCE.md`, `docs/conformance.md` and the README record this release's
+  results from the official MCP conformance runner: 37 of 37 scored scenarios
+  on `2026-07-28` and 30 of 30 on `2025-11-25`.
+
 ## [3.6.0] - 2026-11-14
 
 Requires `attesto_mcp >= 2.7.0 and < 3.0.0` (was `>= 2.6.0 and < 3.0.0`),

@@ -1,7 +1,23 @@
 # Conformance evidence
 
-This is reproducible test evidence for `attesto_mcp_server` 3.1.1. It does not
-establish certification, endorsement, or support for every optional MCP extension.
+This is reproducible test evidence for `attesto_mcp_server` 3.7.0 (anchored to
+the verified 3.1.1 release-snapshot commit below). It does not establish
+certification, endorsement, or support for every optional MCP extension.
+
+## Official runner re-verification (2026-11-14, 3.7.0)
+
+Re-running `scripts/run_conformance_fixture.sh` against the pinned
+`@modelcontextprotocol/conformance@0.2.0-alpha.12` runner
+(`c37eec888e1c6ff140af79987a40008548b7cc5f`) produced:
+
+| Requirements | Selected | Scored | Not scored | Raw assertions | Result |
+| --- | ---: | --- | --- | --- | --- |
+| `2026-07-28` | 50 | 37/37 passed | 4 passed, 9 failed | 162 passed, 30 failed | exit 0 |
+| `2025-11-25` | 33 | 30/30 passed | 3 passed, 0 failed | 80 passed, 0 failed | exit 0 |
+
+The coordinated source installer gate (`scripts/check_installer_coordinated.sh`
+against sibling `attesto`, `attesto_phoenix`, and `attesto_mcp` checkouts) also
+passed on 2026-11-14.
 
 ## Release snapshot (2026-11-04)
 

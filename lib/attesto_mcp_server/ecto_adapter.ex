@@ -8,6 +8,70 @@ defmodule AttestoMCP.Server.EctoAdapter do
   @transaction_timeout_ms 3_000
 
   @doc false
+  def ecto_available? do
+    Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
+      Code.ensure_loaded?(Ecto.Changeset)
+  end
+
+  @doc false
+  def new_store(opts, option_keys, required_functions)
+      when is_list(opts) and is_list(option_keys) and is_list(required_functions) do
+    if valid_options?(opts, option_keys) do
+      repo = Keyword.get(opts, :repo)
+      namespace = Keyword.get(opts, :namespace)
+      prefix = Keyword.get(opts, :schema_prefix)
+
+      cond do
+        not valid_repo?(repo, required_functions) -> {:error, :invalid_repo}
+        not valid_key_part?(namespace) -> {:error, :invalid_namespace}
+        not valid_prefix?(prefix) -> {:error, :invalid_schema_prefix}
+        true -> {:ok, %{repo: repo, namespace: namespace, schema_prefix: prefix}}
+      end
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  def new_store(_opts, _option_keys, _required_functions), do: {:error, :invalid_options}
+
+  @doc false
+  def namespace_matches?(store, namespace, required_functions)
+      when is_binary(namespace) and is_list(required_functions) do
+    case checked_store(store, required_functions) do
+      {:ok, %{namespace: ^namespace}} -> true
+      _other -> false
+    end
+  end
+
+  def namespace_matches?(_store, _namespace, _required_functions), do: false
+
+  @doc false
+  def json_native?(value) when is_nil(value) or is_boolean(value), do: true
+
+  def json_native?(value) when is_binary(value),
+    do: String.valid?(value) and not contains_nul?(value)
+
+  def json_native?(value) when is_integer(value), do: true
+
+  def json_native?(value) when is_float(value) do
+    value == value and
+      case Jason.encode(value) do
+        {:ok, _encoded} -> true
+        _ -> false
+      end
+  end
+
+  def json_native?(value) when is_list(value), do: Enum.all?(value, &json_native?/1)
+
+  def json_native?(value) when is_map(value) do
+    Enum.all?(value, fn {key, item} ->
+      is_binary(key) and json_native?(key) and json_native?(item)
+    end)
+  end
+
+  def json_native?(_value), do: false
+
+  @doc false
   def checked_store(
         %{repo: repo, namespace: namespace, schema_prefix: prefix} = store,
         required_functions

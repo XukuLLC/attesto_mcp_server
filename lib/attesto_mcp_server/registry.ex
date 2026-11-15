@@ -17,6 +17,7 @@ defmodule AttestoMCP.Server.Registry do
     Icons,
     Output,
     Schema,
+    ScopeMap,
     Text,
     UriTemplate
   }
@@ -30,7 +31,7 @@ defmodule AttestoMCP.Server.Registry do
   @max_alternative_scope_sets 7
   @max_alternative_scope_memberships 128
   @max_alternative_scope_bytes 8_192
-  @max_scope_bytes 256
+  @max_scope_bytes ScopeMap.max_scope_bytes()
   @definition_key_aliases %{
     "name" => :name,
     "description" => :description,
@@ -1129,7 +1130,7 @@ defmodule AttestoMCP.Server.Registry do
     description = argument[:description] || argument["description"]
 
     is_binary(name) and name != "" and is_boolean(required) and
-      (is_nil(description) or Text.valid?(description, 4_096))
+      (is_nil(description) or Text.valid?(description, Text.max_description_bytes()))
   end
 
   defp valid_argument?(_), do: false

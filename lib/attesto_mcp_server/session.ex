@@ -76,6 +76,10 @@ defmodule AttestoMCP.Server.Session do
   @spec max_timeout_ms() :: pos_integer()
   def max_timeout_ms, do: @max_timeout_ms
 
+  @doc false
+  @spec max_resource_uri_bytes() :: pos_integer()
+  def max_resource_uri_bytes, do: @max_resource_uri_bytes
+
   @doc "Checks the common positive, signed-BIGINT-safe session timeout range."
   @spec valid_timeout?(term()) :: boolean()
   def valid_timeout?(value), do: is_integer(value) and value in 1..@max_timeout_ms

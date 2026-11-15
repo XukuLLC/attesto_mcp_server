@@ -7,6 +7,26 @@ defmodule AttestoMCP.Server.Text do
   )
   @single_line_display_fields ~w(name version title logger uri uriTemplate mimeType)
   @opaque_fields ~w(structuredContent blob _meta default enum const examples)
+  @max_name_bytes 256
+  @max_title_bytes 1_024
+  @max_description_bytes 4_096
+  @max_instructions_bytes 65_536
+  @max_url_bytes 2_048
+
+  @doc false
+  def max_name_bytes, do: @max_name_bytes
+
+  @doc false
+  def max_title_bytes, do: @max_title_bytes
+
+  @doc false
+  def max_description_bytes, do: @max_description_bytes
+
+  @doc false
+  def max_instructions_bytes, do: @max_instructions_bytes
+
+  @doc false
+  def max_url_bytes, do: @max_url_bytes
 
   # Optional display fields consistently allow nil (omitted) and empty strings.
   # Required identifiers must be nonempty; protocol-specific syntax stays with
@@ -30,9 +50,10 @@ defmodule AttestoMCP.Server.Text do
   end
 
   def catalog(value, opts) do
-    with :ok <- field(value[:name], :name, 256, opts, required: true, multiline: false),
-         :ok <- field(value[:description], :description, 4_096, opts),
-         :ok <- field(value["title"], :title, 1_024, opts, multiline: false),
+    with :ok <-
+           field(value[:name], :name, @max_name_bytes, opts, required: true, multiline: false),
+         :ok <- field(value[:description], :description, @max_description_bytes, opts),
+         :ok <- field(value["title"], :title, @max_title_bytes, opts, multiline: false),
          :ok <- arguments(value[:arguments], opts),
          :ok <- annotations(value[:annotations], opts),
          :ok <- schema(value[:input_schema], opts),
@@ -42,7 +63,13 @@ defmodule AttestoMCP.Server.Text do
   end
 
   def server_options!(opts) do
-    Enum.each([server_name: 1_024, server_version: 1_024, instructions: 65_536], fn {key, max} ->
+    limits = [
+      server_name: @max_title_bytes,
+      server_version: @max_title_bytes,
+      instructions: @max_instructions_bytes
+    ]
+
+    Enum.each(limits, fn {key, max} ->
       value = opts[key]
 
       field_opts = [
@@ -70,8 +97,11 @@ defmodule AttestoMCP.Server.Text do
   defp arguments(arguments, opts) when is_list(arguments) do
     Enum.reduce_while(arguments, :ok, fn argument, :ok ->
       with :ok <-
-             field(argument["name"], :arguments, 256, opts, required: true, multiline: false),
-           :ok <- field(argument["description"], :description, 4_096, opts) do
+             field(argument["name"], :arguments, @max_name_bytes, opts,
+               required: true,
+               multiline: false
+             ),
+           :ok <- field(argument["description"], :description, @max_description_bytes, opts) do
         {:cont, :ok}
       else
         error -> {:halt, error}
@@ -82,15 +112,15 @@ defmodule AttestoMCP.Server.Text do
   defp arguments(_arguments, _opts), do: {:error, {:invalid_definition, :arguments}}
 
   defp annotations(value, opts) when is_map(value),
-    do: field(value["title"], :title, 1_024, opts, multiline: false)
+    do: field(value["title"], :title, @max_title_bytes, opts, multiline: false)
 
   defp annotations(_value, _opts), do: :ok
 
   # Traverse schema-bearing keywords only: property names and arbitrary default,
   # enum, const and example data are not schema annotations.
   defp schema(value, opts) when is_map(value) do
-    with :ok <- field(value["title"], :title, 1_024, opts, multiline: false),
-         :ok <- field(value["description"], :description, 4_096, opts),
+    with :ok <- field(value["title"], :title, @max_title_bytes, opts, multiline: false),
+         :ok <- field(value["description"], :description, @max_description_bytes, opts),
          :ok <- enum_names(value["enumNames"], opts) do
       Enum.reduce_while(value, :ok, fn {key, child}, :ok ->
         result = schema_child(key, child, opts)
@@ -104,7 +134,7 @@ defmodule AttestoMCP.Server.Text do
   defp enum_names(names, opts) when is_list(names) do
     Enum.reduce_while(names, :ok, fn
       name, :ok when is_binary(name) ->
-        case field(name, :enum_names, 1_024, opts, multiline: false) do
+        case field(name, :enum_names, @max_title_bytes, opts, multiline: false) do
           :ok -> {:cont, :ok}
           error -> {:halt, error}
         end

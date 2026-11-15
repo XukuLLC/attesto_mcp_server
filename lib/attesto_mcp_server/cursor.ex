@@ -88,11 +88,9 @@ defmodule AttestoMCP.Server.Cursor do
 
   defp digest(nil), do: "anonymous"
 
-  defp digest(value),
-    do: value |> raw_digest() |> Base.url_encode64(padding: false)
+  defp digest(value), do: AttestoMCP.Server.Digest.base64url(value)
 
-  defp raw_digest(value),
-    do: :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic]))
+  defp raw_digest(value), do: AttestoMCP.Server.Digest.raw(value)
 
   defp secret do
     case Application.get_env(:attesto_mcp_server, :cursor_secret) do

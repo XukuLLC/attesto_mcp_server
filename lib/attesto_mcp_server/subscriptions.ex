@@ -2,10 +2,10 @@ defmodule AttestoMCP.Server.Subscriptions do
   @moduledoc "Bounded, principal/tenant-bound modern subscription registry."
   use GenServer
 
-  alias AttestoMCP.Server.{ScopePolicy, Telemetry}
+  alias AttestoMCP.Server.{ScopePolicy, Session, Telemetry}
 
   @max_queue 128
-  @max_resource_uri_bytes 4_096
+  @max_resource_uri_bytes Session.max_resource_uri_bytes()
   @max_resource_uris 128
 
   @typedoc "Modern subscription category flags and resource URI filters."

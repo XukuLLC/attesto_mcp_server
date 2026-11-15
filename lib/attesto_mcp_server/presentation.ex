@@ -58,9 +58,9 @@ defmodule AttestoMCP.Server.Presentation do
 
   alias AttestoMCP.Server.{Error, HostCallback, Icons, RequestMeta, Schema, Telemetry, Text}
 
-  @max_instructions_bytes 65_536
-  @max_title_bytes 1_024
-  @max_description_bytes 4_096
+  @max_instructions_bytes Text.max_instructions_bytes()
+  @max_title_bytes Text.max_title_bytes()
+  @max_description_bytes Text.max_description_bytes()
   @fields %{
     "title" => "title",
     "description" => "description",

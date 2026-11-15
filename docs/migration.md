@@ -1,5 +1,16 @@
 # Migration runbook
 
+## 3.7 dependency floors
+
+Version 3.7 requires `attesto_mcp >= 2.8.0 and < 3.0.0`, which requires
+`attesto >= 2.21.0 and < 3.0.0`. The installer now requires a direct Hex
+`attesto_phoenix` requirement overlapping `>= 4.17.0 and < 5.0.0` (was
+`>= 4.16.0`). Upgrade a Phoenix host to that range before running the
+installer, then run `mix deps.get`. attesto_mcp 2.8.0 raises at boot when
+`offline_access` is a required scope or is listed in `scopes_supported`.
+attesto_phoenix 4.17.0 turns CORS on by default and enforces credential status
+in its verifier. See their changelogs.
+
 ## 3.6 dependency floors
 
 Version 3.6 requires `attesto_mcp >= 2.7.0 and < 3.0.0`, which requires
@@ -20,7 +31,7 @@ Version 3.5 requires `attesto_mcp >= 2.6.0 and < 3.0.0`, which requires
 older Phoenix hosts to that range before running the installer, then run
 `mix deps.get`.
 
-## Unreleased hardening
+## 3.4 hardening
 
 Registration now checks all catalog display text and server identity text.
 Descriptions may be absent, nil, or empty across primitive types; nil descriptions

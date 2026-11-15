@@ -504,29 +504,32 @@ defmodule AttestoMCP.Server.Stdio do
          subscription_id,
          deadline
        ) do
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining > 0 do
-      await_subscription_event(
-        server,
-        parent,
-        work_ref,
-        response_id,
-        response,
-        subscription_id,
-        deadline,
-        remaining
-      )
-    else
-      end_subscription_at_deadline(
-        server,
-        parent,
-        work_ref,
-        response_id,
-        response,
-        subscription_id
-      )
-    end
+    AttestoMCP.Server.DeadlineLoop.run(
+      deadline,
+      :cont,
+      fn _state, remaining ->
+        await_subscription_event(
+          server,
+          parent,
+          work_ref,
+          response_id,
+          response,
+          subscription_id,
+          deadline,
+          remaining
+        )
+      end,
+      fn _state ->
+        end_subscription_at_deadline(
+          server,
+          parent,
+          work_ref,
+          response_id,
+          response,
+          subscription_id
+        )
+      end
+    )
   end
 
   defp await_subscription_event(
@@ -546,58 +549,43 @@ defmodule AttestoMCP.Server.Stdio do
         receive do
           {:stdio_subscription_ack, ^subscription_id, :ok} ->
             AttestoMCP.Server.ack_subscription(server, subscription_id, self())
-
-            subscription_loop(
-              server,
-              parent,
-              work_ref,
-              response_id,
-              response,
-              subscription_id,
-              deadline
-            )
+            {:cont, :cont}
 
           {:stdio_subscription_ack, ^subscription_id, {:error, _reason}} ->
             AttestoMCP.Server.close_subscription(server, subscription_id, self())
-            send(parent, {:stdio_result, work_ref, {response_id, response}})
+            {:done, send(parent, {:stdio_result, work_ref, {response_id, response}})}
         after
-          max(deadline - System.monotonic_time(:millisecond), 0) ->
-            end_subscription_at_deadline(
-              server,
-              parent,
-              work_ref,
-              response_id,
-              response,
-              subscription_id
-            )
+          max(AttestoMCP.Server.DeadlineLoop.remaining_ms(deadline), 0) ->
+            {:done,
+             end_subscription_at_deadline(
+               server,
+               parent,
+               work_ref,
+               response_id,
+               response,
+               subscription_id
+             )}
         end
 
       {:mcp_subscription_cancel, ^subscription_id} ->
-        send(parent, {:stdio_result, work_ref, {response_id, response}})
+        {:done, send(parent, {:stdio_result, work_ref, {response_id, response}})}
 
       {:mcp_subscription_close, ^subscription_id} ->
-        send(parent, {:stdio_result, work_ref, {response_id, response}})
+        {:done, send(parent, {:stdio_result, work_ref, {response_id, response}})}
 
       _other ->
-        subscription_loop(
-          server,
-          parent,
-          work_ref,
-          response_id,
-          response,
-          subscription_id,
-          deadline
-        )
+        {:cont, :cont}
     after
       remaining ->
-        end_subscription_at_deadline(
-          server,
-          parent,
-          work_ref,
-          response_id,
-          response,
-          subscription_id
-        )
+        {:done,
+         end_subscription_at_deadline(
+           server,
+           parent,
+           work_ref,
+           response_id,
+           response,
+           subscription_id
+         )}
     end
   end
 
@@ -634,7 +622,7 @@ defmodule AttestoMCP.Server.Stdio do
   end
 
   defp before_deadline?(%{deadline: deadline}) when is_integer(deadline),
-    do: System.monotonic_time(:millisecond) < deadline
+    do: AttestoMCP.Server.DeadlineLoop.before?(deadline)
 
   defp before_deadline?(_entry), do: true
 

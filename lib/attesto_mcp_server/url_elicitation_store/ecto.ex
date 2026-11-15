@@ -6,9 +6,7 @@ defmodule AttestoMCP.Server.UrlElicitationStore.Ecto.CompileSentinel do
 
   @doc false
   def __mix_recompile__? do
-    @ecto_available !=
-      (Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
-         Code.ensure_loaded?(Ecto.Changeset))
+    @ecto_available != AttestoMCP.Server.EctoAdapter.ecto_available?()
   end
 end
 
@@ -107,37 +105,12 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     @doc "Builds a stateless store handle for a host repository."
     @spec new(keyword()) :: {:ok, store()} | {:error, term()}
-    def new(opts \\ [])
-
-    def new(opts) when is_list(opts) do
-      if valid_options?(opts) do
-        repo = Keyword.get(opts, :repo)
-        namespace = Keyword.get(opts, :namespace)
-        prefix = Keyword.get(opts, :schema_prefix)
-
-        cond do
-          not valid_repo?(repo) -> {:error, :invalid_repo}
-          not valid_key_part?(namespace) -> {:error, :invalid_namespace}
-          not valid_prefix?(prefix) -> {:error, :invalid_schema_prefix}
-          true -> {:ok, %{repo: repo, namespace: namespace, schema_prefix: prefix}}
-        end
-      else
-        {:error, :invalid_options}
-      end
-    end
-
-    def new(_opts), do: {:error, :invalid_options}
+    def new(opts \\ []), do: EctoAdapter.new_store(opts, @option_keys, @required_repo_functions)
 
     @doc false
     @spec namespace_matches?(store(), String.t()) :: boolean()
-    def namespace_matches?(store, namespace) when is_binary(namespace) do
-      case checked_store(store) do
-        {:ok, %{namespace: ^namespace}} -> true
-        _other -> false
-      end
-    end
-
-    def namespace_matches?(_store, _namespace), do: false
+    def namespace_matches?(store, namespace),
+      do: EctoAdapter.namespace_matches?(store, namespace, @required_repo_functions)
 
     @impl true
     def put(store, record) when is_map(record) do
@@ -330,10 +303,6 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Query) and
 
     defp checked_store(store),
       do: EctoAdapter.checked_store(store, @required_repo_functions)
-
-    defp valid_options?(opts), do: EctoAdapter.valid_options?(opts, @option_keys)
-    defp valid_repo?(repo), do: EctoAdapter.valid_repo?(repo, @required_repo_functions)
-    defp valid_prefix?(prefix), do: EctoAdapter.valid_prefix?(prefix)
 
     defp lookup_id(id) do
       if valid_key_part?(id), do: {:ok, id}, else: :not_found

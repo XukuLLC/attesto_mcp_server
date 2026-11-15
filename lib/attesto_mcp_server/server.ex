@@ -2565,7 +2565,9 @@ defmodule AttestoMCP.Server do
   defp validate_resource_updated_notification_params(params, opts) when is_map(params) do
     uri = Map.get(params, "uri")
 
-    if is_binary(uri) and byte_size(uri) in 1..4_096 and String.valid?(uri) and
+    max_uri_bytes = Session.max_resource_uri_bytes()
+
+    if is_binary(uri) and byte_size(uri) in 1..max_uri_bytes and String.valid?(uri) and
          Enum.all?(Map.keys(params), &(&1 in ["uri", "_meta"])) and
          (not Map.has_key?(params, "_meta") or
             (is_map(params["_meta"]) and Schema.json_value(params["_meta"], opts) == :ok)),

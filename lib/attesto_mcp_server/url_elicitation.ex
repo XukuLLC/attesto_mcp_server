@@ -211,12 +211,7 @@ defmodule AttestoMCP.Server.UrlElicitation do
   @spec subject_hash(term()) :: String.t()
   def subject_hash(principal_binding) do
     owner = InteractionOwner.from_binding(principal_binding)
-
-    :crypto.hash(
-      :sha256,
-      :erlang.term_to_binary({:interaction_owner_v1, owner}, [:deterministic])
-    )
-    |> Base.encode16(case: :lower)
+    AttestoMCP.Server.Digest.hex({:interaction_owner_v1, owner})
   end
 
   @doc false
@@ -270,7 +265,7 @@ defmodule AttestoMCP.Server.UrlElicitation do
   end
 
   defp validate_fields(fields, budget) when is_map(fields) do
-    if valid_json_native_map?(fields) do
+    if AttestoMCP.Server.EctoAdapter.json_native?(fields) do
       case Jason.encode(fields) do
         {:ok, encoded} when byte_size(encoded) <= budget -> {:ok, fields}
         _ -> {:error, :invalid_fields}
@@ -283,36 +278,6 @@ defmodule AttestoMCP.Server.UrlElicitation do
   end
 
   defp validate_fields(_fields, _budget), do: {:error, :invalid_fields}
-
-  defp valid_json_native_map?(map) when is_map(map) do
-    Enum.all?(map, fn {key, value} ->
-      is_binary(key) and String.valid?(key) and :binary.match(key, <<0>>) == :nomatch and
-        valid_json_native_value?(value)
-    end)
-  end
-
-  defp valid_json_native_value?(value) when is_nil(value) or is_boolean(value), do: true
-
-  defp valid_json_native_value?(value) when is_binary(value),
-    do: String.valid?(value) and :binary.match(value, <<0>>) == :nomatch
-
-  defp valid_json_native_value?(value) when is_integer(value), do: true
-
-  defp valid_json_native_value?(value) when is_float(value) do
-    value == value and
-      case Jason.encode(value) do
-        {:ok, _encoded} -> true
-        _ -> false
-      end
-  end
-
-  defp valid_json_native_value?(value) when is_list(value),
-    do: Enum.all?(value, &valid_json_native_value?/1)
-
-  defp valid_json_native_value?(value) when is_map(value),
-    do: valid_json_native_map?(value)
-
-  defp valid_json_native_value?(_value), do: false
 
   defp get_server_config(server) do
     case Server.url_elicitation_store(server) do
