@@ -9,12 +9,10 @@ defmodule OAuthHost.MixProject do
 
   defp deps do
     [
-      family_dep(:attesto, "ATTESTO_SOURCE_PATH", ">= 2.26.0 and < 3.0.0", override: true),
-      family_dep(:attesto_client, "ATTESTO_CLIENT_SOURCE_PATH", ">= 2.23.0 and < 3.0.0"),
-      family_dep(:attesto_mcp, "ATTESTO_MCP_SOURCE_PATH", ">= 2.10.0 and < 3.0.0",
-        override: true
-      ),
-      family_dep(:attesto_phoenix, "ATTESTO_PHOENIX_SOURCE_PATH", ">= 4.22.0 and < 5.0.0"),
+      family_dep(:attesto, ">= 2.26.0 and < 3.0.0", override: true),
+      family_dep(:attesto_client, ">= 2.23.0 and < 3.0.0"),
+      family_dep(:attesto_mcp, ">= 2.10.0 and < 3.0.0", override: true),
+      family_dep(:attesto_phoenix, ">= 4.22.0 and < 5.0.0"),
       {:attesto_mcp_server, path: Path.expand("../..", __DIR__)},
       {:phoenix, ">= 1.7.0 and < 2.0.0"},
       {:bandit, "~> 1.14", override: true, only: :test},
@@ -22,8 +20,11 @@ defmodule OAuthHost.MixProject do
     ]
   end
 
-  defp family_dep(app, variable, requirement, opts \\ []) do
-    case System.get_env(variable) do
+  # Hex by default. ATTESTO_SOURCE_PATH, ATTESTO_CLIENT_SOURCE_PATH,
+  # ATTESTO_MCP_SOURCE_PATH or ATTESTO_PHOENIX_SOURCE_PATH selects a source
+  # checkout for that package, as the coordinated CI jobs do.
+  defp family_dep(app, requirement, opts \\ []) do
+    case System.get_env(String.upcase("#{app}_source_path")) do
       path when is_binary(path) and path != "" -> {app, Keyword.put(opts, :path, path)}
       _ -> {app, requirement, opts}
     end
