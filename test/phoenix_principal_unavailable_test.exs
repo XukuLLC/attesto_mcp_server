@@ -92,12 +92,14 @@ defmodule AttestoMCP.Server.PhoenixPrincipalUnavailableTest do
         {Postgrex.Error, nil, 401},
         {RuntimeError, nil, 401}
       ] do
+    # Built here, not in the test body: there `module` is a literal, and the
+    # type checker warns about comparing two distinct module atoms.
+    fields = [message: "private-exception-message"]
+    fields = if module == Postgrex.Error, do: fields ++ [postgres: postgres], else: fields
+
     test "#{step} #{inspect(module)} #{inspect(postgres)} answers #{status}" do
       module = unquote(module)
-      postgres = unquote(Macro.escape(postgres))
-      fields = [message: "private-exception-message"]
-      fields = if module == Postgrex.Error, do: fields ++ [postgres: postgres], else: fields
-      exception = struct!(module, fields)
+      exception = struct!(module, unquote(Macro.escape(fields)))
 
       case unquote(step) do
         :revocation -> Process.put(:test_revocation, fn -> raise exception end)
