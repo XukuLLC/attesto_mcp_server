@@ -1,5 +1,38 @@
 # Changelog
 
+## [3.9.0] - 2026-11-15
+
+Requires `attesto_mcp >= 2.10.0 and < 3.0.0` (was `>= 2.9.0 and < 3.0.0`),
+which requires `attesto >= 2.26.0 and < 3.0.0`.
+
+- The installer now adds attesto_phoenix >= 4.22.0 (was >= 4.18.0).
+- The optional `ecto` dependency requires `>= 3.14.3 and < 4.0.0` (was
+  `~> 3.10`). Ecto 3.4.0 through 3.14.2 grow the query cache without bound
+  from interpolated JSON paths and splice lists (CVE-2026-118391).
+
+### Breaking
+
+- With AttestoPhoenix 4.22, which this release requires, a protocol request
+  with a form or JSON body is refused unless
+  `AttestoPhoenix.DuplicateParameterGuard.read_body/2` read it. A host
+  installed by an earlier release has no body reader on its
+  `AttestoMCP.Server.PhoenixParser` plug. Rerun `mix attesto_mcp_server.install`,
+  which adds it, or add
+  `body_reader: {AttestoPhoenix.DuplicateParameterGuard, :read_body, []}` to
+  that plug by hand. The installer does not change an endpoint that has a
+  body reader of its own.
+
+### Changed
+
+- The installer sets the body reader on the endpoint parser it writes, and on
+  an existing `AttestoMCP.Server.PhoenixParser` plug when it is rerun. MCP
+  request bodies are still left unread until the request is authenticated.
+  The setup guide shows the parser.
+- With Attesto 2.26, a host that supervises `Attesto.DPoP.ReplayCache` starts
+  it as `{Attesto.DPoP.ReplayCache, single_node?: true}`, and a deployment
+  with more than one node sets a shared `:replay_check` on every node. The
+  installer starts no replay cache.
+
 ## [3.8.0] - 2026-11-15
 
 Requires `attesto_mcp >= 2.9.0 and < 3.0.0` (was `>= 2.8.0 and < 3.0.0`),

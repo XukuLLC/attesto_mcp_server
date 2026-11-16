@@ -1,5 +1,20 @@
 # Migration runbook
 
+## 3.9 dependency floors
+
+Version 3.9 requires `attesto_mcp >= 2.10.0 and < 3.0.0`, which requires
+`attesto >= 2.26.0 and < 3.0.0`. The installer now requires a direct Hex
+`attesto_phoenix` requirement overlapping `>= 4.22.0 and < 5.0.0` (was
+`>= 4.18.0`). Upgrade a Phoenix host to that range before running the
+installer, then run `mix deps.get`. Rerun `mix attesto_mcp_server.install`
+to add `body_reader: {AttestoPhoenix.DuplicateParameterGuard, :read_body, []}`
+to a standard `AttestoMCP.Server.PhoenixParser` plug; protocol form/JSON
+requests without that reader are refused. Integrate custom body readers
+manually as described in the [setup guide](setup.md). A host using the local
+DPoP replay cache must supervise `{Attesto.DPoP.ReplayCache, single_node?: true}`;
+deployments with more than one node must configure a shared `:replay_check`.
+The installer starts no replay cache.
+
 ## 3.8 dependency floors
 
 Version 3.8 requires `attesto_mcp >= 2.9.0 and < 3.0.0`, which requires

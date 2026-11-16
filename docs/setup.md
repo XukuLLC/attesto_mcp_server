@@ -33,7 +33,7 @@ the boundary without setting up a login flow.
 In an existing Elixir project, add the dependency and fetch it:
 
 ```elixir
-{:attesto_mcp_server, "~> 3.8"}
+{:attesto_mcp_server, "~> 3.9"}
 ```
 
 ```sh
@@ -88,7 +88,7 @@ covers both forms and catalog replacement.
 The shortest deployed HTTP path assumes a working Phoenix application with
 AttestoPhoenix already issuing tokens. Run inside the Phoenix child application,
 with Igniter available and a direct Hex dependency on `attesto_phoenix`
-compatible with `>= 4.18.0 and < 5.0.0`.
+compatible with `>= 4.22.0 and < 5.0.0`.
 
 If the Igniter task is not available, add it to the host's development
 dependencies and run `mix deps.get` first:
@@ -110,6 +110,28 @@ supervised application-owned server, a `server_status` tool and its test,
 the protected `/mcp` forward, and public resource metadata. It reuses the
 authorization server's live verification, principal, revocation, DPoP, and
 mTLS configuration. Review its notices, including parser-order checks.
+
+The endpoint parser must install the OAuth body reader. The installer produces
+this configuration for a standard endpoint (preserving its parser options):
+
+```elixir
+plug AttestoMCP.Server.PhoenixParser,
+  mcp_path: "/mcp",
+  parsers: [:urlencoded, :multipart, :json],
+  pass: ["*/*"],
+  json_decoder: Phoenix.json_library(),
+  body_reader: {AttestoPhoenix.DuplicateParameterGuard, :read_body, []}
+```
+
+Protocol form/JSON requests without that reader are refused. Multipart protocol
+requests are also refused; unrelated upload routes can retain multipart parsing.
+The wrapper still leaves MCP bodies unread until authentication. Custom body
+readers require manual integration as described by
+`AttestoPhoenix.DuplicateParameterGuard`; do not replace or bypass their checks.
+The installer does not start a replay cache. Configure a shared `:replay_check`
+for multiple nodes, including rolling-deploy overlap. A host that runs one node
+and uses the local fallback supervises
+`{Attesto.DPoP.ReplayCache, single_node?: true}` explicitly.
 
 If it selects the bundled PostgreSQL session store, run the migration commands
 it prints. The installer does not run migrations for you:

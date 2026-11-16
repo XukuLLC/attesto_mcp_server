@@ -1384,11 +1384,55 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
     assert diff =~ ~s(mcp_path: "/mcp")
     assert diff =~ "parsers: [:json]"
     assert diff =~ "json_decoder: Jason"
+    assert diff =~ "AttestoPhoenix.DuplicateParameterGuard"
+    assert diff =~ ":read_body"
     assert_parser_subtree_guidance(installed.notices, "/mcp")
 
     applied = installed |> apply_igniter!() |> install(@args)
     assert applied.issues == []
     assert_unchanged(applied)
+  end
+
+  test "adds the OAuth reader to an existing standard parser wrapper and remains idempotent" do
+    installed =
+      project(
+        extra_files: %{
+          "lib/sample_web/endpoint.ex" => """
+          defmodule SampleWeb.Endpoint do
+            use Phoenix.Endpoint, otp_app: :sample
+            plug AttestoMCP.Server.PhoenixParser, mcp_path: "/mcp", parsers: [:json], json_decoder: Jason
+            plug SampleWeb.Router
+          end
+          """
+        }
+      )
+      |> install(@args)
+
+    assert installed.issues == []
+    assert Igniter.Test.diff(installed) =~ "AttestoPhoenix.DuplicateParameterGuard"
+    applied = installed |> apply_igniter!() |> install(@args)
+    assert applied.issues == []
+    assert_unchanged(applied)
+  end
+
+  test "does not trust a shadowed OAuth body reader alias" do
+    installed =
+      project(
+        extra_files: %{
+          "lib/sample_web/endpoint.ex" => """
+          defmodule SampleWeb.Endpoint do
+            use Phoenix.Endpoint, otp_app: :sample
+            alias SampleWeb.CustomReader, as: AttestoPhoenix
+            plug Plug.Parsers, parsers: [:json], body_reader: {AttestoPhoenix.DuplicateParameterGuard, :read_body, []}
+            plug SampleWeb.Router
+          end
+          """
+        }
+      )
+      |> install(@args)
+
+    assert installed.issues != []
+    assert Igniter.Test.diff(installed) == ""
   end
 
   test "wraps a standard Phoenix endpoint pipeline without rejecting post-parser plugs" do
@@ -1659,7 +1703,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
   end
 
   defp mix_source(attesto_phoenix?, req_source, app_name) do
-    attesto = if attesto_phoenix?, do: "{:attesto_phoenix, \">= 4.18.0 and < 5.0.0\"},", else: ""
+    attesto = if attesto_phoenix?, do: "{:attesto_phoenix, \">= 4.22.0 and < 5.0.0\"},", else: ""
     req = if is_binary(req_source), do: req_source <> ",", else: ""
 
     """
@@ -1669,7 +1713,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallFollowOnTest do
       def application, do: [extra_applications: [:logger], mod: {Sample.Application, []}]
       defp deps do
         [
-          {:attesto_mcp_server, "~> 3.8"},
+          {:attesto_mcp_server, "~> 3.9"},
           #{attesto}
           #{req}
         ]

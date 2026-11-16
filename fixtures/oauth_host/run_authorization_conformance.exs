@@ -163,7 +163,9 @@ defmodule OAuthHost.AuthorizationConformance do
     )
 
     for module <- [Attesto.CodeStore.ETS, Attesto.DPoP.NonceStore.ETS, Attesto.DPoP.ReplayCache] do
-      case module.start_link() do
+      opts = if module == Attesto.DPoP.ReplayCache, do: [single_node?: true], else: []
+
+      case module.start_link(opts) do
         {:ok, _pid} -> :ok
         {:error, {:already_started, _pid}} -> :ok
       end

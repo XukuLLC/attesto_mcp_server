@@ -47,7 +47,7 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
-With `attesto_phoenix >= 4.18.0 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.22.0 and < 5.0.0`, one Phoenix host can serve
 multiple named profiles. It binds each automatic protected-resource callback
 to the named profile loaded from the `otp_app` passed to the helper, keeping
 those profiles isolated. It does not select a profile from `conn.private`.
@@ -172,7 +172,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 4.18.0 and < 5.0.0` and Req requirements that overlap
+overlap `>= 4.22.0 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -397,7 +397,8 @@ plug AttestoMCP.Server.PhoenixParser,
   mcp_path: ["/mcp/catalog", "/mcp/operations", "/mcp/preview"],
   parsers: [:urlencoded, :multipart, :json],
   pass: ["*/*"],
-  json_decoder: Phoenix.json_library()
+  json_decoder: Phoenix.json_library(),
+  body_reader: {AttestoPhoenix.DuplicateParameterGuard, :read_body, []}
 ```
 
 Publish one path-specific protected-resource metadata document and one
@@ -476,7 +477,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.8"},
+    {:attesto_mcp_server, "~> 3.9"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -579,7 +580,7 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 2.9.0 and < 3.0.0` and calls the public
+The package requires `attesto_mcp >= 2.10.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 

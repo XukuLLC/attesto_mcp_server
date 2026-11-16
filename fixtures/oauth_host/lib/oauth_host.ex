@@ -158,7 +158,11 @@ defmodule OAuthHost do
         conn
         |> fetch_query_params()
         |> Plug.Parsers.call(
-          Plug.Parsers.init(parsers: [:urlencoded, :json], json_decoder: Jason)
+          Plug.Parsers.init(
+            parsers: [:urlencoded, :json],
+            json_decoder: Jason,
+            body_reader: {AttestoPhoenix.DuplicateParameterGuard, :read_body, []}
+          )
         )
         |> put_private(:attesto_phoenix_config, host.config)
         |> put_private(:attesto_protocol_config, host.protocol)

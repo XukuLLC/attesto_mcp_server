@@ -5,7 +5,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
   @moduledoc Mix.Tasks.AttestoMcpServer.Install.Docs.long_doc()
   @example Mix.Tasks.AttestoMcpServer.Install.Docs.example()
   @origin_pattern ~r/\A(https?):\/\/(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?\/?\z/i
-  @attesto_phoenix_requirement ">= 4.18.0 and < 5.0.0"
+  @attesto_phoenix_requirement ">= 4.22.0 and < 5.0.0"
   @req_requirement ">= 0.6.1 and < 1.0.0"
   @max_version_component 99_999_999_999_999
   @max_session_namespace_bytes 256
@@ -3252,7 +3252,12 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
           length(wrapped) == 1 and direct == [] and
             wrapped |> List.first() |> Map.get(:path) == path and
               endpoint_plug_pipeline_safe?(body, router) ->
-            {:ok, :present}
+            case List.first(wrapped).call do
+              {:plug, _, [_, options]} ->
+                if quoted_keyword_has_key?(options, :body_reader),
+                  do: {:ok, :present},
+                  else: {:ok, :replace}
+            end
 
           length(wrapped) == 1 and direct == [] ->
             {:error,
@@ -3762,7 +3767,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
   defp endpoint_module_ast_literal?(_module_ast), do: false
 
   defp endpoint_parser_expression(body) do
-    case endpoint_parser_contexts(body) |> Enum.filter(&(&1.kind == :direct)) do
+    case endpoint_parser_contexts(body) |> Enum.filter(&(&1.kind in [:direct, :wrapped])) do
       [%{call: expression}] -> {:ok, expression}
       _other -> :error
     end
@@ -3774,7 +3779,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
 
     cond do
       module == AttestoMCP.Server.PhoenixParser ->
-        if wrapped_parser_options_safe?(arguments),
+        if wrapped_parser_options_safe?(arguments, aliases),
           do: {:ok, :wrapped, parser_path(arguments)},
           else: :error
 
@@ -3783,7 +3788,7 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
              (length(arguments) == 1 and
                 quoted_keyword_list?(List.first(arguments)) and
                 not quoted_keyword_has_key?(List.first(arguments), :mcp_path) and
-                endpoint_parser_options_safe?(List.first(arguments)))) ->
+                endpoint_parser_options_safe?(List.first(arguments), aliases))) ->
         {:ok, :direct, nil}
 
       true ->
@@ -3793,12 +3798,12 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
 
   defp endpoint_parser_call(_expression, _aliases), do: :error
 
-  defp endpoint_parser_options_safe?(options) when is_list(options) do
-    body_reader? = quoted_keyword_has_key?(options, :body_reader)
+  defp endpoint_parser_options_safe?(options, aliases) when is_list(options) do
+    readers = quoted_keyword_values(options, :body_reader)
 
     parser_values = quoted_keyword_values(options, :parsers)
 
-    not body_reader? and
+    length(readers) <= 1 and Enum.all?(readers, &oauth_body_reader?(&1, aliases)) and
       length(parser_values) <= 1 and
       Enum.all?(parser_values, &standard_parser_list?/1) and
       Enum.all?(options, fn
@@ -3807,15 +3812,20 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
       end)
   end
 
-  defp endpoint_parser_options_safe?(_options), do: false
+  defp endpoint_parser_options_safe?(_options, _aliases), do: false
 
-  defp wrapped_parser_options_safe?(arguments) do
+  defp oauth_body_reader?(reader, aliases) do
+    canonical_ast(reader, aliases) ==
+      {:{}, [], [AttestoPhoenix.DuplicateParameterGuard, :read_body, []]}
+  end
+
+  defp wrapped_parser_options_safe?(arguments, aliases) do
     case arguments do
       [options] when is_list(options) ->
         quoted_keyword_list?(options) and
           length(Enum.filter(options, fn {key, _} -> literal_atom(key) == :mcp_path end)) ==
             1 and
-          endpoint_parser_options_safe?(options)
+          endpoint_parser_options_safe?(options, aliases)
 
       _other ->
         false
@@ -3890,6 +3900,14 @@ defmodule Mix.Tasks.AttestoMcpServer.Install do
         [existing] when is_list(existing) ->
           [{:mcp_path, path} | existing]
       end
+
+    options =
+      Enum.reject(options, fn {key, _} -> literal_atom(key) in [:mcp_path, :body_reader] end)
+
+    reader =
+      Code.string_to_quoted!("{Elixir.AttestoPhoenix.DuplicateParameterGuard, :read_body, []}")
+
+    options = [{:mcp_path, path}, {:body_reader, reader} | options]
 
     "plug Elixir.AttestoMCP.Server.PhoenixParser, " <>
       Sourceror.to_string(options)

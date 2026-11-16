@@ -9,10 +9,12 @@ defmodule OAuthHost.MixProject do
 
   defp deps do
     [
-      {:attesto, path: source("ATTESTO_SOURCE_PATH", "attesto"), override: true},
-      {:attesto_client, path: source("ATTESTO_CLIENT_SOURCE_PATH", "attesto_client")},
-      {:attesto_mcp, path: source("ATTESTO_MCP_SOURCE_PATH", "attesto_mcp"), override: true},
-      {:attesto_phoenix, path: source("ATTESTO_PHOENIX_SOURCE_PATH", "attesto_phoenix")},
+      family_dep(:attesto, "ATTESTO_SOURCE_PATH", ">= 2.26.0 and < 3.0.0", override: true),
+      family_dep(:attesto_client, "ATTESTO_CLIENT_SOURCE_PATH", ">= 2.23.0 and < 3.0.0"),
+      family_dep(:attesto_mcp, "ATTESTO_MCP_SOURCE_PATH", ">= 2.10.0 and < 3.0.0",
+        override: true
+      ),
+      family_dep(:attesto_phoenix, "ATTESTO_PHOENIX_SOURCE_PATH", ">= 4.22.0 and < 5.0.0"),
       {:attesto_mcp_server, path: Path.expand("../..", __DIR__)},
       {:phoenix, ">= 1.7.0 and < 2.0.0"},
       {:bandit, "~> 1.14", override: true, only: :test},
@@ -20,7 +22,10 @@ defmodule OAuthHost.MixProject do
     ]
   end
 
-  defp source(variable, sibling) do
-    System.get_env(variable) || Path.expand("../../../#{sibling}", __DIR__)
+  defp family_dep(app, variable, requirement, opts \\ []) do
+    case System.get_env(variable) do
+      path when is_binary(path) and path != "" -> {app, Keyword.put(opts, :path, path)}
+      _ -> {app, requirement, opts}
+    end
   end
 end

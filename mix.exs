@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.MixProject do
   use Mix.Project
 
-  @version "3.8.0"
+  @version "3.9.0"
   @source_url "https://github.com/XukuLLC/attesto_mcp_server"
 
   def project do
@@ -43,8 +43,10 @@ defmodule AttestoMCP.Server.MixProject do
       {:telemetry, "~> 1.2"},
       # Optional: only needed by AttestoMCP.Server.SessionStore.Ecto. ETS is
       # the built-in default, so non-Ecto consumers do not pull persistence
-      # dependencies into their runtime closure.
-      {:ecto, "~> 3.10", optional: true},
+      # dependencies into their runtime closure. 3.14.3 fixes CVE-2026-118391
+      # (unbounded query cache growth from interpolated JSON paths and splice
+      # lists).
+      {:ecto, ">= 3.14.3 and < 4.0.0", optional: true},
       # Test-only SQL backend for the optional Ecto session-store tests. Host
       # applications supply ecto_sql and their own database driver.
       {:ecto_sql, "~> 3.10", only: :test},
@@ -89,7 +91,7 @@ defmodule AttestoMCP.Server.MixProject do
     end
   end
 
-  defp hex_attesto_mcp_dep, do: {:attesto_mcp, ">= 2.9.0 and < 3.0.0"}
+  defp hex_attesto_mcp_dep, do: {:attesto_mcp, ">= 2.10.0 and < 3.0.0"}
 
   defp source_checkout?(path) when is_binary(path) do
     marker = Path.join(path, ".git")
