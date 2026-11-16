@@ -47,7 +47,7 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
-With `attesto_phoenix >= 4.22.0 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.23.0 and < 5.0.0`, one Phoenix host can serve
 multiple named profiles. It binds each automatic protected-resource callback
 to the named profile loaded from the `otp_app` passed to the helper, keeping
 those profiles isolated. It does not select a profile from `conn.private`.
@@ -59,7 +59,24 @@ keystore that is safe to invoke without Phoenix request-local configuration.
 
 On this automatic path, every authenticated token subject must resolve through
 the host's `load_principal` callback. A revoked JTI, an unresolved subject, or
-a callback failure denies the request with a neutral invalid-token response.
+a non-transient callback failure denies the request with a neutral invalid-token
+response (401). A host can instead return
+`{:error, {:temporarily_unavailable, reason}}` from `load_principal` to answer
+503 `temporarily_unavailable`. The builder passes this result through unchanged;
+`Attesto.Plug.ResourceAuthenticate` discards the reason and sends neither a
+`WWW-Authenticate` challenge nor `Retry-After`. No principal or context is granted.
+
+Exceptions during the revocation check or principal loading are transient only
+for `DBConnection.ConnectionError`, or `Postgrex.Error` with a `postgres.pg_code`
+starting with `"08"` or equal to `"57P01"`, `"57P02"`, or `"57P03"`. They return
+`{:error, {:temporarily_unavailable, module}}` and emit
+`[:attesto_mcp_server, :auth, :principal_unavailable]` with `%{count: 1}` and
+`%{category: :principal_policy, error: :exception, exception: module}`.
+Other rescued exceptions emit `[:attesto_mcp_server, :auth, :policy_failure]`
+with the same metadata and still answer 401. Throws and exits keep their existing
+metadata. Only the exception module is reported, never its message or fields.
+The revocation API requires a boolean and cannot return the outage tuple.
+
 Handlers receive that complete loaded value as `context.principal` and
 `context.attesto_mcp_principal`.
 
@@ -172,7 +189,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 4.22.0 and < 5.0.0` and Req requirements that overlap
+overlap `>= 4.23.0 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages
@@ -477,7 +494,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.9"},
+    {:attesto_mcp_server, "~> 3.10"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -580,7 +597,7 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 2.10.0 and < 3.0.0` and calls the public
+The package requires `attesto_mcp >= 2.11.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. There is no automatic fallback to an older authentication boundary.
 
@@ -2093,7 +2110,7 @@ stable event contract is:
   `timeout`, `open`, `close`, and `backpressure` where applicable.
 * `auth/authenticate`: `start`, `stop`, and `exception` around every HTTP
   authentication.
-* `auth/refusal`, `auth/policy_failure`, `protocol/error`, `cancellation/request`,
+* `auth/refusal`, `auth/policy_failure`, `auth/principal_unavailable`, `protocol/error`, `cancellation/request`,
   `cancellation/stop`, and `progress/emit` or `progress/reject`.
 * `principal_binding/exception` and `context_builder/exception`.
 * `mrtr/round`, `subscription/open`, `subscription/close`,
@@ -2111,7 +2128,8 @@ bounded set, the refusal's HTTP `status`, and for an authenticated request its
 `:sender_constraint_mismatch`, `:invalid_dpop_proof`, `:dpop_replay`,
 `:dpop_nonce_required`, `:step_up_required`, `:policy_rejected`,
 `:insufficient_scope`, `:unauthenticated`, `:verifier_unavailable`,
-`:verifier_failure`, `:principal_binding_failure`, and `:other`. The span
+`:principal_unavailable`, `:verifier_failure`, `:principal_binding_failure`,
+and `:other`. The span
 covers credential verification, assign canonicalization, and the principal
 binding; mount policy and route-scope decisions keep their own events. Tokens,
 claims, principals, and error descriptions are never attached.
@@ -2121,7 +2139,8 @@ claims, principals, and error descriptions are never attached.
 `context_builder` callback emits `context_builder/exception`; both remain
 value-free and use the configured `exception_reporter` when applicable.
 
-`auth/policy_failure` identifies the failing boundary only through a safe
+`auth/policy_failure` adds an exception module for rescued principal-policy failures;
+it otherwise identifies the failing boundary through a safe
 `principal_policy`, `mount_policy`, or `verifier` category and an atom failure
 kind; it never includes the callback reason, token claims, or principal.
 

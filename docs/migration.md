@@ -1,5 +1,20 @@
 # Migration runbook
 
+## 3.10 dependency floors
+
+Version 3.10 requires `attesto_mcp >= 2.11.0 and < 3.0.0`, which requires
+`attesto >= 2.28.0 and < 3.0.0`. The installer now requires a direct Hex
+`attesto_phoenix` requirement overlapping `>= 4.23.0 and < 5.0.0` (was
+`>= 4.22.0`). Upgrade a Phoenix host to that range before running the
+installer, then run `mix deps.get`.
+
+These releases preserve transient principal and verifier outages as 503
+`temporarily_unavailable`. No migration is needed. Update telemetry consumers
+for the principal-unavailable event, exception field, and authentication outcome
+as described in the [usage guide](usage.md). Deploy the required Attesto and
+AttestoMCP releases before this server; older nodes continue to deny access
+with 401 during a rolling upgrade.
+
 ## 3.9 dependency floors
 
 Version 3.9 requires `attesto_mcp >= 2.10.0 and < 3.0.0`, which requires

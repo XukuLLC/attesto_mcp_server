@@ -64,6 +64,23 @@ defmodule AttestoMCP.Server.Phoenix do
   the adapter callbacks close over the current validated configuration and
   must not be baked into a compiled Phoenix router.
 
+  A host `load_principal` result of
+  `{:error, {:temporarily_unavailable, reason}}` is passed through unchanged:
+  `Attesto.Plug.ResourceAuthenticate` answers 503 without a challenge or
+  `Retry-After`, discarding the reason. The revocation API requires a boolean;
+  non-boolean results fail closed.
+
+  A rescued `DBConnection.ConnectionError`, or `Postgrex.Error` whose
+  `postgres.pg_code` starts with `"08"` or equals `"57P01"`, `"57P02"`, or
+  `"57P03"`, returns `{:error, {:temporarily_unavailable, module}}`. This
+  applies to failures during the revocation check and principal loading.
+  These modules are matched without requiring either package. The
+  `[:attesto_mcp_server, :auth, :principal_unavailable]` event carries
+  `%{count: 1}` and `%{category: :principal_policy, error: :exception,
+  exception: module}`. Other exceptions still fail closed with 401 and add
+  only `exception: module` to the `:policy_failure` event. Throws and exits
+  retain their existing failure metadata. No exception message is emitted.
+
   The canonical-URL callback is returned as `:htu`, so it decides the DPoP
   target URI a proof must sign ahead of the mount's `base_url`/`origin`. It
   follows the AttestoPhoenix configuration: that configuration's `:htu`, else
@@ -147,7 +164,7 @@ defmodule AttestoMCP.Server.Phoenix do
             end
           end)
         rescue
-          _error -> authorization_check_failed(:exception)
+          error -> authorization_exception(error)
         catch
           kind, _reason -> authorization_check_failed(kind)
         end
@@ -290,11 +307,33 @@ defmodule AttestoMCP.Server.Phoenix do
   defp with_request_config(config_module, phoenix_config, fun),
     do: apply(config_module, :with_request_config, [phoenix_config, fun])
 
-  defp authorization_check_failed(error) do
+  defp authorization_exception(%{__struct__: module} = exception) do
+    if transient_storage_exception?(exception) do
+      Telemetry.execute(
+        [:auth, :principal_unavailable],
+        %{count: 1},
+        %{category: :principal_policy, error: :exception, exception: module}
+      )
+
+      {:error, {:temporarily_unavailable, module}}
+    else
+      authorization_check_failed(:exception, %{exception: module})
+    end
+  end
+
+  defp transient_storage_exception?(%{__struct__: DBConnection.ConnectionError}), do: true
+
+  defp transient_storage_exception?(%{__struct__: Postgrex.Error, postgres: %{pg_code: code}})
+       when is_binary(code),
+       do: String.starts_with?(code, "08") or code in ["57P01", "57P02", "57P03"]
+
+  defp transient_storage_exception?(_exception), do: false
+
+  defp authorization_check_failed(error, metadata \\ %{}) do
     Telemetry.execute(
       [:auth, :policy_failure],
       %{count: 1},
-      %{category: :principal_policy, error: error}
+      Map.merge(%{category: :principal_policy, error: error}, metadata)
     )
 
     {:error, :authorization_check_failed}

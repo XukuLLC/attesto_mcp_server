@@ -204,6 +204,49 @@ defmodule AttestoMCP.Server.AuthTelemetryTest do
     assert_span(%{outcome: :ok, binding: :bearer})
   end
 
+  test "a principal outage remains distinct through the HTTP authentication span", %{
+    server: server,
+    config: config
+  } do
+    token = Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+
+    options =
+      plug(server, config,
+        principal: fn _, _ -> {:error, {:temporarily_unavailable, "private-reason"}} end
+      )
+
+    response = request() |> bearer(token) |> Server.Plug.call(options)
+
+    assert response.status == 503
+    assert response.halted
+    assert Jason.decode!(response.resp_body) == %{"error" => "temporarily_unavailable"}
+    assert get_resp_header(response, "www-authenticate") == []
+    assert get_resp_header(response, "retry-after") == []
+    assert_span(%{outcome: :principal_unavailable, status: 503})
+    refute_received {:auth_telemetry, [:attesto_mcp_server, :auth, :authenticate, :stop], _, _}
+  end
+
+  test "a verifier outage also retains its 503 through the HTTP boundary", %{
+    server: server,
+    config: config
+  } do
+    token = Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
+
+    options =
+      plug(server, config,
+        verify: fn _, _, _ -> {:error, {:temporarily_unavailable, "private-reason"}} end
+      )
+
+    response = request() |> bearer(token) |> Server.Plug.call(options)
+
+    assert response.status == 503
+    assert response.halted
+    assert Jason.decode!(response.resp_body) == %{"error" => "temporarily_unavailable"}
+    assert get_resp_header(response, "www-authenticate") == []
+    assert get_resp_header(response, "retry-after") == []
+    assert_span(%{outcome: :verifier_unavailable, status: 503})
+  end
+
   describe "AuthOutcome" do
     test "prefers the outcome AttestoMCP recorded on the connection" do
       conn =

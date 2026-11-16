@@ -612,7 +612,7 @@ defmodule AttestoMCP.Server.PhoenixTest do
              %{binding: :bearer}
            ) == {:error, :authorization_check_failed}
 
-    assert_policy_failure(telemetry_event, :exception)
+    assert_policy_failure(telemetry_event, :exception, UndefinedFunctionError)
   end
 
   test "fails closed when the protected-resource integration contract is unavailable" do
@@ -664,9 +664,16 @@ defmodule AttestoMCP.Server.PhoenixTest do
     end
   end
 
-  defp assert_policy_failure(event, expected_error) do
+  defp assert_policy_failure(event, expected_error, exception \\ RuntimeError) do
     assert_receive {:policy_failure, ^event, measurements, metadata}
     assert measurements == %{count: 1}
-    assert metadata == %{category: :principal_policy, error: expected_error}
+    expected = %{category: :principal_policy, error: expected_error}
+
+    expected =
+      if expected_error == :exception,
+        do: Map.put(expected, :exception, exception),
+        else: expected
+
+    assert metadata == expected
   end
 end

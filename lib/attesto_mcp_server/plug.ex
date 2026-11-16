@@ -906,6 +906,8 @@ defmodule AttestoMCP.Server.Plug do
   defp auth_failure_response(conn, auth_conn, state) do
     cond do
       auth_conn.status == 403 -> auth_conn
+      auth_conn.status == 503 and auth_conn.state == :sent -> auth_conn
+      auth_conn.status == 503 -> Attesto.Plug.OAuthError.temporarily_unavailable(auth_conn)
       auth_conn.status == 401 and auth_conn.state == :sent -> auth_conn
       auth_conn.status == 401 -> unauthorized(auth_conn, state.auth_opts)
       true -> unauthorized(conn, state.auth_opts)

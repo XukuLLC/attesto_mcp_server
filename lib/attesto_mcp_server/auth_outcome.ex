@@ -25,6 +25,7 @@ defmodule AttestoMCP.Server.AuthOutcome do
           | :insufficient_scope
           | :unauthenticated
           | :verifier_unavailable
+          | :principal_unavailable
           | :verifier_failure
           | :principal_binding_failure
           | :other
@@ -46,6 +47,7 @@ defmodule AttestoMCP.Server.AuthOutcome do
     :insufficient_scope,
     :unauthenticated,
     :verifier_unavailable,
+    :principal_unavailable,
     :verifier_failure,
     :principal_binding_failure,
     :other

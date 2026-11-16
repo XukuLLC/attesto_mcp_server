@@ -1,5 +1,34 @@
 # Changelog
 
+## [3.10.0] - 2026-11-16
+
+Requires `attesto_mcp >= 2.11.0 and < 3.0.0` (was `>= 2.10.0 and < 3.0.0`),
+which requires `attesto >= 2.28.0 and < 3.0.0`.
+
+- The installer now adds attesto_phoenix >= 4.23.0 (was >= 4.22.0).
+
+### Breaking
+
+- `AttestoMCP.Server.Phoenix.protected_resource_options/1` and `/2`: a
+  `DBConnection.ConnectionError`, or a `Postgrex.Error` with a connection or
+  shutdown SQLSTATE (`08…`, `57P01`, `57P02`, `57P03`), raised by the
+  revocation check or by the host's `load_principal`, is answered 503
+  `temporarily_unavailable` instead of 401 `invalid_token`, so a client keeps
+  a valid token through a database outage. A host's `load_principal` can
+  return `{:error, {:temporarily_unavailable, reason}}` for the same answer.
+  Every other exception still gets 401.
+- `[:attesto_mcp_server, :auth, :policy_failure]` metadata gains `:exception`,
+  the exception's module, for a rescued exception; never its message. The
+  outage cases emit `[:attesto_mcp_server, :auth, :principal_unavailable]`
+  instead, and `[:attesto_mcp_server, :auth, :authenticate, :stop]` carries the
+  outcome `:principal_unavailable`.
+- `AttestoMCP.Server.Plug` passes a 503 from the authentication plug through
+  as 503 `temporarily_unavailable`, with no challenge. It turned that answer
+  into 401, for verifier outages as well.
+
+No migration is needed. During a rolling deploy a node on 3.9 answers these
+cases 401 and a node on 3.10 answers 503; both deny access.
+
 ## [3.9.0] - 2026-11-15
 
 Requires `attesto_mcp >= 2.10.0 and < 3.0.0` (was `>= 2.9.0 and < 3.0.0`),

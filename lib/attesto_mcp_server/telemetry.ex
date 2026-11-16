@@ -11,7 +11,8 @@ defmodule AttestoMCP.Server.Telemetry do
   `:sender_constraint_mismatch`, `:invalid_dpop_proof`, `:dpop_replay`,
   `:dpop_nonce_required`, `:step_up_required`, `:policy_rejected`,
   `:insufficient_scope`, `:unauthenticated`, `:verifier_unavailable`,
-  `:verifier_failure`, `:principal_binding_failure`, and `:other`. Tokens,
+  `:principal_unavailable`, `:verifier_failure`, `:principal_binding_failure`,
+  and `:other`. Tokens,
   claims, principals, and error descriptions are never attached. The span
   covers credential verification, assign canonicalization, and the principal
   binding; mount authorization and route scopes keep their own events.
@@ -19,6 +20,12 @@ defmodule AttestoMCP.Server.Telemetry do
   The `[:attesto_mcp_server, :auth, :policy_failure]` event reports an invalid
   revocation result, a caught host-policy callback failure, or an HTTP verifier
   failure without including the callback reason, token claims, or principal.
+
+  Rescued principal-policy exceptions add only their module as `:exception`.
+  Throws and exits retain their existing metadata. Transient storage exceptions
+  instead emit `[:attesto_mcp_server, :auth, :principal_unavailable]` with
+  `%{count: 1}` and metadata `%{category: :principal_policy, error: :exception,
+  exception: module}`. No exception messages or reason terms are emitted.
 
   The `[:attesto_mcp_server, :session_store, :failure]` event reports a
   session-store operation that failed or a corrupt persisted row discarded by
@@ -68,7 +75,7 @@ defmodule AttestoMCP.Server.Telemetry do
   @allowed_metadata ~w(
     version protocol_version method transport status outcome duration count
     correlation_id category reason error kind source server primitive_type
-    primitive_identity binding
+    primitive_identity binding exception
   )a
   @reserved_metadata MapSet.new(@allowed_metadata ++ [:telemetry_metadata])
   @max_trusted_entries 16
@@ -238,6 +245,8 @@ defmodule AttestoMCP.Server.Telemetry do
   defp safe_field(:reason, value) when is_atom(value), do: value
   defp safe_field(:category, value) when is_atom(value), do: value
   defp safe_field(:error, value) when is_atom(value), do: value
+  defp safe_field(:exception, value) when is_atom(value), do: value
+  defp safe_field(:exception, _value), do: nil
   defp safe_field(:kind, value) when is_atom(value), do: value
   defp safe_field(:source, value) when is_atom(value), do: value
   defp safe_field(:server, value) when is_atom(value), do: value
