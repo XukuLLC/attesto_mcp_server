@@ -1,18 +1,18 @@
 defmodule AttestoMCP.Server.DependencyRequirementsTest do
   use ExUnit.Case, async: true
 
-  # AttestoMCP 2.11.0 raises its Attesto dependency floor to 2.28.0.
-  test "AttestoMCP requires the 2.11 floor and stays on the 2.x line" do
+  # AttestoMCP 2.12.0 raises its Attesto dependency floor to 2.29.0.
+  test "AttestoMCP requires the 2.12 floor and stays on the 2.x line" do
     case dependency!(:attesto_mcp) do
       {:attesto_mcp, requirement} when is_binary(requirement) ->
-        for version <- ~w(2.11.0 2.99.0) do
+        for version <- ~w(2.12.0 2.99.0) do
           assert Version.match?(version, requirement),
                  "expected #{inspect(requirement)} to admit #{version}"
         end
 
         refused =
           ~w(1.3.0 1.99.0 2.0.0 2.4.0 2.5.0 2.6.0 2.6.99 2.7.0 2.7.99) ++
-            ~w(2.8.0 2.8.99 2.9.0 2.9.99 2.10.0 2.10.1 2.10.99 3.0.0)
+            ~w(2.8.0 2.8.99 2.9.0 2.9.99 2.10.0 2.10.1 2.10.99 2.11.0 2.11.1 2.11.99 3.0.0)
 
         for version <- refused do
           refute Version.match?(version, requirement),
