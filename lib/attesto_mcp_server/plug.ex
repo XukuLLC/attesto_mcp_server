@@ -27,6 +27,19 @@ defmodule AttestoMCP.Server.Plug do
   not replace the boundary's canonical assign keys, and failures fail the
   request closed.
 
+  Set `:allowed_origins` in `:auth` to accept additional browser origins.
+  Each entry is a serialized HTTP(S) origin with an optional port. Static
+  entries are validated at initialization, and resolver entries at resolution.
+  The request and configured origins are normalized before comparison.
+
+  Built-in 401 challenges advertise the configured scopes for a recognized
+  2026-07-28 `Mcp-Method`. Methods under a `:scope_policy` carry no `scope`,
+  because their scopes depend on the tool or resource, and the challenge
+  does not reveal which definitions exist; the 403 after authentication names
+  them. Legacy requests and unrecognized or invalid selections use the
+  `initialize` scopes. A host's `:www_authenticate` callback controls its
+  challenge.
+
   `allow_dynamic_origin: true` derives the resource origin from each request's
   `Host` header and exists only for local development. In that mode the Plug
   answers only requests whose `Host` is in `:allowed_hosts` (default
@@ -105,6 +118,7 @@ defmodule AttestoMCP.Server.Plug do
   }
   @principal_binding_assign_key :attesto_mcp_principal_binding
   @handler_context_private_key :attesto_mcp_handler_context
+  @challenge_policy_private :attesto_mcp_challenge_policy
   @allowed_plug_option_keys [
     :server,
     :path,
@@ -819,9 +833,7 @@ defmodule AttestoMCP.Server.Plug do
     end
   end
 
-  defp unauthorized(conn, auth_opts) do
-    metadata_url = metadata_url(conn, auth_opts)
-
+  defp unauthorized(conn, state) do
     body =
       case conn.assigns[:attesto_mcp_oauth_error] do
         error when is_map(error) -> error
@@ -829,10 +841,7 @@ defmodule AttestoMCP.Server.Plug do
       end
 
     conn
-    |> put_authenticate_challenge(
-      Attesto.Plug.OAuthError.format_challenge(:bearer, [{"resource_metadata", metadata_url}]),
-      anonymous_authentication?(conn, auth_opts)
-    )
+    |> maybe_put_unauthorized_challenge(state)
     |> put_resp_header("cache-control", "private, no-store")
     |> put_resp_header("vary", "authorization")
     |> put_resp_content_type("application/json")
@@ -841,16 +850,64 @@ defmodule AttestoMCP.Server.Plug do
     _ -> send_resp(conn, 401, Jason.encode!(%{"error" => "invalid_token"}))
   end
 
-  defp put_authenticate_challenge(conn, challenge),
-    do: put_authenticate_challenge(conn, challenge, false)
+  defp maybe_put_unauthorized_challenge(conn, state) do
+    if not Keyword.has_key?(state.auth_opts, :www_authenticate) and
+         (anonymous_authentication?(conn, state.auth_opts) or
+            get_resp_header(conn, "www-authenticate") == []) do
+      metadata = {"resource_metadata", metadata_url(conn, state.auth_opts)}
+      scopes = conn |> put_challenge_policy(state) |> challenge_scopes()
 
-  defp put_authenticate_challenge(conn, challenge, true),
-    do: put_resp_header(conn, "www-authenticate", challenge)
+      params =
+        if scopes == [], do: [metadata], else: [metadata, {"scope", Enum.join(scopes, " ")}]
 
-  defp put_authenticate_challenge(conn, challenge, false) do
+      put_resp_header(
+        conn,
+        "www-authenticate",
+        Attesto.Plug.OAuthError.format_challenge(:bearer, params)
+      )
+    else
+      conn
+    end
+  end
+
+  defp put_authenticate_challenge(conn, challenge) do
     case get_resp_header(conn, "www-authenticate") do
       [] -> put_resp_header(conn, "www-authenticate", challenge)
       [_ | _] -> conn
+    end
+  end
+
+  defp put_challenge_policy(conn, state) do
+    opts = Keyword.take(state.scope_opts, [:scope_map, :default_scopes, :subscription_scopes])
+    put_private(conn, @challenge_policy_private, {opts, state.opts[:scope_policy]})
+  end
+
+  @doc false
+  def challenge_scopes(%{private: %{@challenge_policy_private => {opts, policy}}} = conn) do
+    scopes =
+      with {:ok, @modern} <- required_header(conn, "mcp-protocol-version"),
+           {:ok, method} <- required_header(conn, "mcp-method"),
+           true <- ScopeMap.supported_method?(method) do
+        operation_challenge_scopes(method, opts, policy)
+      else
+        _ -> required_scopes_for(%{method: "initialize", params: %{}}, opts)
+      end
+
+    if Attesto.Scope.valid_list?(scopes), do: scopes, else: []
+  end
+
+  def challenge_scopes(_conn), do: []
+
+  # A definition-scoped policy sets scopes per tool or resource. They are not
+  # looked up for a challenge: the request is unauthenticated, and the answer
+  # would tell the caller whether a definition with that name exists. The 403
+  # after authentication names them.
+  defp operation_challenge_scopes(method, opts, policy) do
+    request = %{method: method, params: %{}}
+
+    case ScopePolicy.mode(request, policy) do
+      nil -> required_scopes_for(request, opts)
+      _definition_scoped -> []
     end
   end
 
@@ -909,8 +966,8 @@ defmodule AttestoMCP.Server.Plug do
       auth_conn.status == 503 and auth_conn.state == :sent -> auth_conn
       auth_conn.status == 503 -> Attesto.Plug.OAuthError.temporarily_unavailable(auth_conn)
       auth_conn.status == 401 and auth_conn.state == :sent -> auth_conn
-      auth_conn.status == 401 -> unauthorized(auth_conn, state.auth_opts)
-      true -> unauthorized(conn, state.auth_opts)
+      auth_conn.status == 401 -> unauthorized(auth_conn, state)
+      true -> unauthorized(conn, state)
     end
   end
 
@@ -1112,6 +1169,7 @@ defmodule AttestoMCP.Server.Plug do
       conn
       |> clear_auth_assigns(state.auth_opts)
       |> put_private(@handler_context_private_key, nil)
+      |> put_challenge_policy(state)
 
     try do
       checked = AttestoMCP.Plug.ProtectResource.authenticate(conn, state.auth_boundary)
@@ -1280,6 +1338,7 @@ defmodule AttestoMCP.Server.Plug do
     |> Keyword.delete(:resource_audience)
     |> Keyword.put(:resource_path, endpoint_path)
     |> maybe_put_public_audience(audience)
+    |> Keyword.put(:challenge_scopes, &__MODULE__.challenge_scopes/1)
     |> Keyword.put(:send_error, &__MODULE__.attesto_send_error/3)
     |> AttestoMCP.Plug.ProtectResource.prepare()
   end
@@ -3376,17 +3435,8 @@ defmodule AttestoMCP.Server.Plug do
 
   defp dynamic_origin_hosts(_auth_opts), do: nil
 
-  defp invalid_origin?(conn, state) do
-    expected_origin = canonical_resource(conn, state.auth_opts) |> canonical_origin()
-
-    case get_req_header(conn, "origin") do
-      [] -> false
-      [origin] -> origin != expected_origin
-      _ -> true
-    end
-  rescue
-    _ -> true
-  end
+  defp invalid_origin?(conn, state),
+    do: not AttestoMCP.Plug.Authenticate.origin_allowed?(conn, state.auth_boundary.authenticate)
 
   defp request_headers_over_budget?(conn) do
     headers = conn.req_headers

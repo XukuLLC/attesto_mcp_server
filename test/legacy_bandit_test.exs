@@ -25,7 +25,12 @@ defmodule AttestoMCP.Server.LegacyBanditTest do
              Server.register_tool(server, "bandit_client_request", %{
                input_schema: %{"type" => "object"},
                handler: fn _arguments, context ->
-                 result = context.client_request.("sampling/createMessage", %{"messages" => []})
+                 result =
+                   context.client_request.("sampling/createMessage", %{
+                     "messages" => [],
+                     "maxTokens" => 64
+                   })
+
                  send(parent, {:bandit_handler_result, result})
                  {:ok, "complete"}
                end

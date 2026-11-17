@@ -50,6 +50,7 @@ defmodule AttestoMCP.Server.P4RegressionTest do
                     "sampling" => %{
                       "method" => "sampling/createMessage",
                       "params" => %{
+                        "maxTokens" => 64,
                         "messages" => [
                           %{
                             "role" => "user",

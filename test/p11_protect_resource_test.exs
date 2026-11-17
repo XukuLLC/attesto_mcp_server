@@ -437,7 +437,12 @@ defmodule AttestoMCP.Server.P11ProtectResourceTest do
              Server.register_tool(server, "waiter-tool", %{
                input_schema: %{"type" => "object"},
                handler: fn _arguments, context ->
-                 _ = context.client_request.("sampling/createMessage", %{"messages" => []})
+                 _ =
+                   context.client_request.("sampling/createMessage", %{
+                     "messages" => [],
+                     "maxTokens" => 64
+                   })
+
                  {:ok, "unreachable"}
                end
              })

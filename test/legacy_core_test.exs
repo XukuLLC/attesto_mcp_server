@@ -541,7 +541,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
                "older",
                "tenant",
                "sampling/createMessage",
-               %{"messages" => [], "toolChoice" => %{"mode" => "none"}},
+               %{"messages" => [], "maxTokens" => 64, "toolChoice" => %{"mode" => "none"}},
                100
              )
 
@@ -567,7 +567,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
                "older",
                "tenant",
                "sampling/createMessage",
-               %{"messages" => [], "tools" => []},
+               %{"messages" => [], "maxTokens" => 64, "tools" => []},
                100
              )
 
@@ -654,7 +654,12 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
              Server.register_tool(server, "asks_client", %{
                input_schema: %{"type" => "object"},
                handler: fn _arguments, context ->
-                 result = context.client_request.("sampling/createMessage", %{"messages" => []})
+                 result =
+                   context.client_request.("sampling/createMessage", %{
+                     "messages" => [],
+                     "maxTokens" => 64
+                   })
+
                  send(parent, {:client_result, result})
                  {:ok, "done"}
                end
@@ -854,7 +859,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
                "legacy",
                "tenant",
                @legacy,
-               %{"sampling" => %{}, "elicitation" => %{}, "roots" => %{}}
+               %{"sampling" => %{"tools" => %{}}, "elicitation" => %{}, "roots" => %{}}
              )
 
     assert :ok = Server.mark_initialized(server, session.id)
@@ -868,6 +873,7 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
       {"sample", "sampling/createMessage",
        %{
          "messages" => [],
+         "maxTokens" => 64,
          "tools" => [%{"name" => "lookup", "inputSchema" => %{"type" => "object"}}],
          "toolChoice" => %{"mode" => "auto"}
        }},
@@ -1007,7 +1013,12 @@ defmodule AttestoMCP.Server.LegacyCoreTest do
                Server.register_tool(server, name, %{
                  input_schema: %{"type" => "object"},
                  handler: fn _arguments, context ->
-                   result = context.client_request.("sampling/createMessage", %{"messages" => []})
+                   result =
+                     context.client_request.("sampling/createMessage", %{
+                       "messages" => [],
+                       "maxTokens" => 64
+                     })
+
                    send(parent, {:handler_result, name, result})
                    {:ok, Atom.to_string(mode)}
                  end

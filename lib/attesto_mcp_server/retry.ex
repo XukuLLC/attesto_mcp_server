@@ -1,7 +1,7 @@
 defmodule AttestoMCP.Server.Retry do
   @moduledoc false
 
-  alias AttestoMCP.Server.{Error, Output, Protocol, RequestState, Schema, Telemetry}
+  alias AttestoMCP.Server.{Error, Output, Protocol, RequestState, Sampling, Schema, Telemetry}
 
   @modern Protocol.modern()
 
@@ -167,16 +167,13 @@ defmodule AttestoMCP.Server.Retry do
   end
 
   @doc false
-  def require_capabilities(params, requests) do
-    capabilities =
-      case Protocol.metadata_value(params, "io.modelcontextprotocol/clientCapabilities") do
-        value when is_map(value) -> value
-        _ -> %{}
-      end
-
+  def require_capabilities(capabilities, requests) do
     {_supported, missing} =
-      Enum.split_with(requests, fn {_key, %{"method" => method}} ->
-        Map.has_key?(capabilities, input_capability(method))
+      Enum.split_with(requests, fn {_key, %{"method" => method, "params" => params}} ->
+        capability = Map.get(capabilities, input_capability(method))
+
+        is_map(capability) and
+          (method != "sampling/createMessage" or Sampling.tools_available?(params, capability))
       end)
 
     if missing == [] do
@@ -192,10 +189,10 @@ defmodule AttestoMCP.Server.Retry do
   end
 
   @doc false
-  def issue(input, params, binding, method, salient, operation, opts, disallowed_keys \\ []) do
+  def issue(input, binding, method, salient, operation, opts, disallowed_keys \\ []) do
     with {:ok, requests} <- normalize_requests(input, opts),
          :ok <- reject_request_collisions(requests, disallowed_keys),
-         {:ok, requests} <- require_capabilities(params, requests) do
+         {:ok, requests} <- require_capabilities(binding.client_capabilities, requests) do
       state =
         RequestState.issue(
           binding.principal,
@@ -228,7 +225,8 @@ defmodule AttestoMCP.Server.Retry do
     accepted = responses(params, payload)
 
     with true <- payload["e"] >= System.system_time(:millisecond),
-         {:ok, requests} <- require_capabilities(params, requests) do
+         {:ok, requests} <- normalize_requests(requests, opts),
+         {:ok, requests} <- require_capabilities(binding.client_capabilities, requests) do
       state =
         RequestState.issue(
           binding.principal,
@@ -253,8 +251,14 @@ defmodule AttestoMCP.Server.Retry do
         {:ok, result}
       end
     else
-      false -> invalid_state()
-      {:error, %Error{} = error} -> {:error, error}
+      false ->
+        invalid_state()
+
+      {:error, :invalid_input_requests} ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_input_requests"})}
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
@@ -288,11 +292,8 @@ defmodule AttestoMCP.Server.Retry do
   defp valid_response?(%{"method" => "elicitation/create", "params" => params}, response, opts),
     do: AttestoMCP.Server.Elicitation.valid_response?(params, response, opts)
 
-  defp valid_response?("sampling/createMessage", response, opts) when is_map(response) do
-    response["role"] == "assistant" and valid_sampling_content?(response["content"], opts) and
-      is_binary(response["model"]) and
-      (is_nil(response["stopReason"]) or is_binary(response["stopReason"]))
-  end
+  defp valid_response?("sampling/createMessage", response, opts),
+    do: Sampling.valid_result?(response, @modern, json_budget_opts(opts))
 
   defp valid_response?(%{"method" => "sampling/createMessage"}, response, opts),
     do: valid_response?("sampling/createMessage", response, opts)
@@ -305,14 +306,6 @@ defmodule AttestoMCP.Server.Retry do
     do: valid_response?("roots/list", response, opts)
 
   defp valid_response?(_method, _response, _opts), do: false
-
-  defp valid_sampling_content?(content, opts) when is_map(content),
-    do: match?({:ok, _}, Output.normalize_content_item(content, json_budget_opts(opts)))
-
-  defp valid_sampling_content?(content, opts) when is_list(content),
-    do: Enum.all?(content, &valid_sampling_content?(&1, opts))
-
-  defp valid_sampling_content?(_content, _opts), do: false
 
   defp valid_root_response?(%{"uri" => uri} = root) when is_binary(uri) do
     String.starts_with?(uri, "file://") and (is_nil(root["name"]) or is_binary(root["name"]))
@@ -351,13 +344,8 @@ defmodule AttestoMCP.Server.Retry do
   defp valid_request_params?("elicitation/create", params, opts),
     do: AttestoMCP.Server.Elicitation.valid_request?(params, opts)
 
-  defp valid_request_params?("sampling/createMessage", params, opts) do
-    is_list(params["messages"]) and
-      Enum.all?(params["messages"], fn message ->
-        is_map(message) and message["role"] in ["user", "assistant"] and
-          valid_sampling_content?(message["content"], opts)
-      end)
-  end
+  defp valid_request_params?("sampling/createMessage", params, opts),
+    do: Sampling.valid_request?(params, @modern, opts)
 
   defp valid_request_params?("roots/list", _params, _opts), do: true
 

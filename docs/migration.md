@@ -1,5 +1,21 @@
 # Migration runbook
 
+## 3.11 dependency floors and sampling
+
+Version 3.11 requires `attesto_mcp >= 2.12.0 and < 3.0.0`, which requires
+`attesto >= 2.29.0 and < 3.0.0`. The installer's `attesto_phoenix` range is
+unchanged. No storage migration is needed.
+
+- Browser pages on another origin are refused with 403 unless listed under
+  `:allowed_origins` in `:auth`.
+- Sampling requests follow each protocol revision's schema: `maxTokens` is
+  required, tool definitions and histories are validated, and a request with
+  `tools` or `toolChoice` goes only to a client that declared
+  `sampling.tools`. Check handlers that return `sampling/createMessage`
+  requests against the [usage guide](usage.md).
+- Upgrade every node that can receive a retry before a host starts a
+  tool-enabled sampling flow: 3.10 rejects `tool_use` results.
+
 ## 3.10 dependency floors
 
 Version 3.10 requires `attesto_mcp >= 2.11.0 and < 3.0.0`, which requires

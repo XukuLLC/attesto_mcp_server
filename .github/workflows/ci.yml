@@ -47,18 +47,18 @@ jobs:
           elixir-version: "1.18.3"
           otp-version: "27.3.4.19"
           version-type: strict
-      - name: Pin the package test graph to AttestoMCP 2.11.0
+      - name: Pin the package test graph to AttestoMCP 2.12.0
         run: |
-          sed -i 's/>= 2.11.0 and < 3.0.0/== 2.11.0/' mix.exs
-          grep -q '{:attesto_mcp, "== 2.11.0"}' mix.exs
+          sed -i 's/>= 2.12.0 and < 3.0.0/== 2.12.0/' mix.exs
+          grep -q '{:attesto_mcp, "== 2.12.0"}' mix.exs
           mix deps.unlock attesto_mcp attesto
           mix deps.get
       - name: Verify and exercise the retained minimum
         run: |
           mix run --no-start -e '
             actual = Application.spec(:attesto_mcp, :vsn) |> to_string()
-            unless actual == "2.11.0",
-              do: raise("expected attesto_mcp 2.11.0, resolved #{actual}")
+            unless actual == "2.12.0",
+              do: raise("expected attesto_mcp 2.12.0, resolved #{actual}")
           '
           mix compile --warnings-as-errors
           mix test test/header_name_test.exs test/scope_map_test.exs test/plug_auth_test.exs
@@ -77,8 +77,8 @@ jobs:
           mix deps.get
           mix run --no-start -e '
             expected = [
-              attesto: ">= 2.28.0 and < 3.0.0",
-              attesto_mcp: ">= 2.11.0 and < 3.0.0"
+              attesto: ">= 2.29.0 and < 3.0.0",
+              attesto_mcp: ">= 2.12.0 and < 3.0.0"
             ]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
@@ -109,7 +109,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto
-          ref: bd380913b45d4246db50d41571041a84380f995a
+          ref: 1edd27ae16dd230999d17d92622b997086827e4d
           path: coordinated/attesto
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: aed0d4a26a34cabbf3af25cbb2bc5daad07d8c2d
+          ref: 4fe5d07162ca6b9e463472daf37b2f2a80d5f875
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated checkout commits
@@ -192,8 +192,8 @@ jobs:
         run: |
           mix run --no-start -e '
             expected = [
-              attesto: ">= 2.28.0 and < 3.0.0",
-              attesto_mcp: ">= 2.11.0 and < 3.0.0"
+              attesto: ">= 2.29.0 and < 3.0.0",
+              attesto_mcp: ">= 2.12.0 and < 3.0.0"
             ]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
@@ -302,8 +302,8 @@ jobs:
         run: |
           mix run --no-start -e '
             expected = [
-              attesto: ">= 2.28.0 and < 3.0.0",
-              attesto_mcp: ">= 2.11.0 and < 3.0.0"
+              attesto: ">= 2.29.0 and < 3.0.0",
+              attesto_mcp: ">= 2.12.0 and < 3.0.0"
             ]
             Enum.each(expected, fn {app, requirement} ->
               actual = Application.spec(app, :vsn) |> to_string()
@@ -361,7 +361,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto
-          ref: bd380913b45d4246db50d41571041a84380f995a
+          ref: 1edd27ae16dd230999d17d92622b997086827e4d
           path: coordinated/attesto
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -379,7 +379,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto_mcp
-          ref: aed0d4a26a34cabbf3af25cbb2bc5daad07d8c2d
+          ref: 4fe5d07162ca6b9e463472daf37b2f2a80d5f875
           path: coordinated/attesto_mcp
           persist-credentials: false
       - name: verify coordinated OAuth source commits

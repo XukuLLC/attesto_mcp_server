@@ -1,5 +1,44 @@
 # Changelog
 
+## [3.11.0] - 2026-11-17
+
+Requires `attesto_mcp >= 2.12.0 and < 3.0.0` (was `>= 2.11.0 and < 3.0.0`),
+which requires `attesto >= 2.29.0 and < 3.0.0`.
+
+### Added
+
+- Sampling supports tool calls and parallel tool results in MCP `2025-11-25`
+  and `2026-07-28`.
+- `AttestoMCP.Server.API.client_extension/2` reads a client's declared
+  extension settings from the handler context, including MCP Apps media
+  types. `docs/usage.md` shows the server side of an MCP App.
+- `AttestoMCP.Server.Plug` advertises configured operation scopes in built-in
+  401 challenges (MCP 2025-11-25 and 2026-07-28 authorization, scope
+  selection). Methods under `:scope_policy` carry no `scope`, so an
+  unauthenticated request cannot learn which tools or resources exist.
+- `AttestoMCP.Server.Plug` accepts additional browser origins under
+  `:allowed_origins` in `:auth`, checked with the same rule as
+  `AttestoMCP.Plug.Authenticate`. A configured `:www_authenticate` hook
+  also controls the anonymous 401 challenge.
+
+### Breaking
+
+- Sampling requests require `messages` and integer `maxTokens`. Invalid
+  sampling fields and unbalanced tool-use histories are rejected. Clients
+  must declare `sampling.tools` to receive requests with `tools` or `toolChoice`.
+- Sampling messages and results reject top-level `resource` and
+  `resource_link` blocks. MCP `2025-06-18` accepts only one text, image, or audio
+  block. Explicit nulls in typed optional sampling fields are rejected. Each
+  sampling result must fit the configured JSON budget as a whole.
+- MCP `2026-07-28` dispatch rejects malformed client extension, sampling,
+  elicitation, roots, and experimental capability declarations. MCP
+  `2025-11-25` requires objects for declared `sampling.tools` and
+  `sampling.context`. Legacy sessions ignore malformed `extensions` for
+  `AttestoMCP.Server.API.client_extension/2`.
+- Deploy the companion Attesto and AttestoMCP updates before building an
+  updated server node. The server uses the shared
+  `AttestoMCP.Plug.Authenticate.origin_allowed?/2` check.
+
 ## [3.10.1] - 2026-11-17
 
 ### Security
@@ -12,6 +51,7 @@
   GHSA-qj4r-jh2r-rw3f). No earlier Plug line has a fixed release. A host's
   endpoint runs that parser for any request with a multipart body, before a
   route is chosen.
+
 ## [3.10.0] - 2026-11-16
 
 Requires `attesto_mcp >= 2.11.0 and < 3.0.0` (was `>= 2.10.0 and < 3.0.0`),

@@ -262,6 +262,25 @@ defmodule AttestoMCP.Server.API do
   def dispatch(server, request, context \\ %{}, opts \\ []),
     do: AttestoMCP.Server.dispatch(server, request, context, opts)
 
+  @doc """
+  Returns the client's declared settings for an MCP extension as `{:ok, settings}`.
+
+  Uses the negotiated client capabilities for a session-bound request and the
+  validated per-request client capabilities for a modern request. Returns
+  `:error` when the extension is absent or has no valid settings object. An
+  empty settings object declares support. Extension settings are client input.
+  """
+  @spec client_extension(handler_context(), String.t()) :: {:ok, map()} | :error
+  def client_extension(%{client_capabilities: %{"extensions" => extensions}}, id)
+      when is_map(extensions) and is_binary(id) do
+    case Map.fetch(extensions, id) do
+      {:ok, settings} when is_map(settings) -> {:ok, settings}
+      _ -> :error
+    end
+  end
+
+  def client_extension(_context, _id), do: :error
+
   @doc "Returns the registered primitive snapshot."
   @spec snapshot(server()) :: map()
   def snapshot(server), do: AttestoMCP.Server.snapshot(server)

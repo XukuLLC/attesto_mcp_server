@@ -305,6 +305,7 @@ defmodule AttestoMCP.Server.P10P13RegressionTest do
                     "bad" => %{
                       "method" => "sampling/createMessage",
                       "params" => %{
+                        "maxTokens" => 64,
                         "messages" => [
                           %{"role" => "system", "content" => %{"type" => "text", "text" => "x"}}
                         ]

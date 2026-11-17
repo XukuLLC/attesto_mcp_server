@@ -46,7 +46,7 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
                  },
                  "client_context" => %{
                    "method" => "sampling/createMessage",
-                   "params" => %{"messages" => []}
+                   "params" => %{"messages" => [], "maxTokens" => 64}
                  }
                }}
         end
@@ -731,6 +731,7 @@ defmodule AttestoMCP.Server.P1AMRTRTest do
                  "sample" => %{
                    "method" => "sampling/createMessage",
                    "params" => %{
+                     "maxTokens" => 64,
                      "messages" => [
                        %{"role" => "user", "content" => %{"type" => "text", "text" => "sample"}}
                      ]

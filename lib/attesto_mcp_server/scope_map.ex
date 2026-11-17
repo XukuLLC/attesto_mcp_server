@@ -196,10 +196,11 @@ defmodule AttestoMCP.Server.ScopeMap do
       else: scopes
   end
 
-  defp supported_method?(method) when is_binary(method),
+  @doc false
+  def supported_method?(method) when is_binary(method),
     do: MapSet.member?(@supported_methods, method)
 
-  defp supported_method?(_method), do: false
+  def supported_method?(_method), do: false
 
   defp validate_scopes(scopes) when is_list(scopes) do
     with {:ok, scopes, bytes} <- collect_scopes(scopes, 0, 0, %{}, []),

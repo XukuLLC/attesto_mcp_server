@@ -19,6 +19,144 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     {:ok, config: AttestoMCP.Test.Factory.config(), server: server}
   end
 
+  test "anonymous and invalid-token challenges use only header-selected configured scopes", %{
+    config: config,
+    server: server
+  } do
+    plug =
+      Server.Plug.init(
+        server: server,
+        auth: [config: config, resource: @resource],
+        scope_map: %{"initialize" => ["open"], "tools/call" => ["tools:run", "tools:inspect"]}
+      )
+
+    for {headers, expected} <- [
+          {[{"mcp-method", "tools/call"}], "tools:run tools:inspect"},
+          {[], "open"},
+          {[{"mcp-method", "unknown/client-value"}], "open"},
+          {[{"mcp-method", "tools/call,ping"}], "open"},
+          {[{"mcp-method", "tools/call"}, {"mcp-method", "ping"}], "open"},
+          {[{"mcp-method", "ping"}], nil}
+        ],
+        credential <- [[], [{"authorization", "Bearer invalid-client-value"}]] do
+      response = challenge(plug, [{"mcp-protocol-version", @version} | headers] ++ credential)
+
+      [header] = get_resp_header(response, "www-authenticate")
+      assert response.status == 401
+
+      assert header =~
+               ~s(resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp")
+
+      assert Regex.run(~r/\bscope="([^"]*)"/, header, capture: :all_but_first) ==
+               if(expected, do: [expected])
+
+      refute header =~ "client-value"
+    end
+
+    response =
+      challenge(plug, [{"mcp-protocol-version", "2025-11-25"}, {"mcp-method", "tools/call"}])
+
+    assert [header] = get_resp_header(response, "www-authenticate")
+    assert header =~ ~s(scope="open")
+  end
+
+  test "challenges under a scope policy do not reveal whether a definition exists", %{
+    config: config,
+    server: server
+  } do
+    assert :ok =
+             Server.register_tool(server, "scoped", %{
+               required_scopes: ["named:run"],
+               authorize: fn _ -> flunk("challenge must not run the definition authorizer") end,
+               handler: fn _, _ -> flunk("challenge must not dispatch the request") end
+             })
+
+    assert :ok =
+             Server.register_resource_template(server, "urn:records/{id}", %{
+               required_scopes: ["records:read"],
+               handler: fn _, _ -> flunk("challenge must not read the resource") end
+             })
+
+    plug =
+      Server.Plug.init(
+        server: server,
+        auth: [config: config, resource: @resource],
+        scope_map: %{"initialize" => ["open"]},
+        scope_policy: %{
+          "tools/call" => :selected_definition,
+          "resources/read" => :selected_definition
+        }
+      )
+
+    tool_names = [["scoped"], ["=?base64?c2NvcGVk?="], ["unknown"], ["=?base64?invalid!?="], []]
+    resource_names = [["urn:records/7"], ["urn:other/7"], []]
+
+    for {method, names} <- [{"tools/call", tool_names}, {"resources/read", resource_names}],
+        credential <- [[], [{"authorization", "Bearer invalid"}]] do
+      headers = [{"mcp-protocol-version", @version}, {"mcp-method", method}]
+
+      challenges =
+        for name <- names do
+          response = challenge(plug, headers ++ Enum.map(name, &{"mcp-name", &1}) ++ credential)
+          assert response.status == 401
+          assert [header] = get_resp_header(response, "www-authenticate")
+          refute header =~ "scope="
+          header
+        end
+
+      assert length(Enum.uniq(challenges)) == 1
+    end
+  end
+
+  test "a host owns the anonymous and invalid-token challenges", %{config: config, server: server} do
+    for custom <- [true, false],
+        hook <- [&custom_challenge(&1, &2, custom), {__MODULE__, :custom_challenge, [custom]}],
+        credential <- [[], [{"authorization", "Bearer invalid"}]] do
+      plug =
+        Server.Plug.init(
+          server: server,
+          scope_map: %{"initialize" => ["open"]},
+          auth: [config: config, resource: @resource, www_authenticate: hook]
+        )
+
+      response = challenge(plug, credential)
+      assert response.status == 401
+
+      assert get_resp_header(response, "www-authenticate") ==
+               if(custom, do: ["Custom realm=host"], else: [])
+    end
+  end
+
+  @doc false
+  def custom_challenge(conn, default, custom) do
+    refute default =~ "scope="
+    if custom, do: put_resp_header(conn, "www-authenticate", "Custom realm=host"), else: conn
+  end
+
+  test "malformed configured scope tokens are omitted from both 401 paths", %{
+    config: config,
+    server: server
+  } do
+    plug =
+      Server.Plug.init(
+        server: server,
+        auth: [config: config, resource: @resource],
+        default_scopes: ["invalid scope"]
+      )
+
+    for credential <- [[], [{"authorization", "Bearer invalid"}]] do
+      response = challenge(plug, credential)
+      assert response.status == 401
+      assert [header] = get_resp_header(response, "www-authenticate")
+      refute header =~ "scope="
+    end
+  end
+
+  defp challenge(plug, headers) do
+    conn = conn(:post, "/mcp", "unparsed body")
+    Server.Plug.call(%{conn | req_headers: headers}, plug)
+  end
+
   setup %{server: server} do
     parent = self()
 
@@ -102,7 +240,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     refute_receive {:handler_called, _}
   end
 
-  test "matching Origin is accepted", %{config: config, server: server} do
+  test "matching Origin is normalized before comparison", %{config: config, server: server} do
     token =
       AttestoMCP.Test.Factory.access_token(config,
         scopes: [AttestoMCP.Scopes.tools_call()]
@@ -117,11 +255,35 @@ defmodule AttestoMCP.Server.PlugAuthTest do
         %{"name" => "secure", "arguments" => %{"account" => "acct-42"}},
         scopes: [AttestoMCP.Scopes.tools_call()],
         param_header: "=?base64?YWNjdC00Mg==?=",
-        origins: ["https://mcp.example.com"]
+        origins: ["HTTPS://MCP.example.com:443"]
       )
 
     assert response.status == 200
     assert_receive {:handler_called, "acct-42"}
+  end
+
+  test "auth allows explicitly configured browser origins and validates the list at init", %{
+    config: config,
+    server: server
+  } do
+    auth = [
+      config: config,
+      resource: @resource,
+      allowed_origins: ["HTTPS://BROWSER.example.com:443"]
+    ]
+
+    plug = Server.Plug.init(server: server, auth: auth)
+
+    assert challenge(plug, [{"origin", "https://browser.example.com"}]).status == 401
+
+    assert_raise ArgumentError,
+                 ~r/:allowed_origins must be a list of serialized HTTP\(S\) origins/,
+                 fn ->
+                   Server.Plug.init(
+                     server: server,
+                     auth: Keyword.put(auth, :allowed_origins, ["https://browser.example.com/"])
+                   )
+                 end
   end
 
   test "mismatched Origin is forbidden before dispatch", %{config: config, server: server} do
@@ -413,7 +575,10 @@ defmodule AttestoMCP.Server.PlugAuthTest do
           audience: "http://rebound.attacker.example/mcp"
         )
 
-      response = dynamic_call(server, config, token, "rebound.attacker.example", 80, [])
+      response =
+        dynamic_call(server, config, token, "rebound.attacker.example", 80,
+          allowed_origins: ["http://rebound.attacker.example"]
+        )
 
       assert response.status == 403
       assert response.resp_body == "forbidden host"
@@ -513,6 +678,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
       |> put_req_header("accept", "application/json, text/event-stream")
       |> put_req_header("mcp-protocol-version", @version)
       |> put_req_header("mcp-method", "tools/list")
+      |> maybe_dynamic_origin_header(auth_overrides)
 
     plug =
       AttestoMCP.Server.Plug.init(
@@ -527,6 +693,13 @@ defmodule AttestoMCP.Server.PlugAuthTest do
       )
 
     AttestoMCP.Server.Plug.call(conn, plug)
+  end
+
+  defp maybe_dynamic_origin_header(conn, opts) do
+    case opts[:allowed_origins] do
+      [origin] -> put_req_header(conn, "origin", origin)
+      _ -> conn
+    end
   end
 
   defp call(server, config, token, method, params, opts) do

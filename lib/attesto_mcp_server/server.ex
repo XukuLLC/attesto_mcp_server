@@ -12,6 +12,7 @@ defmodule AttestoMCP.Server do
   alias AttestoMCP.Server.{
     CachePolicy,
     Cursor,
+    Elicitation,
     Error,
     Handlers,
     HostCallback,
@@ -27,6 +28,7 @@ defmodule AttestoMCP.Server do
     RequestState,
     Result,
     Retry,
+    Sampling,
     Schema,
     ScopeMap,
     ScopePolicy,
@@ -1117,8 +1119,7 @@ defmodule AttestoMCP.Server do
     case session_for(state, session_id, principal, tenant) do
       {:ok, session} ->
         cond do
-          version not in @legacy_versions or version not in state.opts[:protocol_versions] or
-              not is_map(capabilities) ->
+          not valid_session_negotiation?(version, capabilities, session_id, state.opts) ->
             {:reply, {:error, :invalid_negotiation}, state}
 
           not is_nil(session.version) or session.initialized ->
@@ -1233,9 +1234,9 @@ defmodule AttestoMCP.Server do
            request.id == id and request.session_id == session_id
          end) do
       {request_ref, request} ->
-        case session_owned?(state, session_id, principal, tenant) do
-          :ok when request.principal == principal and request.tenant == tenant ->
-            case validate_client_response(request.method, response, request.params, state.opts) do
+        case session_for(state, session_id, principal, tenant) do
+          {:ok, session} when request.principal == principal and request.tenant == tenant ->
+            case validate_client_response(request, response, session.version, state.opts) do
               {:ok, result} ->
                 send(request.waiter, {request_ref, {:response, {:ok, result}}})
 
@@ -1254,7 +1255,7 @@ defmodule AttestoMCP.Server do
                  remove_client_request(state, request_ref, request)}
             end
 
-          :session_store_unavailable ->
+          {:error, :session_store_unavailable} ->
             {:reply, {:error, :session_store_unavailable}, state}
 
           _ ->
@@ -1274,10 +1275,12 @@ defmodule AttestoMCP.Server do
     with {:ok, session} <-
            session_for(state, session_id, principal, tenant, require_initialized: true),
          capability when is_binary(capability) <- client_capability(method),
-         true <- Map.has_key?(session.client_capabilities, capability),
+         client_capability = session.client_capabilities[capability],
+         true <- is_map(client_capability),
          {:ok, params} <- canonical_client_request(params, state.opts),
          :ok <- validate_client_request_revision(session.version, method, params),
-         :ok <- validate_elicitation_request(method, params, state.opts),
+         true <- supports_client_request?(method, params, client_capability),
+         :ok <- validate_client_request(method, params, session.version, state.opts),
          {:ok, _stream_ref, stream} <-
            newest_live_legacy_stream(
              state.legacy_streams,
@@ -2717,7 +2720,7 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_client_response(method, response, params, opts) when is_map(response) do
+  defp validate_client_response(request, response, version, opts) when is_map(response) do
     kind = response[:kind] || response["kind"]
     result = response[:result] || response["result"]
     error = response[:error] || response["error"]
@@ -2735,7 +2738,8 @@ defmodule AttestoMCP.Server do
       is_map(error) and is_nil(result) and valid_client_error?(error) ->
         {:error, {:client_error, error}}
 
-      is_nil(error) and valid_client_result?(method, result, params, opts) ->
+      is_nil(error) and
+          valid_client_result?(request.method, result, request.params, version, opts) ->
         {:ok, result}
 
       true ->
@@ -2743,7 +2747,7 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_client_response(_method, _response, _params, _opts),
+  defp validate_client_response(_request, _response, _version, _opts),
     do: {:error, :invalid_response}
 
   defp valid_client_error?(error) when is_map(error) do
@@ -2751,35 +2755,19 @@ defmodule AttestoMCP.Server do
       is_binary(error[:message] || error["message"])
   end
 
-  defp valid_client_result?("elicitation/create", result, params, opts),
-    do: AttestoMCP.Server.Elicitation.valid_response?(params, result, json_budget_opts(opts))
+  defp valid_client_result?("elicitation/create", result, params, _version, opts),
+    do: Elicitation.valid_response?(params, result, json_budget_opts(opts))
 
-  defp valid_client_result?("sampling/createMessage", result, _params, opts)
-       when is_map(result) do
-    role = result["role"] || result[:role]
-    content = result["content"] || result[:content]
-    model = result["model"] || result[:model]
-    stop_reason = result["stopReason"] || result[:stopReason]
+  defp valid_client_result?("sampling/createMessage", result, _params, version, opts),
+    do: Sampling.valid_result?(result, version, json_budget_opts(opts))
 
-    role == "assistant" and valid_sampling_content?(content, opts) and is_binary(model) and
-      (is_nil(stop_reason) or is_binary(stop_reason))
-  end
-
-  defp valid_client_result?("roots/list", result, _params, _opts) when is_map(result) do
+  defp valid_client_result?("roots/list", result, _params, _version, _opts) when is_map(result) do
     roots = result["roots"] || result[:roots]
 
     is_list(roots) and Enum.all?(roots, &valid_client_root?/1)
   end
 
-  defp valid_client_result?(_, _, _, _), do: false
-
-  defp valid_sampling_content?(content, opts) when is_map(content),
-    do: valid_content_item?(content, opts)
-
-  defp valid_sampling_content?(content, opts) when is_list(content),
-    do: Enum.all?(content, &valid_content_item?(&1, opts))
-
-  defp valid_sampling_content?(_content, _opts), do: false
+  defp valid_client_result?(_, _, _, _, _), do: false
 
   defp valid_client_root?(root) when is_map(root) do
     uri = root["uri"] || root[:uri]
@@ -3630,14 +3618,6 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp session_owned?(state, session_id, principal, tenant) do
-    case session_for(state, session_id, principal, tenant) do
-      {:ok, _session} -> :ok
-      {:error, :session_store_unavailable} -> :session_store_unavailable
-      _ -> :not_found
-    end
-  end
-
   defp response_id(%{id: id}), do: id
   defp response_id(%{"id" => id}), do: id
   defp response_id(_), do: nil
@@ -4366,13 +4346,24 @@ defmodule AttestoMCP.Server do
     end
   end
 
-  defp validate_elicitation_request("elicitation/create", params, opts) do
-    if AttestoMCP.Server.Elicitation.valid_request?(params, opts),
+  defp supports_client_request?("sampling/createMessage", params, capability),
+    do: Sampling.tools_available?(params, capability)
+
+  defp supports_client_request?(_method, _params, _capability), do: true
+
+  defp validate_client_request("elicitation/create", params, _version, opts) do
+    if Elicitation.valid_request?(params, opts),
       do: :ok,
       else: {:error, :invalid_input_request}
   end
 
-  defp validate_elicitation_request(_method, _params, _opts), do: :ok
+  defp validate_client_request("sampling/createMessage", params, version, opts) do
+    if Sampling.valid_request?(params, version, json_budget_opts(opts)),
+      do: :ok,
+      else: {:error, :invalid_input_request}
+  end
+
+  defp validate_client_request(_method, _params, _version, _opts), do: :ok
 
   defp validate_client_request_revision(
          @legacy_2025_06_18,
@@ -4381,8 +4372,9 @@ defmodule AttestoMCP.Server do
        ),
        do: {:error, :unsupported}
 
-  defp validate_client_request_revision(@legacy_2025_06_18, "sampling/createMessage", params) do
-    if Map.has_key?(params, "tools") or Map.has_key?(params, "toolChoice"),
+  defp validate_client_request_revision(@legacy_2025_06_18, "sampling/createMessage", params)
+       when is_map(params) do
+    if Sampling.tool_parameters?(params),
       do: {:error, :unsupported},
       else: :ok
   end
@@ -4591,7 +4583,7 @@ defmodule AttestoMCP.Server do
     with :ok <- validate_request_params_shape(params),
          {:ok, request_meta} <- request_meta_snapshot(params, runtime.opts),
          :ok <- validate_legacy_initialize_request(method, era, params, context, runtime.opts),
-         :ok <- validate_era(era, params, runtime.opts),
+         {:ok, capabilities} <- validate_era(era, params, runtime.opts),
          :ok <- validate_trace_context(params),
          :ok <- authorization(method, params, context, runtime.opts) do
       # The snapshot replaces any caller-supplied value. It is client input and
@@ -4601,7 +4593,8 @@ defmodule AttestoMCP.Server do
       if context[:session_store_unavailable] == true do
         {:error, Error.session_store_unavailable()}
       else
-        with :ok <- validate_protocol_binding(method, era, context, opts) do
+        with :ok <- validate_protocol_binding(method, era, context, opts),
+             {:ok, context} <- client_capabilities_context(era, context, capabilities, runtime) do
           dispatch_method(era, method, params, context, runtime, opts)
         end
       end
@@ -4662,15 +4655,49 @@ defmodule AttestoMCP.Server do
       not is_map(caps) ->
         {:error, Error.invalid_params(%{"reason" => "clientCapabilities_required"})}
 
+      not valid_modern_capabilities?(caps) ->
+        {:error, Error.invalid_params(%{"reason" => "invalid_client_capabilities"})}
+
       true ->
-        :ok
+        {:ok, caps}
     end
   end
 
-  defp validate_era(@legacy, _params, _opts), do: :ok
+  defp validate_era(@legacy, _params, _opts), do: {:ok, %{}}
 
   defp validate_era(version, _params, runtime_opts),
     do: {:error, Error.unsupported_version(version, runtime_opts[:protocol_versions])}
+
+  # HTTP and stdio load the owned session before dispatch. Reuse that snapshot.
+  defp client_capabilities_context(
+         @legacy,
+         %{transport: transport, session_id: session_id, client_capabilities: caps} = context,
+         _caps,
+         _runtime
+       )
+       when transport in [:http, :stdio] and is_binary(session_id) and is_map(caps),
+       do: legacy_capabilities_context(context, caps)
+
+  defp client_capabilities_context(@legacy, %{session_id: session_id} = context, _caps, runtime)
+       when is_binary(session_id) do
+    case session_capabilities(
+           runtime.server,
+           session_id,
+           session_principal(context),
+           tenant(context)
+         ) do
+      {:error, :session_store_unavailable} -> {:error, Error.session_store_unavailable()}
+      caps -> legacy_capabilities_context(context, caps)
+    end
+  end
+
+  defp client_capabilities_context(_era, context, caps, _runtime),
+    do: {:ok, Map.put(context, :client_capabilities, caps)}
+
+  defp legacy_capabilities_context(context, caps) do
+    caps = if valid_extension_capabilities?(caps), do: caps, else: Map.delete(caps, "extensions")
+    {:ok, Map.put(context, :client_capabilities, caps)}
+  end
 
   defp validate_protocol_binding("initialize", @legacy, _context, _opts), do: :ok
 
@@ -4703,8 +4730,11 @@ defmodule AttestoMCP.Server do
     capabilities = params["capabilities"]
     max_bytes = max_client_capabilities_bytes(context, opts)
 
-    if is_binary(params["protocolVersion"]) and is_map(capabilities) and
-         valid_legacy_capabilities?(capabilities, max_bytes) and valid_client_info?(client_info),
+    version = params["protocolVersion"]
+
+    if is_binary(version) and is_map(capabilities) and
+         valid_legacy_capabilities?(capabilities, version, max_bytes) and
+         valid_client_info?(client_info),
        do: :ok,
        else: {:error, Error.invalid_params(%{"reason" => "invalid_initialize_params"})}
   end
@@ -4721,7 +4751,14 @@ defmodule AttestoMCP.Server do
 
   defp valid_client_info?(_), do: false
 
-  defp valid_legacy_capabilities?(capabilities, max_bytes) when is_map(capabilities) do
+  defp valid_session_negotiation?(version, capabilities, session_id, opts) do
+    max_bytes = max_client_capabilities_bytes(%{session_id: session_id}, opts)
+
+    version in @legacy_versions and version in opts[:protocol_versions] and is_map(capabilities) and
+      valid_legacy_capabilities?(capabilities, version, max_bytes)
+  end
+
+  defp valid_legacy_capabilities?(capabilities, version, max_bytes) do
     known = [
       "experimental",
       "logging",
@@ -4739,12 +4776,62 @@ defmodule AttestoMCP.Server do
         is_binary(key) and
           (key not in known or is_map(value))
       end) and
-      Enum.all?(["listChanged", "subscribe"], fn key ->
-        case get_in(capabilities, ["resources", key]) do
-          nil -> true
-          value -> is_boolean(value)
-        end
-      end)
+      valid_legacy_sampling_capability?(capabilities, version) and
+      valid_legacy_resource_capability?(capabilities)
+  end
+
+  defp valid_legacy_sampling_capability?(capabilities, @legacy),
+    do: valid_capability_objects?(capabilities, "sampling", ~w(context tools))
+
+  defp valid_legacy_sampling_capability?(_capabilities, _version), do: true
+
+  defp valid_legacy_resource_capability?(capabilities) do
+    Enum.all?(["listChanged", "subscribe"], fn key ->
+      case get_in(capabilities, ["resources", key]) do
+        nil -> true
+        value -> is_boolean(value)
+      end
+    end)
+  end
+
+  defp valid_modern_capabilities?(capabilities) do
+    valid_capability_objects?(capabilities, "roots", []) and
+      valid_capability_objects?(capabilities, "sampling", ~w(context tools)) and
+      valid_capability_objects?(capabilities, "elicitation", ~w(form url)) and
+      valid_capability_map?(capabilities, "experimental", fn _id -> true end) and
+      valid_extension_capabilities?(capabilities)
+  end
+
+  defp valid_capability_objects?(capabilities, name, fields) do
+    case Map.fetch(capabilities, name) do
+      :error ->
+        true
+
+      {:ok, value} when is_map(value) ->
+        Enum.all?(fields, fn field -> not Map.has_key?(value, field) or is_map(value[field]) end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp valid_extension_capabilities?(capabilities) do
+    valid_capability_map?(capabilities, "extensions", fn id ->
+      RequestMeta.valid_key?(id) and String.contains?(id, "/") and String.trim(id) == id
+    end)
+  end
+
+  defp valid_capability_map?(capabilities, name, valid_key?) do
+    case Map.fetch(capabilities, name) do
+      :error ->
+        true
+
+      {:ok, entries} when is_map(entries) ->
+        Enum.all?(entries, fn {id, settings} -> valid_key?.(id) and is_map(settings) end)
+
+      _ ->
+        false
+    end
   end
 
   # A session-bound initialize stores the capabilities in the session record,
@@ -5399,10 +5486,8 @@ defmodule AttestoMCP.Server do
            ),
          :ok <- Retry.consume(state_payload, runtime.opts) do
       call_tool_validated(
-        params,
         context,
         runtime,
-        opts,
         era,
         arguments,
         handler_arguments,
@@ -5465,24 +5550,7 @@ defmodule AttestoMCP.Server do
       true ->
         selected_policy? = is_function(Keyword.get(opts, :definition_authorizer), 1)
 
-        candidate =
-          case Enum.find(Registry.candidates(registry, :resource, uri), fn resource ->
-                 selected_policy? or visible?(resource, context)
-               end) do
-            resource when is_map(resource) ->
-              {:ok, {resource, %{}}}
-
-            nil ->
-              find_resource_template(
-                Registry.list(registry, :template),
-                uri,
-                context,
-                selected_policy?,
-                UriTemplate.new_budget()
-              )
-          end
-
-        case candidate do
+        case resource_candidate(registry, uri, context, selected_policy?) do
           {:ok, nil} when selected_policy? ->
             {:error, unknown_resource_error(uri, era)}
 
@@ -5509,6 +5577,24 @@ defmodule AttestoMCP.Server do
     end
   rescue
     _ -> {:error, unknown_resource_error(uri, era)}
+  end
+
+  defp resource_candidate(registry, uri, context, selected_policy?) do
+    case Enum.find(Registry.candidates(registry, :resource, uri), fn resource ->
+           selected_policy? or visible?(resource, context)
+         end) do
+      resource when is_map(resource) ->
+        {:ok, {resource, %{}}}
+
+      nil ->
+        find_resource_template(
+          Registry.list(registry, :template),
+          uri,
+          context,
+          selected_policy?,
+          UriTemplate.new_budget()
+        )
+    end
   end
 
   defp find_resource_template(templates, uri, context, selected_policy?, budget) do
@@ -5586,10 +5672,8 @@ defmodule AttestoMCP.Server do
   end
 
   defp call_tool_validated(
-         params,
          context,
          runtime,
-         _opts,
          era,
          arguments,
          handler_arguments,
@@ -5608,7 +5692,6 @@ defmodule AttestoMCP.Server do
       {:input_required, input} when era == @modern ->
         Retry.issue(
           input,
-          params,
           retry_binding(context, era),
           "tools/call",
           salient,
@@ -5779,7 +5862,6 @@ defmodule AttestoMCP.Server do
           {:input_required, input} when era == @modern ->
             Retry.issue(
               input,
-              params,
               retry_binding(context, era),
               "resources/read",
               salient,
@@ -5914,7 +5996,6 @@ defmodule AttestoMCP.Server do
               {:input_required, input} when era == @modern ->
                 Retry.issue(
                   input,
-                  params,
                   retry_binding(context, era),
                   "prompts/get",
                   salient,
@@ -6485,9 +6566,6 @@ defmodule AttestoMCP.Server do
   defp valid_prompt_result?(result, opts),
     do: match?({:ok, _}, Output.normalize_prompt_result(result, json_budget_opts(opts)))
 
-  defp valid_content_item?(item, opts),
-    do: match?({:ok, _}, Output.normalize_content_item(item, json_budget_opts(opts)))
-
   defp validate_prompt_call_arguments(definitions, arguments, input_keys)
        when is_list(definitions) and is_map(arguments) do
     allowed =
@@ -6648,6 +6726,7 @@ defmodule AttestoMCP.Server do
       principal: AttestoMCP.Server.InteractionOwner.from_context(context),
       tenant: tenant(context),
       era: era,
+      client_capabilities: context[:client_capabilities],
       request_id: context[:request_id]
     }
   end

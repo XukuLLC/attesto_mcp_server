@@ -1073,7 +1073,10 @@ defmodule AttestoMCP.Server.StdioTest do
              Server.register_tool(server, "asks_client", %{
                input_schema: %{"type" => "object"},
                handler: fn _arguments, context ->
-                 case context.client_request.("sampling/createMessage", %{"messages" => []}) do
+                 case context.client_request.("sampling/createMessage", %{
+                        "messages" => [],
+                        "maxTokens" => 64
+                      }) do
                    {:ok, _response} -> {:ok, "completed"}
                    _ -> {:error, :client_request_failed}
                  end
@@ -1138,7 +1141,7 @@ defmodule AttestoMCP.Server.StdioTest do
     parent = self()
 
     tools = [
-      {"stdio_sample", "sampling/createMessage", %{"messages" => []}},
+      {"stdio_sample", "sampling/createMessage", %{"messages" => [], "maxTokens" => 64}},
       {"stdio_elicit", "elicitation/create",
        %{
          "message" => "confirm",

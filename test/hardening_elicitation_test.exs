@@ -246,7 +246,10 @@ defmodule AttestoMCP.Server.HardeningElicitationTest do
                "owner",
                nil,
                "sampling/createMessage",
-               %{messages: [%{role: "user", content: %{type: "text", text: "bad\e"}}]},
+               %{
+                 maxTokens: 64,
+                 messages: [%{role: "user", content: %{type: "text", text: "bad\e"}}]
+               },
                100
              )
 

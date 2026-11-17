@@ -173,7 +173,7 @@ defmodule AttestoMCP.Server.P12TransportTest do
           "usr_123",
           nil,
           "sampling/createMessage",
-          %{"messages" => []},
+          %{"messages" => [], "maxTokens" => 64},
           1_000
         )
       end)
@@ -245,7 +245,7 @@ defmodule AttestoMCP.Server.P12TransportTest do
           "late-stream",
           nil,
           "sampling/createMessage",
-          %{"messages" => []},
+          %{"messages" => [], "maxTokens" => 64},
           1_000
         )
       end)

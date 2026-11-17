@@ -494,7 +494,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.10"},
+    {:attesto_mcp_server, "~> 3.11"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -597,9 +597,24 @@ In that mode the Plug answers only requests whose `Host` is in
 a port) and returns `403 forbidden host` for any other, so a browser page whose
 DNS name was rebound to the loopback address cannot reach a local server.
 
-The package requires `attesto_mcp >= 2.11.0 and < 3.0.0` and calls the public
+List additional trusted browser origins in `auth: [allowed_origins: [...]]`
+alongside the verifier options, or return the list from the `:auth` resolver.
+Each entry is an HTTP(S) origin with an optional port. The Plug validates
+static entries at init and resolver entries when resolving the options. It
+normalizes configured and request origins before comparison. The Host
+allowlist still applies in dynamic-origin mode.
+
+Built-in 401 challenges advertise the configured scopes for a recognized
+2026-07-28 `Mcp-Method` and, for a selected definition, its primary required
+scopes from `Mcp-Name`. A visible-definition list has no method-level scopes.
+For requests without a valid operation selection, the challenge uses the
+`initialize` scopes. An empty scope list omits the parameter. A host's
+`:www_authenticate` hook controls its challenge.
+
+The package requires `attesto_mcp >= 2.12.0 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
-directly. There is no automatic fallback to an older authentication boundary.
+directly. It shares the Origin check with
+`AttestoMCP.Plug.Authenticate.origin_allowed?/2`.
 
 ### DPoP target URI
 
@@ -1687,8 +1702,8 @@ Retry with a new JSON-RPC ID, echo the returned state, and use the actual
 `inputRequests` keys for typed `inputResponses`. Keep the original method,
 selected definition, arguments, application metadata, and authenticated
 identity unchanged. Elicitation responses use `action` (and accepted
-`content`), sampling responses use `role`, `content`, `model`, and `stopReason`,
-and roots responses use a `roots` array.
+`content`), sampling responses use `role`, `content`, `model`, and an optional
+`stopReason`, and roots responses use a `roots` array.
 
 A valid retry with missing answers receives another `input_required` result
 containing only the remaining requests. The fresh signed state preserves
@@ -1697,6 +1712,35 @@ the next retry. Form accept responses reject undeclared response keys outside
 `requestedSchema.properties`, and schemas accept only the flat MCP 2025-11-25 /
 SEP-1330 keywords. Unknown form action or tampered, expired, reused,
 or unbound state and malformed supplied answers are rejected.
+
+#### Sampling and tool use
+
+For `2026-07-28`, put the `sampling/createMessage` request in `inputRequests`
+and read the client result from the next round's `inputResponses`. For the
+session-bound revisions, call `context.client_request.("sampling/createMessage", params)`
+and handle the returned `{:ok, result}` or `{:error, reason}`.
+
+Supply `messages` and integer `maxTokens` in each sampling request. In
+`2026-07-28` and `2025-11-25`, either `tools` or `toolChoice` requires a client
+declaration of `"sampling" => %{"tools" => %{}}`. The same missing-capability
+error applies when the client declares only `sampling`. Each tool has a `name`
+and an `inputSchema` with `"type" => "object"`. `toolChoice.mode` is optional and
+accepts `"auto"`, `"required"`, or `"none"`.
+
+A sampling result carries `role`, `content`, and the selected `model`.
+`stopReason` accepts `"toolUse"` and provider-specific strings. When the client
+returns an assistant result with `tool_use` blocks, a host can run the tools and
+send another sampling request with the previous messages, the assistant message,
+and an immediately following user message. The user message contains one
+`tool_result` for every tool use, matching `toolUseId` to each tool use's `id`.
+Parallel tool results may appear in any order. Put text or other content for a
+tool inside its `tool_result.content` array.
+
+`2025-06-18` accepts a single text, image, or audio block in each sampling
+message or result. In the two later revisions, `content` may also be an array
+of blocks, and tool uses and results belong to the assistant and user roles
+respectively. Resource links and embedded resources can appear inside
+`tool_result.content` in those revisions.
 
 #### URL elicitations
 
@@ -1937,6 +1981,78 @@ callback runs for every visible tool on each `tools/list` page because the
 customized catalog is part of the cursor fingerprint. Keep it cheap and
 deterministic; a cursor stops working when the presentation it was issued for
 changes. Registered definitions are never modified.
+
+### Serving an MCP App
+
+Declare `io.modelcontextprotocol/ui` in the server's `:capabilities`. An MCP
+App tool links to a `ui://` resource using `_meta.ui.resourceUri` and can set
+`_meta.ui.visibility` to control where a host presents it. Serve the HTML
+resource with `mimeType: "text/html;profile=mcp-app"`. The resource content's
+`_meta.ui` can declare CSP, permissions, a dedicated origin, and a border
+preference.
+
+The following registers a text-only tool and presents its UI variant for
+clients that declare support for the resource's media type. Use the same
+registration for `2026-07-28` discovery and `2025-11-25` initialization.
+`AttestoMCP.Server.API.client_extension/2` reads the current request's
+validated capabilities in `2026-07-28` and the negotiated session capabilities
+in `2025-11-25`.
+
+```elixir
+alias AttestoMCP.Server.API
+
+extension = "io.modelcontextprotocol/ui"
+mime_type = "text/html;profile=mcp-app"
+uri = "ui://inventory/dashboard"
+
+present_tool = fn
+  %{"name" => "inventory"}, context ->
+    with {:ok, %{"mimeTypes" => types}} when is_list(types) <-
+           API.client_extension(context, extension),
+         true <- mime_type in types do
+      {:ok, %{"_meta" => %{"ui" => %{
+        "resourceUri" => uri,
+        "visibility" => ["model", "app"]
+      }}}}
+    else
+      _ -> :default
+    end
+
+  _tool, _context ->
+    :default
+end
+
+{:ok, server} = API.start_link(
+  capabilities: %{"extensions" => %{extension => %{}}},
+  tool_presentation: present_tool
+)
+
+:ok = API.register_tool(server, "inventory", %{
+  description: "Show the current inventory count.",
+  handler: fn _arguments, _context -> {:ok, "There are three items in stock."} end
+})
+
+:ok = API.register_resource(server, uri, %{
+  name: "Inventory dashboard",
+  mime_type: mime_type,
+  handler: fn _input, _context ->
+    {:ok, %{
+      "uri" => uri,
+      "mimeType" => mime_type,
+      "text" => "<!doctype html><html lang='en'><title>Inventory</title><h1>Inventory</h1></html>",
+      "_meta" => %{"ui" => %{
+        "csp" => %{},
+        "permissions" => %{},
+        "prefersBorder" => true
+      }}
+    }}
+  end
+})
+```
+
+The tool returns meaningful text in both variants. The presentation callback
+adds the resource link per client, so a shared server can serve clients with
+different capabilities at the same time.
 
 ### Cache hints
 

@@ -667,6 +667,7 @@ defmodule AttestoMCP.Server.Stdio do
             context
             |> Map.put(:session_id, session_id)
             |> Map.put(:protocol_version, session.version)
+            |> Map.put(:client_capabilities, session.client_capabilities)
             |> Map.put(
               :legacy_session_state,
               if(is_nil(session.version), do: :unnegotiated, else: :negotiated)
