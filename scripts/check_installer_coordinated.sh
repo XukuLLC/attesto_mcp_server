@@ -307,7 +307,7 @@ digest_tree() {
     expected = [
       {:attesto, ">= 2.29.0 and < 3.0.0"},
       {:attesto_mcp, ">= 2.12.1 and < 3.0.0"},
-      {:attesto_phoenix, ">= 4.23.0 and < 5.0.0"}
+      {:attesto_phoenix, ">= 4.24.0 and < 5.0.0"}
     ]
 
     for {app, requirement} <- expected do

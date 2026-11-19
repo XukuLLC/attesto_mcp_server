@@ -12,7 +12,7 @@ defmodule OAuthHost.MixProject do
       family_dep(:attesto, ">= 2.28.0 and < 3.0.0", override: true),
       family_dep(:attesto_client, ">= 2.23.0 and < 3.0.0"),
       family_dep(:attesto_mcp, ">= 2.11.0 and < 3.0.0", override: true),
-      family_dep(:attesto_phoenix, ">= 4.23.0 and < 5.0.0"),
+      family_dep(:attesto_phoenix, ">= 4.24.0 and < 5.0.0"),
       {:attesto_mcp_server, path: Path.expand("../..", __DIR__)},
       {:phoenix, ">= 1.7.0 and < 2.0.0"},
       {:bandit, "~> 1.14", override: true, only: :test},

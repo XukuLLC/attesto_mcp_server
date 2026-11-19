@@ -4,6 +4,9 @@
 
 Requires `attesto_mcp >= 2.12.1 and < 3.0.0` (was `>= 2.12.0 and < 3.0.0`).
 AttestoMCP 2.12.1 makes the same change to `AttestoMCP.Plug.ProtectResource`.
+Version 3.12.0 also requires `jsv ~> 0.28.0` (was `~> 0.26.2`) and
+`idna ~> 8.0` (EEF-CVE-2026-117678). The installer requires
+`attesto_phoenix >= 4.24.0 and < 5.0.0`.
 
 ### Behavior change
 
@@ -25,6 +28,19 @@ and [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/ba
 
 Set `auth: [challenge_scopes: &AttestoMCP.Server.Plug.method_challenge_scopes/1]`
 to restore the 3.11.0 scope hint.
+
+`AttestoMCP.Server.Schema.validate/3` reports the specific `false` subschema
+message at the rejected property or item in normalized errors. The enclosing
+keyword reports that its subschema failed. Draft-07 tuple item errors include
+the item index in `schemaLocation`. Multiple failures inside `allOf` can now
+return the instance validation reason, including `{:additional_properties, keys}`
+and `{:unevaluated_properties, keys}`.
+
+### Security
+
+idna 8 checks the 63-octet DNS label limit before decoding Punycode, avoiding
+super-linear CPU use reachable through the `hostname` tool argument format.
+[EEF-CVE-2026-117678](https://osv.dev/vulnerability/EEF-CVE-2026-117678).
 
 ### Fixed
 

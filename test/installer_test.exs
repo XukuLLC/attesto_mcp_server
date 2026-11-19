@@ -370,11 +370,11 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     end
 
     assert diff =~
-             ~s({:attesto_phoenix, ">= 4.23.0 and < 5.0.0"})
+             ~s({:attesto_phoenix, ">= 4.24.0 and < 5.0.0"})
 
     phoenix_floor =
       true
-      |> project(attesto_phoenix_requirement: "== 4.23.0")
+      |> project(attesto_phoenix_requirement: "== 4.24.0")
       |> install(["--base-url", "https://mcp.example.com"])
 
     assert phoenix_floor.issues == []
@@ -386,7 +386,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       |> Rewrite.source!("mix.exs")
       |> Rewrite.Source.get(:content)
 
-    floor_dep = ~s({:attesto_phoenix, "== 4.23.0"})
+    floor_dep = ~s({:attesto_phoenix, "== 4.24.0"})
     assert length(:binary.matches(phoenix_floor_mix, floor_dep)) == 1
     assert phoenix_floor_mix =~ floor_dep
 
@@ -404,7 +404,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       |> Rewrite.source!("mix.exs")
       |> Rewrite.Source.get(:content)
 
-    supported_dep = ~s({:attesto_phoenix, ">= 4.23.0 and < 5.0.0"})
+    supported_dep = ~s({:attesto_phoenix, ">= 4.24.0 and < 5.0.0"})
     assert length(:binary.matches(phoenix_four_mix, supported_dep)) == 1
     assert phoenix_four_mix =~ supported_dep
 
@@ -425,7 +425,7 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
     assert length(
              :binary.matches(
                phoenix_ceiling_mix,
-               ~s({:attesto_phoenix, ">= 4.23.0 and < 5.0.0"})
+               ~s({:attesto_phoenix, ">= 4.24.0 and < 5.0.0"})
              )
            ) == 1
 
@@ -502,16 +502,17 @@ defmodule Mix.Tasks.AttestoMcpServer.InstallTest do
       [attesto_phoenix_requirement: "< 4.22.0"],
       [attesto_phoenix_requirement: "== 4.22.0"],
       [attesto_phoenix_requirement: "== 4.22.1"],
-      [attesto_phoenix_requirement: "< 4.23.0"],
+      [attesto_phoenix_requirement: "== 4.23.0"],
+      [attesto_phoenix_requirement: "< 4.24.0"],
       [attesto_phoenix_requirement: "~> 5.0"],
       [
         attesto_phoenix_dependency:
-          ~s({:attesto_phoenix, ">= 4.23.0 and < 5.0.0", ) <>
+          ~s({:attesto_phoenix, ">= 4.24.0 and < 5.0.0", ) <>
             ~s(git: "https://example.com/attesto_phoenix.git"})
       ],
       [
         attesto_phoenix_dependency:
-          ~s({:attesto_phoenix, ">= 4.23.0 and < 5.0.0", path: "../attesto_phoenix"})
+          ~s({:attesto_phoenix, ">= 4.24.0 and < 5.0.0", path: "../attesto_phoenix"})
       ]
     ]
 

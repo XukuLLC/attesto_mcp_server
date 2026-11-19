@@ -47,7 +47,7 @@ principal loader before reading the request body; it does not duplicate or
 reconfigure those responsibilities. There is no hard dependency from this
 package to `attesto_phoenix`.
 
-With `attesto_phoenix >= 4.23.0 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.24.0 and < 5.0.0`, one Phoenix host can serve
 multiple named profiles. It binds each automatic protected-resource callback
 to the named profile loaded from the `otp_app` passed to the helper, keeping
 those profiles isolated. It does not select a profile from `conn.private`.
@@ -189,7 +189,7 @@ table. Review the generated notice and host migration status before enabling
 CIMD.
 
 This path supports direct public-Hex `attesto_phoenix` requirements that
-overlap `>= 4.23.0 and < 5.0.0` and Req requirements that overlap
+overlap `>= 4.24.0 and < 5.0.0` and Req requirements that overlap
 `>= 0.6.1 and < 1.0.0`. Existing stable requirements are narrowed to their
 intersection, which must contain at least one stable release; pre-release-only
 matches are intentionally rejected. The task accepts only the public packages

@@ -39,7 +39,9 @@ defmodule AttestoMCP.Server.MixProject do
       {:jose, ">= 1.11.13 and < 2.0.0"},
       {:plug, ">= 1.20.4 and < 2.0.0"},
       {:jason, "~> 1.4"},
-      {:jsv, "~> 0.26.2"},
+      {:jsv, "~> 0.28.0"},
+      # EEF-CVE-2026-117678: require idna's fix for overlong Punycode labels.
+      {:idna, "~> 8.0"},
       {:telemetry, "~> 1.2"},
       # Optional: only needed by AttestoMCP.Server.SessionStore.Ecto. ETS is
       # the built-in default, so non-Ecto consumers do not pull persistence

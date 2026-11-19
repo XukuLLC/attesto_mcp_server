@@ -353,10 +353,42 @@ defmodule AttestoMCP.Server.SchemaTest do
            {:any, :mismatch}},
           {%{"b" => 2, "c" => 3}, %{"additionalProperties" => false},
            {:additional_properties, ["b", "c"]}},
+          {%{"item" => %{"z" => true, "a" => true}},
+           %{"allOf" => [%{"properties" => %{"item" => %{"additionalProperties" => false}}}]},
+           {:additional_properties, ["a", "z"]}},
+          {%{"item" => %{"present" => true}},
+           %{"properties" => %{"item" => %{"required" => ["present", "missing"]}}},
+           {:required, ["missing"]}},
           {%{"b" => 2}, %{"unevaluatedProperties" => false}, {:unevaluated_properties, ["b"]}}
         ] do
       assert {:error, ^reason} = Schema.validate(value, schema)
     end
+  end
+
+  test "conditional errors report a false subschema at the rejected property" do
+    schema = %{"if" => true, "then" => %{"additionalProperties" => false}}
+
+    assert {:error, {:schema_validation, %{details: [%{errors: [conditional]}]}}} =
+             Schema.validate(%{"bad/key" => true}, schema)
+
+    assert %{
+             kind: :"if/then",
+             details: [
+               %{
+                 instanceLocation: "#/bad~1key",
+                 schemaLocation: "#/then/additionalProperties",
+                 errors: [
+                   %{
+                     kind: :boolean_schema,
+                     message:
+                       "additional properties are not allowed but found property 'bad/key'",
+                     ctx: %{property: "bad/key"}
+                   }
+                 ]
+               }
+               | _
+             ]
+           } = conditional
   end
 
   test "applies dialect rules and evaluated annotations only from successful applicators" do

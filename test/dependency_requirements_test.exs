@@ -53,18 +53,29 @@ defmodule AttestoMCP.Server.DependencyRequirementsTest do
     end
   end
 
-  # GHSA-cvmg-hgv6-jqcp / CVE-2026-117680: every JSV release before 0.26.2
-  # reports a regex whose backtracking budget ran out as a non-match, which
-  # `not`, `anyOf`, `oneOf`, `if` and `contains` invert into acceptance.
-  test "JSV requires the 0.26.2 security floor and stays on the 0.26 line" do
+  test "JSV requires 0.28.0 and stays on the 0.28 line" do
     {:jsv, requirement} = dependency!(:jsv)
 
-    for version <- ~w(0.26.2 0.26.99) do
+    for version <- ~w(0.28.0 0.28.99) do
       assert Version.match?(version, requirement),
              "expected #{inspect(requirement)} to admit #{version}"
     end
 
-    for version <- ~w(0.24.0 0.25.0 0.25.99 0.26.0 0.26.1 0.27.0) do
+    for version <- ~w(0.27.0 0.29.0) do
+      refute Version.match?(version, requirement),
+             "expected #{inspect(requirement)} to reject #{version}"
+    end
+  end
+
+  test "idna requires the patched floor and stays on the 8.x line" do
+    {:idna, requirement} = dependency!(:idna)
+
+    for version <- ~w(8.0.0 8.99.0) do
+      assert Version.match?(version, requirement),
+             "expected #{inspect(requirement)} to admit #{version}"
+    end
+
+    for version <- ~w(7.1.0 9.0.0) do
       refute Version.match?(version, requirement),
              "expected #{inspect(requirement)} to reject #{version}"
     end

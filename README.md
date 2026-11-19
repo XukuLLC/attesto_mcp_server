@@ -70,7 +70,7 @@ The [CHANGELOG](CHANGELOG.md) has the full 3.0 entry.
 
 Run this inside the Phoenix child application—not an umbrella root—with
 Igniter available and `attesto_phoenix` declared directly from Hex at a
-version compatible with `>= 4.23.0 and < 5.0.0`:
+version compatible with `>= 4.24.0 and < 5.0.0`:
 
 ```sh
 mix igniter.install attesto_mcp_server --base-url https://mcp.example.com
@@ -94,7 +94,7 @@ The installer:
   narrower cases that still need manual verification; and
 - adds a starter `server_status` tool and registration test.
 
-With `attesto_phoenix >= 4.23.0 and < 5.0.0`, one Phoenix host can serve
+With `attesto_phoenix >= 4.24.0 and < 5.0.0`, one Phoenix host can serve
 multiple named authorization profiles. The automatic integration keeps each
 profile's runtime callbacks isolated.
 

@@ -1,6 +1,17 @@
-# Historical production dependency inventory (2.3.0 evidence)
+# Production dependency inventory
 
-This document is frozen evidence for the 2.3.0 release. It is not the current
+## 3.12.0 dependency changes
+
+The 3.12.0 lock update changed these two entries.
+
+| Component | Resolved version | License policy | Production path |
+|---|---:|---|---|
+| jsv | 0.28.0 | Apache-2.0 | direct |
+| idna | 8.0.0 | MIT | direct; jsv |
+
+## Historical production dependency inventory (2.3.0 evidence)
+
+This section is frozen evidence for the 2.3.0 release. It is not the current
 2.7.0 dependency inventory or an evergreen SBOM. The declared ranges in
 `mix.exs`, the release package metadata, and the consumer's resolved dependency
 graph are authoritative for 2.7.0.

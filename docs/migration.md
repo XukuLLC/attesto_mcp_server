@@ -24,10 +24,12 @@ to restore the 3.11.0 hint. Set `challenge_scopes: []` in `:auth` to omit the
 hint explicitly. A `403 insufficient_scope` challenge still names the required
 scopes.
 
-Version 3.12 requires `attesto_mcp >= 2.12.1 and < 3.0.0`. No storage
-migration is needed, and 3.11 and 3.12 nodes can serve side by side during a
-rolling deploy; clients that connect to a 3.11 node during the deploy still
-see the scope hint.
+Version 3.12 requires `attesto_mcp >= 2.12.1 and < 3.0.0`, `jsv ~> 0.28.0`,
+and `idna ~> 8.0`. The installer requires `attesto_phoenix >= 4.24.0 and < 5.0.0`.
+
+No storage migration is needed, and 3.11 and 3.12 nodes can serve side by side
+during a rolling deploy; clients that connect to a 3.11 node during the deploy
+still see the scope hint.
 
 ## 3.11 dependency floors and sampling
 

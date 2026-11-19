@@ -818,10 +818,7 @@ defmodule AttestoMCP.Server.Schema do
       nested = Keyword.get(error.args, :invalidated, [])
 
       children =
-        Enum.flat_map(nested, fn
-          {_index, %{errors: children}} -> flatten_errors(children)
-          _ -> []
-        end)
+        Enum.flat_map(nested, fn {_index, children} -> flatten_errors(List.flatten(children)) end)
 
       [error | children]
     end)
@@ -832,10 +829,9 @@ defmodule AttestoMCP.Server.Schema do
     structural = Enum.find(errors, &(&1.kind in [:anyOf, :oneOf, :not]))
 
     additional =
-      Enum.filter(
-        flattened,
-        &(&1.kind == :additionalProperties and Keyword.get(&1.args, :boolean_schema_false))
-      )
+      for %{kind: :boolean_schema, args: args} <- flattened,
+          args[:keyword] == :additionalProperties,
+          do: args[:key]
 
     error = structural || Enum.find(flattened, &unevaluated_error?/1) || List.last(flattened)
 
@@ -844,8 +840,7 @@ defmodule AttestoMCP.Server.Schema do
         compatible_validation_reason(structural, flattened, errors)
 
       additional != [] ->
-        {:additional_properties,
-         additional |> Enum.map(&Keyword.get(&1.args, :key)) |> Enum.uniq() |> Enum.sort()}
+        {:additional_properties, additional |> Enum.uniq() |> Enum.sort()}
 
       true ->
         compatible_validation_reason(error, flattened, errors)

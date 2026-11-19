@@ -96,6 +96,28 @@ defmodule AttestoMCP.Server.SchemaFormatPolicyTest do
     end
   end
 
+  test "tool calls validate hostnames with Punycode labels" do
+    {:ok, server} = Server.start_link([])
+
+    :ok =
+      Server.register_tool(server, "lookup", %{
+        input_schema: field_schema("hostname"),
+        handler: fn _, _ -> {:ok, "called"} end
+      })
+
+    assert {1, %{"result" => %{"isError" => false}}} =
+             call(server, 1, "lookup", %{"arguments" => %{"value" => "xn--bcher-kva.example"}})
+
+    assert {2,
+            %{
+              "error" => %{
+                "code" => -32602,
+                "message" => "Invalid params",
+                "data" => %{"reason" => "tool_arguments_invalid"}
+              }
+            }} = call(server, 2, "lookup", %{"arguments" => %{"value" => "bad domain.example"}})
+  end
+
   test "accepted elicitation form content always asserts its declared formats" do
     {:ok, server} = Server.start_link(schema_formats: false)
 
