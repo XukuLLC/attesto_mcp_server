@@ -32,13 +32,18 @@ defmodule AttestoMCP.Server.Plug do
   entries are validated at initialization, and resolver entries at resolution.
   The request and configured origins are normalized before comparison.
 
-  Built-in 401 challenges advertise the configured scopes for a recognized
-  2026-07-28 `Mcp-Method`. Methods under a `:scope_policy` carry no `scope`,
-  because their scopes depend on the tool or resource, and the challenge
-  does not reveal which definitions exist; the 403 after authentication names
-  them. Legacy requests and unrecognized or invalid selections use the
-  `initialize` scopes. A host's `:www_authenticate` callback controls its
-  challenge.
+  Built-in 401 challenges omit `scope` by default. Under the MCP authorization
+  scope selection strategy, clients then request the `scopes_supported` from
+  Protected Resource Metadata. In `:auth`, set `:challenge_scopes` to a list of
+  RFC 6749 §3.3 scope tokens or a one-arity function receiving the connection.
+  An empty list, an invalid callback result, or a callback failure omits `scope`.
+  A host's `:www_authenticate` callback controls the entire challenge.
+
+  Set `auth: [challenge_scopes: &AttestoMCP.Server.Plug.method_challenge_scopes/1]`
+  to advertise method scopes as in 3.11.0. Clients that request exactly the
+  challenge's scope receive only the method's minimum. When a server filters
+  listings by scope, those clients cannot see hidden tools and receive no
+  `403 insufficient_scope` for them to trigger step-up authorization.
 
   `allow_dynamic_origin: true` derives the resource origin from each request's
   `Host` header and exists only for local development. In that mode the Plug
@@ -151,7 +156,16 @@ defmodule AttestoMCP.Server.Plug do
     :stream_tools
   ]
 
-  @typedoc "Supported Plug boundary options."
+  @typedoc """
+  A runtime resolver for the Plug's `:auth` keyword list.
+
+  In static and resolved `:auth` lists, `:challenge_scopes` accepts RFC 6749
+  §3.3 scope tokens as a list or a one-arity function receiving a `Plug.Conn`.
+  The default `[]` omits `scope` from built-in 401 challenges. Use
+  `&AttestoMCP.Server.Plug.method_challenge_scopes/1` to advertise method
+  minima. Clients that request those minima miss tools hidden by scope and
+  receive no 403 challenge for those tools to trigger step-up.
+  """
   @type auth_options_resolver ::
           (-> keyword())
           | {module(), atom()}
@@ -163,6 +177,7 @@ defmodule AttestoMCP.Server.Plug do
   @typedoc "Per-method opt-ins to definition-based HTTP authorization."
   @type scope_policy :: %{optional(String.t()) => scope_policy_mode()}
 
+  @typedoc "Supported Plug boundary options."
   @type plug_option ::
           {:server, pid() | atom()}
           | {:path, String.t()}
@@ -508,6 +523,7 @@ defmodule AttestoMCP.Server.Plug do
   defp validate_auth_options!(auth_opts) do
     validate_auth_assign_keys!(auth_opts)
     validate_scope_list_option!(auth_opts, :scopes_supported, allow_empty: false)
+    validate_challenge_scopes!(auth_opts)
     validate_resource_configuration!(auth_opts)
     validate_allowed_hosts!(auth_opts)
 
@@ -523,6 +539,17 @@ defmodule AttestoMCP.Server.Plug do
     end
 
     :ok
+  end
+
+  defp validate_challenge_scopes!(auth_opts) do
+    case Keyword.get(auth_opts, :challenge_scopes, []) do
+      value when is_list(value) or is_function(value, 1) ->
+        Attesto.Plug.OAuthError.validate_challenge_scopes!(auth_opts)
+
+      _value ->
+        raise ArgumentError,
+              ":challenge_scopes must be a list of RFC 6749 scope tokens or a one-arity function"
+    end
   end
 
   defp validate_allowed_hosts!(auth_opts) do
@@ -851,22 +878,55 @@ defmodule AttestoMCP.Server.Plug do
   end
 
   defp maybe_put_unauthorized_challenge(conn, state) do
-    if not Keyword.has_key?(state.auth_opts, :www_authenticate) and
-         (anonymous_authentication?(conn, state.auth_opts) or
-            get_resp_header(conn, "www-authenticate") == []) do
-      metadata = {"resource_metadata", metadata_url(conn, state.auth_opts)}
-      scopes = conn |> put_challenge_policy(state) |> challenge_scopes()
+    challenges = get_resp_header(conn, "www-authenticate")
 
-      params =
-        if scopes == [], do: [metadata], else: [metadata, {"scope", Enum.join(scopes, " ")}]
+    if not Keyword.has_key?(state.auth_opts, :www_authenticate) and
+         (anonymous_authentication?(conn, state.auth_opts) or challenges == []) do
+      metadata = {"resource_metadata", metadata_url(conn, state.auth_opts)}
+      scope = unauthorized_challenge_scope(conn, state, challenges)
 
       put_resp_header(
         conn,
         "www-authenticate",
-        Attesto.Plug.OAuthError.format_challenge(:bearer, params)
+        Attesto.Plug.OAuthError.format_challenge(:bearer, [metadata | scope])
       )
     else
       conn
+    end
+  end
+
+  defp unauthorized_challenge_scope(conn, state, challenges) do
+    if AuthOutcome.refusal(conn) == :verifier_failure or challenges == [] do
+      fallback_challenge_scope(conn, state)
+    else
+      anonymous_challenge_scope(challenges)
+    end
+  end
+
+  # The authentication boundary has already resolved and validated the scope.
+  # Preserve its final auth-param while replacing the anonymous challenge.
+  defp anonymous_challenge_scope([challenge]) do
+    case Regex.run(~r/, scope="([^"]+)"\z/, challenge, capture: :all_but_first) do
+      [scopes] -> [{"scope", scopes}]
+      nil -> []
+    end
+  end
+
+  defp anonymous_challenge_scope(_challenges), do: []
+
+  # A verifier failure can come from a host scope callback. The static list
+  # and server method hint can still be rendered without retrying that callback.
+  defp fallback_challenge_scope(conn, state) do
+    method_hint = &__MODULE__.method_challenge_scopes/1
+
+    case state.auth_opts[:challenge_scopes] do
+      ^method_hint -> conn |> put_challenge_policy(state) |> method_challenge_scopes()
+      scopes when is_list(scopes) -> scopes
+      _callback_or_default -> []
+    end
+    |> case do
+      [] -> []
+      scopes -> [{"scope", Enum.join(scopes, " ")}]
     end
   end
 
@@ -882,8 +942,22 @@ defmodule AttestoMCP.Server.Plug do
     put_private(conn, @challenge_policy_private, {opts, state.opts[:scope_policy]})
   end
 
-  @doc false
-  def challenge_scopes(%{private: %{@challenge_policy_private => {opts, policy}}} = conn) do
+  @doc """
+  Returns the configured method scopes for a built-in 401 challenge.
+
+  Opt in with `auth: [challenge_scopes: &AttestoMCP.Server.Plug.method_challenge_scopes/1]`.
+  A recognized MCP 2026-07-28 `Mcp-Method` selects that method's scopes.
+  Legacy requests and requests without a valid method selection use the
+  `initialize` scopes. Definition-scoped methods and connections without
+  the server's challenge policy return `[]`.
+
+  Clients that request exactly the challenge's scope get the method's minimum.
+  When a server filters listings by scope, those clients cannot see hidden
+  tools and receive no `403 insufficient_scope` for them to trigger step-up
+  authorization.
+  """
+  @spec method_challenge_scopes(Plug.Conn.t()) :: [String.t()]
+  def method_challenge_scopes(%{private: %{@challenge_policy_private => {opts, policy}}} = conn) do
     scopes =
       with {:ok, @modern} <- required_header(conn, "mcp-protocol-version"),
            {:ok, method} <- required_header(conn, "mcp-method"),
@@ -896,7 +970,7 @@ defmodule AttestoMCP.Server.Plug do
     if Attesto.Scope.valid_list?(scopes), do: scopes, else: []
   end
 
-  def challenge_scopes(_conn), do: []
+  def method_challenge_scopes(_conn), do: []
 
   # A definition-scoped policy sets scopes per tool or resource. They are not
   # looked up for a challenge: the request is unauthenticated, and the answer
@@ -1338,7 +1412,7 @@ defmodule AttestoMCP.Server.Plug do
     |> Keyword.delete(:resource_audience)
     |> Keyword.put(:resource_path, endpoint_path)
     |> maybe_put_public_audience(audience)
-    |> Keyword.put(:challenge_scopes, &__MODULE__.challenge_scopes/1)
+    |> Keyword.put_new(:challenge_scopes, [])
     |> Keyword.put(:send_error, &__MODULE__.attesto_send_error/3)
     |> AttestoMCP.Plug.ProtectResource.prepare()
   end

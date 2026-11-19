@@ -8,6 +8,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
 
   @resource "https://mcp.example.com/mcp"
   @version "2026-07-28"
+  @method_challenge_scopes &Server.Plug.method_challenge_scopes/1
 
   setup do
     {:ok, server} =
@@ -26,7 +27,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     plug =
       Server.Plug.init(
         server: server,
-        auth: [config: config, resource: @resource],
+        auth: [config: config, resource: @resource, challenge_scopes: @method_challenge_scopes],
         scope_map: %{"initialize" => ["open"], "tools/call" => ["tools:run", "tools:inspect"]}
       )
 
@@ -80,7 +81,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     plug =
       Server.Plug.init(
         server: server,
-        auth: [config: config, resource: @resource],
+        auth: [config: config, resource: @resource, challenge_scopes: @method_challenge_scopes],
         scope_map: %{"initialize" => ["open"]},
         scope_policy: %{
           "tools/call" => :selected_definition,
@@ -116,7 +117,12 @@ defmodule AttestoMCP.Server.PlugAuthTest do
         Server.Plug.init(
           server: server,
           scope_map: %{"initialize" => ["open"]},
-          auth: [config: config, resource: @resource, www_authenticate: hook]
+          auth: [
+            config: config,
+            resource: @resource,
+            www_authenticate: hook,
+            challenge_scopes: @method_challenge_scopes
+          ]
         )
 
       response = challenge(plug, credential)
@@ -140,7 +146,7 @@ defmodule AttestoMCP.Server.PlugAuthTest do
     plug =
       Server.Plug.init(
         server: server,
-        auth: [config: config, resource: @resource],
+        auth: [config: config, resource: @resource, challenge_scopes: @method_challenge_scopes],
         default_scopes: ["invalid scope"]
       )
 

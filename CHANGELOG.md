@@ -1,5 +1,40 @@
 # Changelog
 
+## [3.12.0] - 2026-11-19
+
+Requires `attesto_mcp >= 2.12.1 and < 3.0.0` (was `>= 2.12.0 and < 3.0.0`).
+AttestoMCP 2.12.1 makes the same change to `AttestoMCP.Plug.ProtectResource`.
+
+### Behavior change
+
+Built-in 401 challenges omit `scope` by default. The first line shows the
+3.11.0 anonymous challenge, and the second shows the 3.12.0 challenge.
+
+```http
+WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="mcp:tools"
+WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+Clients that requested exactly the challenge's scope got narrower grants in
+3.11.0. When a server filters listings by scope, those clients cannot see
+hidden tools and receive no `403 insufficient_scope` for them to trigger
+step-up authorization. Clients now fall back to `scopes_supported` from
+Protected Resource Metadata under the MCP scope selection strategy.
+[MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#scope-selection-strategy)
+and [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#scope-selection-strategy).
+
+Set `auth: [challenge_scopes: &AttestoMCP.Server.Plug.method_challenge_scopes/1]`
+to restore the 3.11.0 scope hint.
+
+### Fixed
+
+- 3.11.0 replaced a host's `auth: [challenge_scopes: …]` with the server's
+  method callback. 3.12.0 honors the host's setting, including `[]`.
+
+### Added
+
+- `AttestoMCP.Server.Plug.method_challenge_scopes/1`.
+
 ## [3.11.0] - 2026-11-17
 
 Requires `attesto_mcp >= 2.12.0 and < 3.0.0` (was `>= 2.11.0 and < 3.0.0`),
@@ -16,6 +51,8 @@ which requires `attesto >= 2.29.0 and < 3.0.0`.
   401 challenges (MCP 2025-11-25 and 2026-07-28 authorization, scope
   selection). Methods under `:scope_policy` carry no `scope`, so an
   unauthenticated request cannot learn which tools or resources exist.
+  Not flagged at release: this changed what clients request at
+  authorization. 3.12.0 turns it off by default.
 - `AttestoMCP.Server.Plug` accepts additional browser origins under
   `:allowed_origins` in `:auth`, checked with the same rule as
   `AttestoMCP.Plug.Authenticate`. A configured `:www_authenticate` hook

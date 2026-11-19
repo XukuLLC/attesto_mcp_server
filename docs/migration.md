@@ -1,5 +1,34 @@
 # Migration runbook
 
+## 3.12 challenge scope
+
+3.12.0 omits `scope` from built-in 401 challenges by default. An anonymous
+challenge with `mcp:tools` configured for `initialize` appeared as the first
+line in 3.11.0 and appears as the second line in 3.12.0.
+
+```http
+WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="mcp:tools"
+WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+Clients that used the 3.11.0 hint requested only the method's minimum. When
+a server filters listings by scope, clients cannot see tools outside their
+grant and receive no `403 insufficient_scope` for them to trigger step-up
+authorization. Clients following the MCP scope selection strategy now request
+all `scopes_supported` from Protected Resource Metadata.
+[MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#scope-selection-strategy)
+and [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#scope-selection-strategy).
+
+Set `auth: [challenge_scopes: &AttestoMCP.Server.Plug.method_challenge_scopes/1]`
+to restore the 3.11.0 hint. Set `challenge_scopes: []` in `:auth` to omit the
+hint explicitly. A `403 insufficient_scope` challenge still names the required
+scopes.
+
+Version 3.12 requires `attesto_mcp >= 2.12.1 and < 3.0.0`. No storage
+migration is needed, and 3.11 and 3.12 nodes can serve side by side during a
+rolling deploy; clients that connect to a 3.11 node during the deploy still
+see the scope hint.
+
 ## 3.11 dependency floors and sampling
 
 Version 3.11 requires `attesto_mcp >= 2.12.0 and < 3.0.0`, which requires

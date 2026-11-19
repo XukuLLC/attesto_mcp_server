@@ -881,7 +881,17 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
     {:ok, server} = Server.start_link(session_idle_timeout: 60_000)
     config = AttestoMCP.Test.Factory.config()
     token = AttestoMCP.Test.Factory.access_token(config, scopes: AttestoMCP.Scopes.all())
-    plug = plug(server, config)
+
+    plug =
+      Server.Plug.init(
+        server: server,
+        scope_map: %{"initialize" => [AttestoMCP.Scopes.tools_call()]},
+        auth: [
+          config: config,
+          resource: @resource,
+          challenge_scopes: &Server.Plug.method_challenge_scopes/1
+        ]
+      )
 
     missing_post =
       conn(:post, "/mcp", Jason.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}))
@@ -890,7 +900,8 @@ defmodule AttestoMCP.Server.LegacyPlugTest do
       |> AttestoMCP.Server.Plug.call(plug)
 
     assert missing_post.status == 401
-    assert get_resp_header(missing_post, "www-authenticate") != []
+    assert [challenge] = get_resp_header(missing_post, "www-authenticate")
+    assert challenge =~ ~s(scope="mcp:tools:call")
 
     missing_get =
       conn(:get, "/mcp")

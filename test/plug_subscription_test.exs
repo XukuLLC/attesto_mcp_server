@@ -192,8 +192,19 @@ defmodule AttestoMCP.Server.PlugSubscriptionTest do
         server: server,
         path: "/mcp",
         scope_map: %{"subscriptions/listen" => ["mcp:subscriptions:read"]},
-        auth: [config: config, resource: @resource]
+        auth: [
+          config: config,
+          resource: @resource,
+          challenge_scopes: &Server.Plug.method_challenge_scopes/1
+        ]
       )
+
+    invalid =
+      configured_plug |> listen_conn("invalid", 92, %{}) |> Server.Plug.call(configured_plug)
+
+    assert invalid.status == 401
+    assert [challenge] = get_resp_header(invalid, "www-authenticate")
+    assert challenge =~ ~s(scope="mcp:subscriptions:read")
 
     configured =
       AttestoMCP.Test.Factory.access_token(config, scopes: [AttestoMCP.Scopes.tools_read()])

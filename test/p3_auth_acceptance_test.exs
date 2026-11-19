@@ -39,7 +39,7 @@ defmodule AttestoMCP.Server.P3AuthAcceptanceTest do
                end
              })
 
-    plug = plug(server, config)
+    plug = plug(server, config, challenge_scopes: &Server.Plug.method_challenge_scopes/1)
 
     denied = http_call(plug, nil, "tools/call", %{"name" => "auth_context", "arguments" => %{}})
     assert denied.status == 401
@@ -47,6 +47,8 @@ defmodule AttestoMCP.Server.P3AuthAcceptanceTest do
 
     assert challenge =~
              ~s(Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp")
+
+    assert challenge =~ ~s(scope="mcp:tools:call")
 
     refute_receive {:auth_context, _}
 

@@ -494,7 +494,7 @@ dependency:
 ```elixir
 defp deps do
   [
-    {:attesto_mcp_server, "~> 3.11"},
+    {:attesto_mcp_server, "~> 3.12"},
     {:bandit, "~> 1.6"}
   ]
 end
@@ -604,14 +604,26 @@ static entries at init and resolver entries when resolving the options. It
 normalizes configured and request origins before comparison. The Host
 allowlist still applies in dynamic-origin mode.
 
-Built-in 401 challenges advertise the configured scopes for a recognized
-2026-07-28 `Mcp-Method` and, for a selected definition, its primary required
-scopes from `Mcp-Name`. A visible-definition list has no method-level scopes.
-For requests without a valid operation selection, the challenge uses the
-`initialize` scopes. An empty scope list omits the parameter. A host's
-`:www_authenticate` hook controls its challenge.
+Built-in 401 challenges omit `scope` by default. Clients following the MCP
+scope selection strategy then request every entry in `scopes_supported`
+from Protected Resource Metadata.
+[MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#scope-selection-strategy)
+and [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#scope-selection-strategy).
 
-The package requires `attesto_mcp >= 2.12.0 and < 3.0.0` and calls the public
+Set `:challenge_scopes` in `:auth` to a list of RFC 6749 §3.3 scope tokens or
+a one-arity function that receives the connection and returns that list.
+An empty list, an invalid callback result, or a callback failure omits `scope`.
+A host's `:www_authenticate` callback controls the entire challenge.
+
+Set `auth: [challenge_scopes: &AttestoMCP.Server.Plug.method_challenge_scopes/1]`
+to advertise the scopes of a recognized 2026-07-28 `Mcp-Method` as in 3.11.0.
+Legacy requests and requests without a valid method selection use the
+`initialize` scopes. Definition-scoped methods omit `scope`. Clients that
+request exactly the hint receive only the method's minimum. On a server that
+filters listings by scope, they cannot see hidden tools and receive no
+`403 insufficient_scope` for them to trigger step-up authorization.
+
+The package requires `attesto_mcp >= 2.12.1 and < 3.0.0` and calls the public
 `ProtectResource.prepare/1`, `authenticate/2`, and `authorize/3` contract
 directly. It shares the Origin check with
 `AttestoMCP.Plug.Authenticate.origin_allowed?/2`.
